@@ -1,0 +1,7 @@
+# Python / Jupyter
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Claude Code等のAIツールの履歴があれば（任意）
+.claude/
