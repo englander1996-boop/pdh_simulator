@@ -135,45 +135,45 @@ class ThermoParams:
 # dHf_298 は kJ/mol で与えられた値を * 1_000 により J/mol に変換
 THERMO_DATA: Dict[str, ThermoParams] = {
     "A": ThermoParams(          # Propane   (C3H8)
-        dHf_298 = -103.9 * 1_000,  # [J mol⁻¹]  (-103.9 kJ/mol → J)
-        a =  -4.225,
-        b =   3.06e-1,
-        c =  -1.59e-4,
-        d =   3.22e-9,
+        dHf_298 = -103.85 * 1_000,  # [J mol⁻¹]  (-103.85 kJ/mol → J)
+        a =  -4.224,
+        b =   3.063e-1,
+        c =  -1.586e-4,
+        d =   3.215e-8,
     ),
     "B": ThermoParams(          # Propylene (C3H6)
-        dHf_298 =  20.4 * 1_000,   # [J mol⁻¹]  (20.4 kJ/mol → J)
-        a =   3.71,
-        b =   2.35e-1,
+        dHf_298 =  20.41 * 1_000,  # [J mol⁻¹]  (20.41 kJ/mol → J)
+        a =   3.710,
+        b =   2.345e-1,
         c =  -1.16e-4,
-        d =   2.21e-8,
+        d =   2.205e-8,
     ),
     "C": ThermoParams(          # Hydrogen  (H2)
         dHf_298 =   0.0 * 1_000,   # [J mol⁻¹]  (0.0 kJ/mol → J)
-        a =  27.144,
-        b =   9.27e-3,
-        c =  -1.38e-5,
-        d =   7.65e-9,
+        a =  27.140,
+        b =   9.274e-3,
+        c =  -1.381e-5,
+        d =   7.645e-9,
     ),
     "D": ThermoParams(          # Ethylene  (C2H4)
-        dHf_298 =  52.3 * 1_000,   # [J mol⁻¹]  (52.3 kJ/mol → J)
+        dHf_298 =  52.28 * 1_000,  # [J mol⁻¹]  (52.28 kJ/mol → J)
         a =   3.806,
-        b =   1.57e-1,
-        c =  -8.35e-5,
-        d =  -1.13e-8,
+        b =   1.566e-1,
+        c =  -8.348e-5,
+        d =   1.755e-8,
     ),
     "E": ThermoParams(          # Methane   (CH4)
-        dHf_298 = -74.9 * 1_000,   # [J mol⁻¹]  (-74.9 kJ/mol → J)
-        a =  19.252,
-        b =   5.21e-2,
-        c =   1.20e-5,
-        d =  -1.13e-8,
+        dHf_298 = -74.85 * 1_000,  # [J mol⁻¹]  (-74.85 kJ/mol → J)
+        a =  19.250,
+        b =   5.213e-2,
+        c =   1.197e-5,
+        d =  -1.132e-8,
     ),
     "F": ThermoParams(          # Ethane    (C2H6)
-        dHf_298 = -84.7 * 1_000,   # [J mol⁻¹]  (-84.7 kJ/mol → J)
-        a =   5.41,
-        b =   1.78e-1,
-        c =  -6.94e-5,
-        d =   8.71e-9,
+        dHf_298 = -84.67 * 1_000,  # [J mol⁻¹]  (-84.67 kJ/mol → J)
+        a =   5.410,
+        b =   1.781e-1,
+        c =  -6.938e-5,
+        d =   8.713e-9,
     ),
 }
