@@ -14,6 +14,7 @@ PDH スイング反応器システム シミュレーター
 import math
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 from typing import Dict
 
@@ -26,9 +27,11 @@ if _ROOT not in sys.path:
 
 from src.config import THERMO_DATA
 from src.thermo import PDHThermo
+from src.kinetics import PDHKinetics
 from src.catalyst_model import calculate_activity_a
 
 _thermo = PDHThermo()
+_kinetics = PDHKinetics()
 
 # 成分順序（状態ベクトルのインデックスと対応）
 _COMPS = ['C3H8', 'C3H6', 'H2', 'C2H4', 'CH4', 'C2H6']
@@ -69,26 +72,18 @@ def calc_Cp(T: float) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# 反応速度定数・平衡定数（ダミー固定値）
-# ---------------------------------------------------------------------------
-# 外部物性計算関数が用意できたら calc_rate_constants の中身を差し替えること。
-# 差し替え手順:
-#   1. 外部関数 get_rate_constants(T) を実装
-#   2. 下記の固定値辞書を `return get_rate_constants(T)` に置き換える
-#   3. ダミー定数 _DUMMY_RC は削除して構わない
-_DUMMY_RC: dict = {
-    'k1':   9.787e-5,  # [mol m⁻³ s⁻¹ Pa⁻¹]  T=793K 基準値（config.py k01）
-    'k2':   8.682e-7,  # [mol m⁻³ s⁻¹ Pa⁻¹]  T=793K 基準値（config.py k02）
-    'k3':   4.406e-8,  # [mol m⁻³ s⁻¹ Pa⁻²]  T=793K 基準値（config.py k03）
-    'K_B':  3.46e5,    # [Pa]                  T=793K 基準値（config.py K0）
-    'K_eq': 2.0e4,     # [Pa]                  概算固定値（要後日実装）
-}
+_K_EQ_DUMMY: float = 2.0e4  # [Pa] 概算固定値（要後日実装）
 
 
 def calc_rate_constants(T: float) -> dict:
-    """反応速度定数・平衡定数の辞書（ダミー固定値）。差し替え対象。"""
-    return _DUMMY_RC
+    """反応速度定数・平衡定数の辞書を返す。k1/k2/k3/K_B はアレニウス式で温度依存。"""
+    return {
+        'k1':   _kinetics._k1(T),
+        'k2':   _kinetics._k2(T),
+        'k3':   _kinetics._k3(T),
+        'K_B':  _kinetics._K_B(T),
+        'K_eq': _K_EQ_DUMMY,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +115,19 @@ class FixedParams:
     V_cat_max_per_vessel: float = 200.0   # 1基最大触媒量 [m³]
     eps:                  float = 0.5     # 空隙率 [-]
     rho_p:                float = 400.0   # 触媒充填密度 [kg/m³]
+
+    def __post_init__(self) -> None:
+        _checks = {
+            "t_regen":              self.t_regen,
+            "V_cat_max_per_vessel": self.V_cat_max_per_vessel,
+            "eps":                  self.eps,
+            "rho_p":                self.rho_p,
+        }
+        for name, val in _checks.items():
+            if val <= 0:
+                raise ValueError(
+                    f"FixedParams.{name}={val} は正値でなければなりません。"
+                )
 
 
 @dataclass
@@ -158,6 +166,37 @@ class SimulationResult:
 
 
 # ---------------------------------------------------------------------------
+# ペナルティ結果（計算不能条件への早期リターン用）
+# ---------------------------------------------------------------------------
+
+_PENALTY_CAPEX: float = 1e9  # [億円] 最適化への無効シグナル
+
+
+def _penalty_result() -> SimulationResult:
+    """計算不能条件のときに返すペナルティ SimulationResult。"""
+    return SimulationResult(
+        effluent=EffluentStream(
+            F_out_avg={c: 0.0 for c in _COMPS},
+            T_out_avg=0.0,
+            Q_preheat=0.0,
+            P_out=0.0,
+        ),
+        equipment=EquipmentCost(
+            V_vessel_actual=0.0,
+            N_parallel=0,
+            N_swing_sets=0,
+            N_reactors_total=0,
+            Catalyst_Weight_Total=0.0,
+            Reactor_CAPEX=_PENALTY_CAPEX,
+        ),
+        performance=PerformanceMetrics(
+            Conversion=0.0,
+            Selectivity=0.0,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # 内部ヘルパー
 # ---------------------------------------------------------------------------
 
@@ -175,12 +214,15 @@ def _reaction_enthalpies(T: float) -> np.ndarray:
 
 
 def _ode_axial(z: float, y: np.ndarray,
-               t_min: float, A_cross: float, eps: float, P_in: float
+               a: float, A_cross: float, eps: float, P_in: float
                ) -> np.ndarray:
     """軸方向(z)の常微分方程式。
 
     State y = [F_C3H8, F_C3H6, F_H2, F_C2H4, F_CH4, F_C2H6, T]
     単位: F [mol/s], T [K]
+
+    a : 触媒活性度 [-]。コーキングは入口温度で一律決定されるため、
+        呼び出し元（_simulate_one_time）で事前計算した値を受け取る。
     """
     F = y[:6]
     T_local = float(y[6])
@@ -193,9 +235,6 @@ def _ode_axial(z: float, y: np.ndarray,
     P_local = P_in
     P = {comp: max(float(F[i]) / F_total * P_local, 0.0)
          for i, comp in enumerate(_COMPS)}
-
-    # 触媒活性（局所温度・局所圧力で毎ステップ評価）
-    a = calc_a(t_min, T_local, P_local)
 
     # 反応速度定数
     rc = calc_rate_constants(T_local)
@@ -215,7 +254,7 @@ def _ode_axial(z: float, y: np.ndarray,
 
     # エネルギー収支（断熱）: dT/dz = -((1-eps) * A * Σ ΔH_j * r_j) / Σ F_i * Cp_i
     cp_dict = calc_Cp(T_local)
-    sum_FCp = sum(float(F[i]) * cp_dict[comp] for i, comp in enumerate(_COMPS))
+    sum_FCp = sum(max(float(F[i]), 0.0) * cp_dict[comp] for i, comp in enumerate(_COMPS))
     if sum_FCp <= 0:
         dTdz = 0.0
     else:
@@ -231,17 +270,23 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
     """時刻 t_min [min] における空間積分を実施し (F_out [mol/s], T_out [K]) を返す。"""
     A_cross = math.pi / 4.0 * design.D ** 2  # [m²]
 
+    # 触媒活性：コーキングは入口温度で一律決定。ODE 内では使用しない。
+    a = calc_a(t_min, design.T_in, feed.P_in)
+
     F0 = np.array([feed.F_in.get(c, 0.0) * 1000.0 / 3600.0 for c in _COMPS])
     y0 = np.concatenate([F0, [design.T_in]])
 
     sol = solve_ivp(
-        fun=lambda z, y: _ode_axial(z, y, t_min, A_cross, fixed.eps, feed.P_in),
+        fun=lambda z, y: _ode_axial(z, y, a, A_cross, fixed.eps, feed.P_in),
         t_span=(0.0, design.z_cat),
         y0=y0,
-        method='RK45',
+        method='Radau',
         rtol=1e-5,
         atol=1e-8,
     )
+
+    if not sol.success:
+        return None, None
 
     return sol.y[:6, -1], float(sol.y[6, -1])
 
@@ -265,26 +310,45 @@ def simulate_swing_reactor_system(
     fixed          : FixedParams  固定パラメータ
     n_time_samples : int          時間軸サンプリング点数（デフォルト20）
     """
+    # ---- DesignVars バリデーション ----
+    if design.t_cyc <= 0 or design.z_cat <= 0 or design.D <= 0:
+        return _penalty_result()
+
     # ---- 時間方向サンプリングと空間積分 ----
-    t_samples = np.linspace(0.0, design.t_cyc, n_time_samples)
-    F_out_list, T_out_list = [], []
+    if n_time_samples < 2:
+        warnings.warn(
+            f"n_time_samples={n_time_samples} < 2: 台形積分を行わず t=0 の1点を時間平均として採用します。",
+            UserWarning,
+            stacklevel=2,
+        )
+        F_out, T_out = _simulate_one_time(design, feed, fixed, 0.0)
+        if F_out is None:
+            return _penalty_result()
+        F_out_avg_kmolh = {comp: float(F_out[i]) * 3600.0 / 1000.0
+                           for i, comp in enumerate(_COMPS)}
+        T_out_avg = T_out
+    else:
+        t_samples = np.linspace(0.0, design.t_cyc, n_time_samples)
+        F_out_list, T_out_list = [], []
 
-    for t in t_samples:
-        F_out, T_out = _simulate_one_time(design, feed, fixed, float(t))
-        F_out_list.append(F_out)
-        T_out_list.append(T_out)
+        for t in t_samples:
+            F_out, T_out = _simulate_one_time(design, feed, fixed, float(t))
+            if F_out is None:
+                return _penalty_result()
+            F_out_list.append(F_out)
+            T_out_list.append(T_out)
 
-    F_out_arr = np.array(F_out_list)  # (n_time_samples, 6) [mol/s]
-    T_out_arr = np.array(T_out_list)  # (n_time_samples,)   [K]
+        F_out_arr = np.array(F_out_list)  # (n_time_samples, 6) [mol/s]
+        T_out_arr = np.array(T_out_list)  # (n_time_samples,)   [K]
 
-    # 時間平均（台形則）
-    _trapz = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')
-    F_out_avg_mol_s = _trapz(F_out_arr, t_samples, axis=0) / design.t_cyc
-    T_out_avg = float(_trapz(T_out_arr, t_samples) / design.t_cyc)
+        # 時間平均（台形則）
+        _trapz = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')
+        F_out_avg_mol_s = _trapz(F_out_arr, t_samples, axis=0) / design.t_cyc
+        T_out_avg = float(_trapz(T_out_arr, t_samples) / design.t_cyc)
 
-    # mol/s → kmol/h
-    F_out_avg_kmolh = {comp: float(F_out_avg_mol_s[i]) * 3600.0 / 1000.0
-                       for i, comp in enumerate(_COMPS)}
+        # mol/s → kmol/h
+        F_out_avg_kmolh = {comp: float(F_out_avg_mol_s[i]) * 3600.0 / 1000.0
+                           for i, comp in enumerate(_COMPS)}
 
     # ---- 予熱熱量 Q_preheat [GJ/h] ----
     q_w = 0.0

@@ -13,6 +13,8 @@ PDH (Propane DeHydrogenation) シミュレータ — 触媒活性モデルモジ
 参考：補間の詳細は monitor/fitting_analysis.ipynb を参照。
 """
 
+import warnings
+
 import numpy as np
 from scipy.interpolate import RectBivariateSpline
 
@@ -126,6 +128,22 @@ def calculate_activity_a(T_celsius: float, t_min: float) -> float:
     >>> round(calculate_activity_a(750.0, 50.0), 6) == round(calculate_activity_a(700.0, 30.0), 6)
     True
     """
+    # 範囲外チェック（クリップ前に警告）
+    if not (_T_MIN <= T_celsius <= _T_MAX):
+        warnings.warn(
+            f"calculate_activity_a: T_celsius={T_celsius:.2f} °C は有効範囲 "
+            f"[{_T_MIN}, {_T_MAX}] °C 外です。端値にクリップして計算を続行します。",
+            UserWarning,
+            stacklevel=2,
+        )
+    if not (_t_MIN <= t_min <= _t_MAX):
+        warnings.warn(
+            f"calculate_activity_a: t_min={t_min:.2f} min は有効範囲 "
+            f"[{_t_MIN}, {_t_MAX}] min 外です。端値にクリップして計算を続行します。",
+            UserWarning,
+            stacklevel=2,
+        )
+
     # 入力クリッピング：スプラインの外挿領域に踏み込まないよう制限
     T_clipped = float(np.clip(T_celsius, _T_MIN, _T_MAX))
     t_clipped = float(np.clip(t_min,     _t_MIN, _t_MAX))
