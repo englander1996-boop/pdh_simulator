@@ -8,6 +8,7 @@ Component mapping:
     D : Ethylene  (C2H4)
     E : Methane   (CH4)
     F : Ethane    (C2H6)
+    Z : n-Butane  (C4H10)
 """
 
 from dataclasses import dataclass
@@ -110,12 +111,13 @@ class ThermoParams:
     定圧比熱の多項式:
         Cp = a + b*T + c*T**2 + d*T**3   [J/(K mol)]
     ※ フィールド名 a, b, c, d は Cp 多項式の係数であり、
-       成分記号 A〜F とは無関係。
+    成分記号 A〜F、Z とは無関係。
 
     Attributes
     ----------
     dHf_298 : 標準生成エンタルピー (298 K) [J mol⁻¹]
               (入力値は kJ/mol → * 1_000 で J に変換済み)
+    boiling_point : 沸点 [°C]
     a       : Cp 多項式 定数項       [J K⁻¹ mol⁻¹]
     b       : Cp 多項式 T の係数     [J K⁻² mol⁻¹]
     c       : Cp 多項式 T² の係数    [J K⁻³ mol⁻¹]
@@ -123,19 +125,21 @@ class ThermoParams:
     """
 
     dHf_298: float  # [J mol⁻¹]
+    boiling_point: float  # [°C]
     a: float        # [J K⁻¹ mol⁻¹]
     b: float        # [J K⁻² mol⁻¹]
     c: float        # [J K⁻³ mol⁻¹]
     d: float        # [J K⁻⁴ mol⁻¹]
 
 
-# 成分 A〜F の熱力学データ辞書
-# キー : 成分記号 ('A'〜'F')
+# 成分 A〜F、Z の熱力学データ辞書
+# キー : 成分記号 ('A'〜'F', 'Z')
 # 値   : ThermoParams インスタンス
 # dHf_298 は kJ/mol で与えられた値を * 1_000 により J/mol に変換
 THERMO_DATA: Dict[str, ThermoParams] = {
     "A": ThermoParams(          # Propane   (C3H8)
         dHf_298 = -103.85 * 1_000,  # [J mol⁻¹]  (-103.85 kJ/mol → J)
+        boiling_point = -42.05,
         a =  -4.224,
         b =   3.063e-1,
         c =  -1.586e-4,
@@ -143,6 +147,7 @@ THERMO_DATA: Dict[str, ThermoParams] = {
     ),
     "B": ThermoParams(          # Propylene (C3H6)
         dHf_298 =  20.41 * 1_000,  # [J mol⁻¹]  (20.41 kJ/mol → J)
+        boiling_point = -47.75,
         a =   3.710,
         b =   2.345e-1,
         c =  -1.16e-4,
@@ -150,6 +155,7 @@ THERMO_DATA: Dict[str, ThermoParams] = {
     ),
     "C": ThermoParams(          # Hydrogen  (H2)
         dHf_298 =   0.0 * 1_000,   # [J mol⁻¹]  (0.0 kJ/mol → J)
+        boiling_point = -252.75,
         a =  27.140,
         b =   9.274e-3,
         c =  -1.381e-5,
@@ -157,6 +163,7 @@ THERMO_DATA: Dict[str, ThermoParams] = {
     ),
     "D": ThermoParams(          # Ethylene  (C2H4)
         dHf_298 =  52.28 * 1_000,  # [J mol⁻¹]  (52.28 kJ/mol → J)
+        boiling_point = -103.75,
         a =   3.806,
         b =   1.566e-1,
         c =  -8.348e-5,
@@ -164,6 +171,7 @@ THERMO_DATA: Dict[str, ThermoParams] = {
     ),
     "E": ThermoParams(          # Methane   (CH4)
         dHf_298 = -74.85 * 1_000,  # [J mol⁻¹]  (-74.85 kJ/mol → J)
+        boiling_point = -161.45,
         a =  19.250,
         b =   5.213e-2,
         c =   1.197e-5,
@@ -171,9 +179,18 @@ THERMO_DATA: Dict[str, ThermoParams] = {
     ),
     "F": ThermoParams(          # Ethane    (C2H6)
         dHf_298 = -84.67 * 1_000,  # [J mol⁻¹]  (-84.67 kJ/mol → J)
+        boiling_point = -88.65,
         a =   5.410,
         b =   1.781e-1,
         c =  -6.938e-5,
         d =   8.713e-9,
+    ),
+    "Z": ThermoParams(          # n-Butane  (C4H10)
+        dHf_298 = -126.15 * 1_000,  # [J mol⁻¹]  (-126.15 kJ/mol → J)
+        boiling_point = -0.45,
+        a =  11.160,
+        b =   3.310e-1,
+        c =  -1.110e-4,
+        d =  -2.820e-9,
     ),
 }

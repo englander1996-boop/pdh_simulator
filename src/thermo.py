@@ -8,6 +8,7 @@ Component mapping:
     D : Ethylene  (C2H4)  — エチレン
     E : Methane   (CH4)   — メタン
     F : Ethane    (C2H6)  — エタン
+    Z : n-Butane  (C4H10)  — ノルマルブタン
 """
 
 from typing import Dict
@@ -37,6 +38,7 @@ class PDHThermo:
     'D' : Ethylene  (C2H4)  — エチレン
     'E' : Methane   (CH4)   — メタン
     'F' : Ethane    (C2H6)  — エタン
+    'Z' : n-Butane  (C4H10)  — ノルマルブタン
 
     Parameters
     ----------
@@ -65,7 +67,7 @@ class PDHThermo:
         Parameters
         ----------
         component : str
-            成分記号 ('A'〜'F')
+            成分記号 ('A'〜'F', 'Z')
 
         Raises
         ------
@@ -91,14 +93,14 @@ class PDHThermo:
 
         Component mapping
         -----------------
-        'A' : Propane   (C3H8)  'D' : Ethylene  (C2H4)
+        'A' : Propane   (C3H8)  'D' : Ethylene  (C2H4)  'Z' : n-Butane  (C4H10)
         'B' : Propylene (C3H6)  'E' : Methane   (CH4)
         'C' : Hydrogen  (H2)    'F' : Ethane    (C2H6)
 
         Parameters
         ----------
         component : str
-            成分記号 ('A'〜'F')
+            成分記号 ('A'〜'F', 'Z')
         T : float
             温度 [K]
 
@@ -136,14 +138,14 @@ class PDHThermo:
 
         Component mapping
         -----------------
-        'A' : Propane   (C3H8)  'D' : Ethylene  (C2H4)
+        'A' : Propane   (C3H8)  'D' : Ethylene  (C2H4)  'Z' : n-Butane  (C4H10)
         'B' : Propylene (C3H6)  'E' : Methane   (CH4)
         'C' : Hydrogen  (H2)    'F' : Ethane    (C2H6)
 
         Parameters
         ----------
         component : str
-            成分記号 ('A'〜'F')
+            成分記号 ('A'〜'F', 'Z')
         T_start : float
             積分開始温度 [K]
         T_end : float
