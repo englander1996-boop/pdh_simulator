@@ -23,6 +23,18 @@ _RESULT_KEYS = [
 ]
 
 
+def _get_specs_collection(column_flowsheet):
+    """HYSYS のバージョン差を吸収して、スペック集合を返す。"""
+    for attr in ("Specs", "Specifications"):
+        try:
+            specs = getattr(column_flowsheet, attr)
+            if specs is not None:
+                return specs
+        except Exception:
+            continue
+    raise RuntimeError("ColumnFlowsheet から Specs / Specifications を取得できません")
+
+
 # ── メイン関数 ──────────────────────────────────────────────────────────────────
 
 def run_hysys_simulation(hysys_app, case, row_data: pd.Series) -> dict:
@@ -58,7 +70,7 @@ def run_hysys_simulation(hysys_app, case, row_data: pd.Series) -> dict:
         main_ts = col.ColumnFlowsheet.Operations.Item("Main TS")
         cond    = col.ColumnFlowsheet.Operations.Item("Condenser")
         reboi   = col.ColumnFlowsheet.Operations.Item("Reboiler")
-        specs   = col.ColumnFlowsheet.Specs
+        specs   = _get_specs_collection(col.ColumnFlowsheet)
 
         dist    = case.Flowsheet.MaterialStreams.Item("Distillate")
         bottoms = case.Flowsheet.MaterialStreams.Item("Bottoms")
@@ -106,8 +118,18 @@ def run_hysys_simulation(hysys_app, case, row_data: pd.Series) -> dict:
             return result
 
         # ── 結果取得 ───────────────────────────────────────────────────────────
-        result["Propane_Purity_Top"]   = dist.ComponentMolarFractions.Item("Propane").Value
-        result["Butane_Purity_Bottom"] = bottoms.ComponentMolarFractions.Item("n-Butane").Value
+        try:
+            propane_fractions = dist.ComponentMolarFractionValue
+            result["Propane_Purity_Top"]   = propane_fractions[0]
+        except Exception:
+            result["Propane_Purity_Top"]   = dist.ComponentMolarFractions.Item("Propane").Value
+        
+        try:
+            butane_fractions = bottoms.ComponentMolarFractionValue
+            result["Butane_Purity_Bottom"] = butane_fractions[1]
+        except Exception:
+            result["Butane_Purity_Bottom"] = bottoms.ComponentMolarFractions.Item("n-Butane").Value
+        
         result["Reboiler_Duty"]        = qr.HeatFlow.Value
         result["Condenser_Duty"]       = qc.HeatFlow.Value
         result["Top_Temperature"]      = dist.Temperature.Value
