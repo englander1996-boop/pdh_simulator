@@ -72,17 +72,14 @@ def calc_Cp(T: float) -> dict:
     }
 
 
-_K_EQ_DUMMY: float = 2.0e4  # [Pa] 概算固定値（要後日実装）
-
-
 def calc_rate_constants(T: float) -> dict:
-    """反応速度定数・平衡定数の辞書を返す。k1/k2/k3/K_B はアレニウス式で温度依存。"""
+    """反応速度定数・平衡定数の辞書を返す。k1/k2/k3/K_B/K_eq すべて温度依存。"""
     return {
         'k1':   _kinetics._k1(T),
         'k2':   _kinetics._k2(T),
         'k3':   _kinetics._k3(T),
         'K_B':  _kinetics._K_B(T),
-        'K_eq': _K_EQ_DUMMY,
+        'K_eq': _thermo.calc_keq(T),
     }
 
 

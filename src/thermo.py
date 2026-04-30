@@ -11,9 +11,13 @@ Component mapping:
     Z : n-Butane  (C4H10)  — ノルマルブタン
 """
 
+import math
 from typing import Dict
 
-from .config import ThermoParams, THERMO_DATA
+from .config import ThermoParams, THERMO_DATA, R
+
+# 標準圧力 [Pa]（K_eq の単位変換用: K_eq[Pa] = P_STD * Kp_dimensionless）
+_P_STD: float = 101325.0
 
 
 class PDHThermo:
@@ -171,3 +175,73 @@ class PDHThermo:
             + p.c / 3.0 * (T1**3 - T0**3)
             + p.d / 4.0 * (T1**4 - T0**4)
         )
+
+    def calc_keq(self, T: float) -> float:
+        """
+        反応1 (C3H8 → C3H6 + H2) の平衡定数 K_eq [Pa] を返す。
+
+        Kirchhoff の法則と Gibbs-Helmholtz 式に基づく厳密計算。
+
+        計算経路
+        --------
+        1. THERMO_DATA の dHf_298, dGf_298 から ΔH°_r(298), ΔG°_r(298) を算出
+        2. ΔS°_r(298) = (ΔH° - ΔG°) / 298.15
+        3. Cp 差分係数 Δa, Δb, Δc, Δd を計算（化学量論: νA=-1, νB=+1, νC=+1）
+        4. ΔH°(T) を Kirchhoff で解析的に積分
+        5. ΔS°(T) = ΔS°(298) + ∫(ΔCp/T) dT を解析的に積分
+        6. ΔG°(T) = ΔH°(T) - T·ΔS°(T)
+        7. K_eq [Pa] = P_STD · exp(-ΔG°(T) / (R·T))
+
+        Parameters
+        ----------
+        T : float
+            温度 [K]
+
+        Returns
+        -------
+        float
+            平衡定数 K_eq [Pa]
+
+        Examples
+        --------
+        >>> thermo = PDHThermo()
+        >>> thermo.calc_keq(T=873.15)
+        """
+        T0 = 298.15  # [K] 基準温度
+
+        pA = self._get('A')  # C3H8
+        pB = self._get('B')  # C3H6
+        pC = self._get('C')  # H2
+
+        # ΔH°_r(298), ΔG°_r(298) [J/mol]
+        dH298 = pB.dHf_298 + pC.dHf_298 - pA.dHf_298
+        dG298 = pB.dGf_298 + pC.dGf_298 - pA.dGf_298
+
+        # ΔS°_r(298) [J/(mol·K)]
+        dS298 = (dH298 - dG298) / T0
+
+        # Cp 差分係数
+        da = pB.a + pC.a - pA.a
+        db = pB.b + pC.b - pA.b
+        dc = pB.c + pC.c - pA.c
+        dd = pB.d + pC.d - pA.d
+
+        # ΔH°(T) [J/mol] — Kirchhoff の法則
+        dH_T = (dH298
+                + da       * (T    - T0)
+                + db / 2.0 * (T**2 - T0**2)
+                + dc / 3.0 * (T**3 - T0**3)
+                + dd / 4.0 * (T**4 - T0**4))
+
+        # ΔS°(T) [J/(mol·K)] — ∫(ΔCp/T) dT の解析的積分
+        dS_T = (dS298
+                + da        * math.log(T / T0)
+                + db        * (T    - T0)
+                + dc / 2.0  * (T**2 - T0**2)
+                + dd / 3.0  * (T**3 - T0**3))
+
+        # ΔG°(T) [J/mol]
+        dG_T = dH_T - T * dS_T
+
+        # K_eq [Pa] = P_STD · Kp (無次元)
+        return _P_STD * math.exp(-dG_T / (R * T))
