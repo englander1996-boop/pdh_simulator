@@ -1,0 +1,129 @@
+"""
+Bare Module Cost法の計算ロジック
+
+対象装置: 横型プロセス容器（Horizontal process vessel）
+出典: 授業資料 プロセス設計R08-3.pdf
+
+計算フロー
+----------
+1. 基本コスト    Cp0 = 10^(K1 + K2*log10(A) + K3*(log10(A))^2)
+2. 圧力係数      Fp  = f(Pg [bar], D [m])
+3. モジュール係数 FBM = B1 + B2*Fp*FM
+4. ベアモジュール CBM = Cp0 * FBM * K_swing
+5. 現在価値      Current_Cost = CBM * (CEPCI_CURRENT / CEPCI_BASE)
+6. 総建設費      C_TM = 1.18 * Current_Cost * N_reactors_total
+7. TAC          TAC  = C_TM / 減価償却年数 + Annual_OPEX
+"""
+
+import math
+import warnings
+
+from .cost_parameters import (
+    K1, K2, K3, A_RANGE_MIN, A_RANGE_MAX,
+    B1, B2, FM,
+    CEPCI_BASE, CEPCI_CURRENT,
+    K_SWING,
+    USD_TO_JPY, DEPRECIATION_YEARS, PLANT_INDIRECT_FACTOR,
+)
+
+
+def calc_cp0(A: float) -> float:
+    """
+    基本コスト Cp0 [USD（2001年基準）]
+
+    Cp0 = 10^(K1 + K2*log10(A) + K3*(log10(A))^2)
+
+    Parameters
+    ----------
+    A : float
+        容器体積 [m³]（推算式適用範囲: 0.1〜628 m³）
+
+    Returns
+    -------
+    float
+        基本コスト Cp0 [USD]
+    """
+    if A <= 0:
+        raise ValueError(f"calc_cp0: A={A} は正値でなければなりません。")
+    if not (A_RANGE_MIN <= A <= A_RANGE_MAX):
+        warnings.warn(
+            f"calc_cp0: A={A:.3f} m³ は推算式の適用範囲 "
+            f"[{A_RANGE_MIN}, {A_RANGE_MAX}] m³ 外です。",
+            UserWarning,
+            stacklevel=2,
+        )
+    log_A = math.log10(A)
+    return 10.0 ** (K1 + K2 * log_A + K3 * log_A ** 2)
+
+
+def calc_fp(P_gauge_bar: float, D: float) -> float:
+    """
+    圧力係数 Fp [-]
+
+    Pg > -0.5 の場合:
+        Fp = max((Pg+1)*D / (10.71 - 0.00756*(Pg+1)) + 0.5, 1.0)
+    Pg ≤ -0.5 の場合（真空操作）:
+        Fp = 1.25
+
+    Parameters
+    ----------
+    P_gauge_bar : float
+        ゲージ圧力 [bar]（= 絶対圧 [bar] - 1.01325）
+    D : float
+        容器内径 [m]
+
+    Returns
+    -------
+    float
+        圧力係数 Fp [-]（常に ≥ 1.0 または 1.25）
+    """
+    if P_gauge_bar > -0.5:
+        numerator = (P_gauge_bar + 1.0) * D
+        denominator = 10.71 - 0.00756 * (P_gauge_bar + 1.0)
+        if denominator <= 0:
+            # 現実的でない超高圧（>1400 bar）: 大きな Fp を返して最適化を遠ざける
+            return 10.0
+        return max(numerator / denominator + 0.5, 1.0)
+    else:
+        return 1.25
+
+
+def calc_reactor_capex_okuyen(
+    V_vessel_m3: float,
+    P_abs_pa: float,
+    D_m: float,
+    N_reactors_total: int,
+) -> float:
+    """
+    反応器システム全体の総建設費 C_TM [億円] を計算する。
+
+    Parameters
+    ----------
+    V_vessel_m3 : float
+        1基あたりのプロセス容器体積 [m³]
+    P_abs_pa : float
+        絶対圧力 [Pa]（ゲージ圧変換に使用）
+    D_m : float
+        容器内径 [m]
+    N_reactors_total : int
+        システム全体の総反応器基数
+
+    Returns
+    -------
+    float
+        総建設費 C_TM [億円]
+    """
+    # Pa → bar ゲージ圧変換
+    P_abs_bar = P_abs_pa / 1.0e5
+    P_gauge_bar = P_abs_bar - 1.01325
+
+    cp0 = calc_cp0(V_vessel_m3)
+    fp  = calc_fp(P_gauge_bar, D_m)
+    fbm = B1 + B2 * fp * FM
+    cbm = cp0 * fbm * K_SWING
+
+    current_cost_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
+    c_tm_usd = PLANT_INDIRECT_FACTOR * current_cost_usd * N_reactors_total
+    return c_tm_usd * USD_TO_JPY / 1.0e8
+
+

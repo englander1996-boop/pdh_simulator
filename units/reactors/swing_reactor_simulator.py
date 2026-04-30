@@ -29,6 +29,8 @@ from src.config import THERMO_DATA
 from src.thermo import PDHThermo
 from src.kinetics import PDHKinetics
 from src.catalyst_model import calculate_activity_a
+from src.cost_calculator import calc_reactor_capex_okuyen
+from src.cost_parameters import DEPRECIATION_YEARS
 
 _thermo = PDHThermo()
 _kinetics = PDHKinetics()
@@ -144,7 +146,7 @@ class EquipmentCost:
     N_swing_sets:          int    # 再生をカバーする切り替えセット数
     N_reactors_total:      int    # 総反応器基数
     Catalyst_Weight_Total: float  # システム全体触媒総量 [kg]
-    Reactor_CAPEX:         float  # 全基分建設コスト合計 [億円]（未実装: nan）
+    Reactor_CAPEX:         float  # 全基分建設コスト合計 [億円]
 
 
 @dataclass
@@ -160,6 +162,7 @@ class SimulationResult:
     effluent:    EffluentStream
     equipment:   EquipmentCost
     performance: PerformanceMetrics
+    TAC:         float  # Total Annualized Cost [億円/年]（= C_TM/8 + Annual_OPEX）
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +193,7 @@ def _penalty_result() -> SimulationResult:
             Conversion=0.0,
             Selectivity=0.0,
         ),
+        TAC=_PENALTY_CAPEX / DEPRECIATION_YEARS,
     )
 
 
@@ -221,8 +225,10 @@ def _ode_axial(z: float, y: np.ndarray,
     a : 触媒活性度 [-]。コーキングは入口温度で一律決定されるため、
         呼び出し元（_simulate_one_time）で事前計算した値を受け取る。
     """
-    F = y[:6]
-    T_local = float(y[6])
+    # 負のモル流量をクリップ（数値積分のアンダーシュート対策）
+    F = np.maximum(y[:6], 0.0)
+    # 物理的温度範囲に制限（ODE 発散防止）
+    T_local = float(np.clip(y[6], 300.0, 1500.0))
 
     F_total = float(np.sum(F))
     if F_total <= 0:
@@ -233,10 +239,11 @@ def _ode_axial(z: float, y: np.ndarray,
     P = {comp: max(float(F[i]) / F_total * P_local, 0.0)
          for i, comp in enumerate(_COMPS)}
 
-    # 反応速度定数
+    # 反応速度定数（ゼロ除算防止のため最小値でクリップ）
     rc = calc_rate_constants(T_local)
     k1, k2, k3 = rc['k1'], rc['k2'], rc['k3']
-    K_B, K_eq  = rc['K_B'], rc['K_eq']
+    K_B  = max(rc['K_B'],  1.0)   # [Pa] 低温での吸着項ゼロ除算防止
+    K_eq = max(rc['K_eq'], 1.0)   # [Pa] 低温での駆動力発散防止
 
     # 反応速度 [mol/m³_cat/s]
     driving_r1 = P['C3H8'] - P['C3H6'] * P['H2'] / K_eq
@@ -273,14 +280,17 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
     F0 = np.array([feed.F_in.get(c, 0.0) * 1000.0 / 3600.0 for c in _COMPS])
     y0 = np.concatenate([F0, [design.T_in]])
 
-    sol = solve_ivp(
-        fun=lambda z, y: _ode_axial(z, y, a, A_cross, fixed.eps, feed.P_in),
-        t_span=(0.0, design.z_cat),
-        y0=y0,
-        method='Radau',
-        rtol=1e-5,
-        atol=1e-8,
-    )
+    try:
+        sol = solve_ivp(
+            fun=lambda z, y: _ode_axial(z, y, a, A_cross, fixed.eps, feed.P_in),
+            t_span=(0.0, design.z_cat),
+            y0=y0,
+            method='Radau',
+            rtol=1e-5,
+            atol=1e-8,
+        )
+    except Exception:
+        return None, None
 
     if not sol.success:
         return None, None
@@ -307,8 +317,14 @@ def simulate_swing_reactor_system(
     fixed          : FixedParams  固定パラメータ
     n_time_samples : int          時間軸サンプリング点数（デフォルト20）
     """
-    # ---- DesignVars バリデーション ----
+    # ---- 入力バリデーション ----
     if design.t_cyc <= 0 or design.z_cat <= 0 or design.D <= 0:
+        return _penalty_result()
+    if design.T_in <= 0 or feed.T_feed <= 0 or feed.P_in <= 0:
+        return _penalty_result()
+    if any(v < 0 for v in feed.F_in.values()):
+        return _penalty_result()
+    if sum(feed.F_in.values()) <= 0:
         return _penalty_result()
 
     # ---- 時間方向サンプリングと空間積分 ----
@@ -364,9 +380,21 @@ def simulate_swing_reactor_system(
     V_vessel_actual = (V_cat_total / N_parallel) / fixed.eps  # [m³]
     catalyst_weight_total = V_cat_total * N_swing_sets * fixed.rho_p  # [kg]
 
-    # CAPEX: コスト推算モジュール未実装のためダミー値
-    # 実装後は外部コスト関数の呼び出しに差し替えること。
-    reactor_capex = float('nan')
+    if V_vessel_actual <= 0:
+        return _penalty_result()
+
+    # CAPEX: Bare Module Cost法による推算（横型プロセス容器として計算）
+    try:
+        reactor_capex = calc_reactor_capex_okuyen(
+            V_vessel_m3=V_vessel_actual,
+            P_abs_pa=feed.P_in,
+            D_m=design.D,
+            N_reactors_total=N_reactors_total,
+        )
+        tac = reactor_capex / DEPRECIATION_YEARS
+    except Exception:
+        reactor_capex = _PENALTY_CAPEX
+        tac = _PENALTY_CAPEX / DEPRECIATION_YEARS
 
     # ---- パフォーマンス指標 ----
     F_A_in  = feed.F_in.get('C3H8', 0.0)
@@ -377,6 +405,8 @@ def simulate_swing_reactor_system(
     conversion  = (F_A_in - F_A_out) / F_A_in * 100.0 if F_A_in > 0 else 0.0
     delta_A     = F_A_in - F_A_out
     selectivity = (F_B_out - F_B_in) / delta_A * 100.0 if delta_A > 0 else 0.0
+    conversion  = float(np.clip(conversion,  0.0, 100.0))
+    selectivity = float(np.clip(selectivity, 0.0, 100.0))
 
     return SimulationResult(
         effluent=EffluentStream(
@@ -397,4 +427,5 @@ def simulate_swing_reactor_system(
             Conversion=conversion,
             Selectivity=selectivity,
         ),
+        TAC=tac,
     )
