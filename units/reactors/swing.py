@@ -5,7 +5,7 @@ PDH スイング反応器システム シミュレーター
 後段分離工程への時間平均ストリームと装置コスト情報を出力する。
 
 使用方法:
-    from units.reactors.swing_reactor_simulator import (
+    from units.reactors.swing import (
         DesignVars, FeedStream, FixedParams, simulate_swing_reactor_system
     )
     result = simulate_swing_reactor_system(design, feed, fixed)

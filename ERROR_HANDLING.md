@@ -25,7 +25,7 @@
 | B2 | `K_B → 0` 時に吸着項 `1 + P_B/K_B → ∞` でゼロ除算相当 | `_ode_axial` | `K_B = max(rc['K_B'], 1.0)` でクリップ |
 | B3 | `calc_fp` の分母 `10.71 - 0.00756*(Pg+1)` がゼロ（>1400 bar） | `cost_calculator.py` | `denominator ≤ 0` 時はペナルティ値 `10.0` を返す |
 | B4 | `calc_cp0` に `A ≤ 0` が渡されると `math.log10` で `ValueError` | `cost_calculator.py` | `A ≤ 0` 時は `ValueError` を raise（呼び出し元の B5 で捕捉） |
-| B5 | `V_vessel_actual ≤ 0` が B4 を連鎖トリガー | `swing_reactor_simulator.py` | コスト計算前に `if V_vessel_actual <= 0: return _penalty_result()` |
+| B5 | `V_vessel_actual ≤ 0` が B4 を連鎖トリガー | `swing.py` | コスト計算前に `if V_vessel_actual <= 0: return _penalty_result()` |
 
 ---
 
@@ -66,7 +66,7 @@
 | ファイル | 変更内容 |
 |--------|---------|
 | `src/cost_calculator.py` | B3（Fp 分母ガード）、B4（calc_cp0 の A ≤ 0 バリデーション） |
-| `units/reactors/swing_reactor_simulator.py` | A1（solve_ivp try/except）、B1/B2（K_eq・K_B クリップ）、B5（V_vessel ガード）、C1/C2（F クリップ）、C3（Conversion/Selectivity クリップ）、温度クリップ、D1〜D5（入力バリデーション）、E（コスト計算保護） |
+| `units/reactors/swing.py` | A1（solve_ivp try/except）、B1/B2（K_eq・K_B クリップ）、B5（V_vessel ガード）、C1/C2（F クリップ）、C3（Conversion/Selectivity クリップ）、温度クリップ、D1〜D5（入力バリデーション）、E（コスト計算保護） |
 
 ---
 
