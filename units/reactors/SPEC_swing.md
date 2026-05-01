@@ -1,7 +1,7 @@
 # SPEC: swing.py — PDH スイング反応器システム シミュレーター
 
 **ファイルパス**: `units/reactors/swing.py`
-**最終更新**: 2026-04-30
+**最終更新**: 2026-05-02（TAC 廃止・CAPEX のみ出力に変更）
 
 ---
 
@@ -386,8 +386,6 @@ $$C_{TM} = 1.18 \times C_{current} \times N_{reactors,total}$$
 $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}] \div 10^8
 \quad [\text{億円}]$$
 
-$$\mathrm{TAC} = \frac{\mathrm{Reactor\_CAPEX}}{8} \quad [\text{億円/年}]$$
-
 **記号定義**
 
 | 記号 | 意味 | 単位 |
@@ -408,7 +406,6 @@ $$\mathrm{TAC} = \frac{\mathrm{Reactor\_CAPEX}}{8} \quad [\text{億円/年}]$$
 | $\mathrm{CEPCI}_{base}$ | 基準年（2001年）の CEPCI 値 | — |
 | $C_{TM}$ | 総建設費（間接費込み・全基合計） | USD |
 | $\mathrm{Reactor\_CAPEX}$ | 反応器システム全体の資本費 | 億円 |
-| $\mathrm{TAC}$ | 年間総コスト（= CAPEX / 減価償却年数） | 億円/年 |
 
 ### 7-2. コスト定数
 
@@ -426,7 +423,6 @@ $$\mathrm{TAC} = \frac{\mathrm{Reactor\_CAPEX}}{8} \quad [\text{億円/年}]$$
 | $K_{swing}$ | 1.2 | スイング操作ペナルティ（配管・高温バルブ複雑化） |
 | USD/JPY | 110.0 | 為替レート |
 | 間接費係数 | 1.18 | 据付・間接費 |
-| 減価償却年数 | 8年 | TAC 計算用 |
 
 > **注意**: CEPCI_current は `src/cost_parameters.py` の `CEPCI_CURRENT` を直接変更することで最新値に更新できる。
 
@@ -444,7 +440,7 @@ $$\mathrm{TAC} = \frac{\mathrm{Reactor\_CAPEX}}{8} \quad [\text{億円/年}]$$
 | 6 | **再生後の触媒は完全回復**（$a(t=0) = 1.0$） | 各サイクル開始時に新鮮触媒として初期化 |
 | 7 | **時間サンプリング間の内挿は台形則** | 20 点（デフォルト）で精度十分と仮定 |
 | 8 | **CAPEX は横型プロセス容器として推算** | 竪型や特殊形状には適用外 |
-| 9 | **OPEX は計算対象外**（TAC = CAPEX/8 のみ） | 反応器単体では後段分離コスト等を確定できないため |
+| 9 | **OPEX は計算対象外**（CAPEX のみ出力） | 反応器単体では後段分離コスト等を確定できないため。TAC は上位スクリプトで全ユニット CAPEX を合算してから計算する |
 
 ---
 
@@ -489,7 +485,6 @@ $$\mathrm{TAC} = \frac{\mathrm{Reactor\_CAPEX}}{8} \quad [\text{億円/年}]$$
 | `effluent` | EffluentStream | 出口流体情報 |
 | `equipment` | EquipmentCost | 装置・経済情報 |
 | `performance` | PerformanceMetrics | プロセス指標 |
-| `TAC` | float | Total Annualized Cost [億円/年] |
 
 #### `EffluentStream` — 出口流体
 
@@ -564,7 +559,6 @@ $$\mathrm{Selectivity} = \frac{F_{B,out} - F_{B,in}}{F_{A,in} - F_{A,out}} \time
 | `src.catalyst_model.calculate_activity_a` | `calc_a` | 触媒活性パラメータ a(T, t) |
 | `src.config.THERMO_DATA` | `_reaction_enthalpies` | 生成エンタルピー・Cp 多項式係数 |
 | `src.cost_calculator.calc_reactor_capex_okuyen` | CAPEX 計算 | Bare Module Cost 法 |
-| `src.cost_parameters.DEPRECIATION_YEARS` | TAC 計算 | 減価償却年数 |
 | `scipy.integrate.solve_ivp` | `_simulate_one_time` | ODE ソルバー（Radau） |
 | `numpy` | 全体 | 数値計算 |
 
@@ -599,7 +593,6 @@ print(result.performance.Conversion)        # %
 print(result.performance.Selectivity)       # %
 print(result.effluent.Q_preheat)            # GJ/h
 print(result.equipment.Reactor_CAPEX)       # 億円
-print(result.TAC)                           # 億円/年
 ```
 
 ### 主要パラメータの調整
@@ -622,9 +615,9 @@ def objective(x):
     T_in, z_cat, t_cyc, D = x
     design = DesignVars(T_in=T_in, z_cat=z_cat, t_cyc=t_cyc, D=D)
     r = simulate_swing_reactor_system(design, feed, fixed)
-    return r.TAC  # 最小化
+    return r.equipment.Reactor_CAPEX  # 最小化（TAC は上位スクリプトで合算）
 
-# 無効条件では r.TAC = 1.25×10⁸ 億円/年 が返るので最適化器に安全に渡せる
+# 無効条件では Reactor_CAPEX = 1×10⁹ 億円 が返るので最適化器に安全に渡せる
 ```
 
 ---
@@ -672,7 +665,6 @@ def objective(x):
 
 ```
 Reactor_CAPEX = 1×10⁹  [億円]
-TAC           = 1×10⁹ / 8  [億円/年]
 Conversion    = 0.0  [%]
 Selectivity   = 0.0  [%]
 ```

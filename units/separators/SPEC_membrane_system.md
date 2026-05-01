@@ -2,7 +2,7 @@
 
 **ファイルパス**: `units/separators/membrane_system.py`  
 **依存 EOS モジュール**: `src/eos.py`  
-**最終更新**: 2026-05-01（CAPEX実装・P_dist設計変数化・温度仕様修正）
+**最終更新**: 2026-05-02（CAPEX_mem・CAPEX_total 実装、仮置き値の明示）
 
 ---
 
@@ -466,8 +466,8 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | `CAPEX_comp_feed` | 億円 | 実装済み（`calc_comp_capex_okuyen`） |
 | `CAPEX_comp_prod` | 億円 | 実装済み（`calc_comp_capex_okuyen`） |
 | `CAPEX_cond` | 億円 | 実装済み（`calc_he_capex_okuyen`） |
-| `CAPEX_mem` | 億円 | **TODO**: 膜モジュール単価 [USD/m²] 未確定 |
-| `CAPEX_total` | 億円 | **TODO**: CAPEX_mem 確定後に合算 |
+| `CAPEX_mem` | 億円 | 実装済み（**★ 仮置き**: 単価 50 USD/m²、呼び出し時 UserWarning 発行） |
+| `CAPEX_total` | 億円 | 実装済み（5 機器合算、**★ CAPEX_mem が仮置きのため暫定値**） |
 
 ---
 
@@ -485,7 +485,7 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | 8 | **気化器 LMTD: 熱媒温度一定** | 蒸気凝縮を熱媒と仮定し $T_{hot}$ = const（LP Steam 160°C, コンテスト仕様） |
 | 9 | **冷却器 LMTD: 向流** | ガス入口端 = $T_{in} - T_{cold,out}$、液出口端 = $T_{bp} - T_{cold,in}$（冷却水 30→40°C, コンテスト仕様） |
 | 10 | **冷媒不使用（Case A）** | 製品冷却器は冷却水のみ。泡点が $T_{cold,out}$(40°C) を下回る場合は温度クロスが発生しペナルティ返却。冷媒モデルは目的関数の不連続性を生むため採用しない |
-| 11 | **CAPEX: 熱交・圧縮機は実装済み** | Turton Bare Module Cost 法（プロセス設計R08-3.pdf）。膜モジュール単価のみ未確定（CAPEX_total = nan） |
+| 11 | **CAPEX: 全 5 機器実装済み** | Turton Bare Module Cost 法（プロセス設計R08-3.pdf）。膜モジュール単価（50 USD/m²）と A_per_module（500 m²）は仮置き値。確定次第 `cost_parameters.MEM_UNIT_PRICE_USD_PER_M2` と `MemFixedParams.A_per_module` を更新すること |
 
 ---
 
@@ -517,7 +517,7 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 |---|---|---|---|
 | `Q_A_GPU` | 40.0 | GPU | C₃H₆ 透過度。Hua et al. (2024) 実測値 |
 | `alpha` | 90.0 | — | C₃H₆/C₃H₈ 膜選択性。Hua et al. (2024) 実測値 |
-| `A_per_module` | 500.0 | m² | 1 モジュールあたり有効膜面積（**暫定**、メーカーカタログ値で要確認） |
+| `A_per_module` | 500.0 | m² | 1 モジュールあたり有効膜面積（**★ 仮置き**、Evonik SEPURAN 等カタログで要確認、インスタンス生成時に UserWarning 発行） |
 | `T_vap_superheat` | 5.0 | K | 気化器 露点超過過熱度（設計ヒューリスティクス） |
 | `U_vap` | 1.0 | kW/(m²·K) | 気化器総括伝熱係数。化工便覧 改訂六版 表6・18（範囲 0.45〜1.14 の中央〜上限値） |
 | `T_hot` | 433.15 | K | 熱媒（LP Steam）温度 = 160°C。コンテスト仕様（入手可能スチームのうち最安） |
@@ -581,8 +581,8 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | `CAPEX_comp_feed` | 億円 | フィード圧縮機 CAPEX（実装済み） |
 | `CAPEX_comp_prod` | 億円 | 製品圧縮機 CAPEX（実装済み） |
 | `CAPEX_cond` | 億円 | 製品冷却器 CAPEX（実装済み） |
-| `CAPEX_mem` | 億円 | 膜モジュール CAPEX（**TODO: 単価未確定**, `nan`） |
-| `CAPEX_total` | 億円 | 合計資本費（CAPEX_mem 確定後に合算、現在 `nan`） |
+| `CAPEX_mem` | 億円 | 膜モジュール CAPEX（**★ 仮置き**: 単価 50 USD/m²） |
+| `CAPEX_total` | 億円 | 合計資本費 = 5 機器の合算（**★ CAPEX_mem が仮置きのため暫定値**） |
 
 ---
 
@@ -736,7 +736,8 @@ fixed = MemFixedParams(eta_comp=0.80)
 ### ペナルティ値
 
 ```
-CAPEX_total  = 1×10⁹  [億円]
+各 CAPEX_*  = nan  [億円]（計算例外時）
+CAPEX_total  = nan  [億円]（計算例外時）
 stage_cut    = 0.0
 perm_purity  = 0.0
 ret_purity   = 0.0

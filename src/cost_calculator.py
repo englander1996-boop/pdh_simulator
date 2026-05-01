@@ -26,6 +26,7 @@ from .cost_parameters import (
     USD_TO_JPY, DEPRECIATION_YEARS, PLANT_INDIRECT_FACTOR,
     K1_HE, K2_HE, K3_HE, A_HE_MIN, A_HE_MAX, B1_HE, B2_HE, FM_HE, FP_HE_DEFAULT,
     K1_COMP, K2_COMP, K3_COMP, W_COMP_MIN, W_COMP_MAX, FBM_COMP,
+    MEM_UNIT_PRICE_USD_PER_M2,
 )
 
 
@@ -197,4 +198,37 @@ def calc_comp_capex_okuyen(W_kW: float) -> float:
     cbm    = cp0 * FBM_COMP
     current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
     return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
+
+
+# ---------------------------------------------------------------------------
+# 膜モジュール
+# ★★ MEM_UNIT_PRICE_USD_PER_M2 が仮置き値のため、出力も暫定値 ★★
+# ---------------------------------------------------------------------------
+
+def calc_mem_capex_okuyen(A_mem_m2: float) -> float:
+    """
+    膜モジュールの設備費 [億円]。
+
+    C_mem = MEM_UNIT_PRICE_USD_PER_M2 × A_mem × CEPCI補正 × 据付間接費 × 円換算
+
+    ★★ 仮置き値を使用中 ★★
+    MEM_UNIT_PRICE_USD_PER_M2 は根拠文献未確定の暫定値。
+    ZIF-8 膜 TEA 論文（Hua et al. 2024 等）で単価を確認後に
+    cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 を更新すること。
+
+    Parameters
+    ----------
+    A_mem_m2 : 総膜面積 [m²]
+    """
+    warnings.warn(
+        f"calc_mem_capex_okuyen: 膜モジュール単価 MEM_UNIT_PRICE_USD_PER_M2 ="
+        f" {MEM_UNIT_PRICE_USD_PER_M2} USD/m² は仮置き値です。"
+        " ZIF-8 膜 TEA 論文等で根拠値を確認後に cost_parameters を更新してください。",
+        UserWarning,
+        stacklevel=2,
+    )
+    if A_mem_m2 <= 0:
+        raise ValueError(f"calc_mem_capex_okuyen: A={A_mem_m2} は正値でなければなりません。")
+    cost_usd = MEM_UNIT_PRICE_USD_PER_M2 * A_mem_m2 * (CEPCI_CURRENT / CEPCI_BASE)
+    return PLANT_INDIRECT_FACTOR * cost_usd * USD_TO_JPY / 1.0e8
 
