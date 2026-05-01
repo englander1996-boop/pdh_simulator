@@ -19,6 +19,58 @@
         simulate_membrane_system,
     )
     result = simulate_membrane_system(design, feed, fixed)
+
+--------------------------------------------------------------------
+【仮定一覧】
+
+■ 文献・仕様書に根拠がある仮定
+
+  [膜パラメータ] Q_A = 40 GPU, 選択性 α = 90
+      根拠: Hua et al. (2024) "Unexpectedly High Propylene/Propane
+            Separation Performance..." 実測値（室温・大気圧条件）。
+
+  [膜等温仮定] 透過ガス入口温度 = フィード圧縮機出口温度（膜内温度変化なし）
+      根拠: 膜パラメータが等温・大気圧条件で測定されており、モデル条件を
+            測定条件に合わせることで整合性を確保する（同論文 Gas Permeation
+            Measurements セクション）。
+
+  [ユーティリティ温度] T_hot=160°C, T_cold_in=30°C, T_cold_out=40°C
+      根拠: 第17回プロセスデザインコンテスト課題 Ver.2.0 のサイト仕様。
+            熱媒は入手可能スチームのうち最安の LP Steam (160°C) を選択。
+
+■ 設計判断（根拠あり）
+
+  [製品冷却器の冷媒] 冷却水のみ使用（Case A）
+      判断: P_dist を低くしすぎると製品の泡点が T_cold_out (40°C) を下回り
+            冷却水では凝縮できなくなる（温度クロスが発生）。PR EOS 試算では
+            C3H6 97% 組成の場合 P_dist ≳ 17 bar で冷却水が使えるが、
+            組成によって変わるため simulate 内で動的に確認しペナルティ返却。
+            冷媒モデルを入れると目的関数が不連続になり最適化に不向きなため
+            Case A（ペナルティ制約）を採用。
+      TODO: 後段蒸留塔を含む系統最適化に移行する段階で冷媒使用を再検討する。
+
+  [クロスフロー完全混合モデル]
+      判断: 産業用スパイラル型モジュールの標準近似。完全混合（タンク型）より
+            現実に近く、向流モデルより実装が安定。
+
+  [PR EOS 二成分相互作用係数 kij = 0]
+      判断: C3H6/C3H8 は分子構造が近く kij は文献で 0.01 程度と小さいため
+            無視しても相平衡計算の精度に大きな影響はない。
+
+■ 暫定値（設計ヒューリスティクス、要メーカー確認）
+
+  U_vap      = 1.0 kW/(m²·K)  気化器（軽質炭化水素蒸発/水蒸気加熱）
+                               化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値
+  U_cond     = 1.0 kW/(m²·K)  冷却器（軽質炭化水素凝縮/冷却水）
+                               化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値
+  A_per_module = 500 m²        モジュール面積（メーカーカタログ値で要置換）
+  膜モジュール単価 [USD/m²]   TODO: 根拠文献を確認中。決まり次第 CAPEX_total に組み込む。
+                               （MemEquipmentData.CAPEX_total の TODO コメント参照）
+  eta_comp   = 0.75            圧縮機断熱効率
+                               化工便覧 改訂六版 p.333  ポリトロープ効率 0.7〜0.8 の中央値
+                               （断熱効率とポリトロープ効率は厳密に異なるが初期設計では同値で近似）
+  T_vap_superheat = 5 K        気化器出口の過熱度（露点 + 5K）
+--------------------------------------------------------------------
 """
 
 import math
@@ -40,6 +92,7 @@ from src.eos import (
     compress_isentropic,
 )
 from src.thermo import PDHThermo
+from src.cost_calculator import calc_he_capex_okuyen, calc_comp_capex_okuyen
 
 # 成分順序: index 0 = C3H6 (EOS キー 'B'), index 1 = C3H8 (EOS キー 'A')
 _KEYS    = ['B', 'A']
@@ -57,9 +110,25 @@ _thermo = PDHThermo()
 @dataclass
 class MemDesignVars:
     """最適化アルゴリズムが操作する設計変数"""
-    P_H:   float  # 膜供給側（高圧）圧力 [Pa]
-    P_L:   float  # 膜透過側（低圧）圧力 [Pa]
-    A_mem: float  # 総膜面積 [m²]
+    P_H:    float  # 膜供給側（高圧）圧力 [Pa]
+    P_L:    float  # 膜透過側（低圧）圧力 [Pa]
+    A_mem:  float  # 総膜面積 [m²]
+    # 後段蒸留塔操作圧力 [Pa]（製品圧縮機の出口圧力）
+    # 冷媒不使用（Case A）のため T_bp(P_dist, y_perm) > T_cold_out(40°C) が
+    # 成立する圧力に制限される。PR EOS による試算:
+    #   C3H6 97% 組成の場合 ≳ 17 bar 程度が目安
+    #   （組成により変わるため simulate_membrane_system 内で動的に確認）
+    # 最適化ソルバー側で下限境界として設定すること。
+    P_dist: float
+
+    def __post_init__(self) -> None:
+        if self.P_dist <= 0:
+            raise ValueError("P_dist は正値でなければなりません。")
+        if self.P_dist <= self.P_L:
+            raise ValueError(
+                f"P_dist ({self.P_dist/1e5:.2f} bar) は P_L ({self.P_L/1e5:.2f} bar) "
+                "より大きくなければなりません（製品圧縮機が圧縮できません）。"
+            )
 
 
 @dataclass
@@ -74,26 +143,32 @@ class MemFeedStream:
 @dataclass
 class MemFixedParams:
     """プロセス固定パラメータ"""
-    # 膜性能
+    # 膜性能 — Hua et al. (2024) 実測値
     Q_A_GPU:         float = 40.0    # C3H6 透過度 [GPU]
     alpha:           float = 90.0    # C3H6/C3H8 選択性 [-]
+    # 機器仕様 — 暫定値（メーカーカタログで要確認）
     A_per_module:    float = 500.0   # モジュール 1 本あたり有効膜面積 [m²]
-    # 後段蒸留塔接続
-    P_dist:          float = 15.0e5  # 後段蒸留塔操作圧力 [Pa]
     # 気化器
-    T_vap_superheat: float = 5.0     # 露点超過の過熱度 [K]
-    U_vap:           float = 1.5     # 気化器総括伝熱係数 [kW/(m²·K)]
-    T_hot:           float = 423.15  # 熱媒（低圧蒸気）温度 [K] ≈ 150°C
-    # 製品冷却器
+    T_vap_superheat: float = 5.0     # 露点超過の過熱度 [K]（設計ヒューリスティクス）
+    U_vap:           float = 1.0     # 気化器総括伝熱係数 [kW/(m²·K)]
+                                     # 軽質炭化水素の蒸発 - 水蒸気加熱
+                                     # 根拠: 化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値を採用
+    T_hot:           float = 433.15  # LP Steam 供給温度 [K] (160°C) — コンテスト仕様
+    # 製品冷却器 — 冷媒不使用（Case A）。冷却水のみ使用
     U_cond:          float = 1.0     # 冷却器総括伝熱係数 [kW/(m²·K)]
-    T_cold_in:       float = 303.15  # 冷却水入口温度 [K] (30°C)
-    T_cold_out:      float = 318.15  # 冷却水出口温度 [K] (45°C)
+                                     # 軽質炭化水素の凝縮 - 冷却水
+                                     # 根拠: 化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値を採用
+    T_cold_in:       float = 303.15  # 冷却水入口温度 [K] (30°C) — コンテスト仕様
+    T_cold_out:      float = 313.15  # 冷却水出口温度 [K] (40°C) — コンテスト仕様
     # 圧縮機
-    eta_comp:        float = 0.75    # 断熱効率 [-]
+    eta_comp:        float = 0.75    # 圧縮機断熱効率 [-]
+                                     # 根拠: 化工便覧 改訂六版 p.333「5.6.3 気体圧縮機」
+                                     #   ポリトロープ効率は普通 0.7〜0.8 程度 → 中央値 0.75 を採用
+                                     # 補足: ポリトロープ効率と断熱効率は厳密には異なる（圧縮比が高いほど
+                                     #   断熱効率は下がる）が、初期設計では断熱効率 0.75 を用いるのが一般的。
+                                     #   同便覧の例題(p.334)でも 0.8 が使用されている。
 
     def __post_init__(self) -> None:
-        if self.P_dist <= 0:
-            raise ValueError("P_dist は正値でなければなりません。")
         if not 0 < self.eta_comp <= 1.0:
             raise ValueError("eta_comp は (0, 1] でなければなりません。")
         if self.T_hot <= 273.15:
@@ -153,8 +228,16 @@ class MemEquipmentData:
     A_cond:       float  # 伝熱面積 [m²]
     Pg_cond:      float  # ゲージ圧 [barg]
     Q_cond_kW:    float  # 冷却量 [kW]
-    # CAPEX
-    CAPEX_total:  float = float('nan')  # [億円]（後で実装）
+    # CAPEX [億円] — Turton Bare Module Cost 法（R08-3.pdf）
+    CAPEX_vap:        float = float('nan')  # 気化器
+    CAPEX_comp_feed:  float = float('nan')  # フィード圧縮機
+    CAPEX_comp_prod:  float = float('nan')  # 製品圧縮機
+    CAPEX_cond:       float = float('nan')  # 製品冷却器
+    # TODO: 膜モジュール単価 [USD/m²] — 根拠文献を確認中。
+    #       決まり次第: CAPEX_mem = 単価 × A_mem × CEPCI補正 × 円換算
+    CAPEX_mem:        float = float('nan')  # 膜モジュール（単価未確定）
+    # CAPEX_total は CAPEX_mem が確定するまで nan
+    CAPEX_total:      float = float('nan')  # 合計 [億円]
 
 
 @dataclass
@@ -268,6 +351,9 @@ def _y_local(x: float, alpha: float, gamma: float) -> float:
     """
     クロスフローモデルにおける局所透過組成 y_local [-] を返す。
 
+    【仮定】完全クロスフロー: 透過ガスは膜面を離れた瞬間に系外へ出ると仮定し、
+    フィード側のみ流れ方向に組成変化する。スパイラル型モジュールの標準近似。
+
     x × P_H と y_local × P_L の分圧差が推進力。
     (1-alpha)*gamma * y² + [(alpha-1)*(x+gamma)+1] * y - alpha*x = 0
     の物理根（正かつ ≤ 1 の根）を返す。
@@ -375,7 +461,7 @@ def simulate_membrane_system(
 
     Parameters
     ----------
-    design : MemDesignVars   設計変数 (P_H, P_L, A_mem)
+    design : MemDesignVars   設計変数 (P_H, P_L, A_mem, P_dist)
     feed   : MemFeedStream   入力ストリーム（前段蒸留塔底液）
     fixed  : MemFixedParams  固定パラメータ
 
@@ -452,7 +538,7 @@ def simulate_membrane_system(
     # 膜は等温操作と仮定: 透過ガスは T_feed_comp_out, P_L で出る
     try:
         T_prod_comp_out, W_prod_per_mol = compress_isentropic(
-            T_feed_comp_out, design.P_L, fixed.P_dist,
+            T_feed_comp_out, design.P_L, design.P_dist,
             [y_C3H6, 1.0 - y_C3H6], _KEYS,
             eta=fixed.eta_comp,
         )
@@ -464,10 +550,21 @@ def simulate_membrane_system(
     try:
         T_bp_perm, Q_cond_kW, A_cond = _condenser(
             F_perm_total_mols, y_C3H6,
-            T_prod_comp_out, fixed.P_dist,
+            T_prod_comp_out, design.P_dist,
             fixed,
         )
     except Exception:
+        return _penalty_result()
+
+    # Case A 制約: 製品の泡点が冷却水出口温度を下回ると温度クロスが発生し
+    # 冷却水では凝縮できない。冷媒は使用しない設計判断のため、この条件は
+    # 物理的に不成立として最適化から除外する（ペナルティ返却）。
+    if T_bp_perm <= fixed.T_cold_out:
+        warnings.warn(
+            f"製品冷却器: 泡点 {T_bp_perm - 273.15:.1f}°C が冷却水出口温度 "
+            f"{fixed.T_cold_out - 273.15:.1f}°C 以下です（P_dist が低すぎます）。",
+            UserWarning, stacklevel=2,
+        )
         return _penalty_result()
 
     # ---- kmol/h 換算（出力用）----
@@ -480,6 +577,19 @@ def simulate_membrane_system(
     # ---- モジュール本数 ----
     n_modules = math.ceil(design.A_mem / fixed.A_per_module)
 
+    # ---- CAPEX 推算（Bare Module Cost 法, R08-3.pdf） ----
+    try:
+        capex_vap       = calc_he_capex_okuyen(A_vap)
+        capex_comp_feed = calc_comp_capex_okuyen(W_feed_kW)
+        capex_comp_prod = calc_comp_capex_okuyen(W_prod_kW)
+        capex_cond      = calc_he_capex_okuyen(A_cond)
+    except Exception:
+        capex_vap = capex_comp_feed = capex_comp_prod = capex_cond = float('nan')
+    # CAPEX_mem は膜モジュール単価が未確定のため nan
+    # CAPEX_total は CAPEX_mem 確定後に合算する
+    capex_mem   = float('nan')
+    capex_total = float('nan')   # TODO: capex_vap+comp_feed+comp_prod+cond+mem が揃ったら合算
+
     return MemSimulationResult(
         retentate=MemRetentateStream(
             F_C3H6 = F_ret_C3H6_mols * to_kmolh,
@@ -491,22 +601,28 @@ def simulate_membrane_system(
             F_C3H6 = F_perm_C3H6_mols * to_kmolh,
             F_C3H8 = F_perm_C3H8_mols * to_kmolh,
             T_out  = T_bp_perm,
-            P_out  = fixed.P_dist,
+            P_out  = design.P_dist,
         ),
         equipment=MemEquipmentData(
-            A_vap     = A_vap,
-            Pg_vap    = _pg(feed.P_in),
-            Q_vap_kW  = Q_vap_kW,
-            W_feed_kW = W_feed_kW,
-            Pg_feed   = _pg(design.P_H),
-            A_mem     = design.A_mem,
-            n_modules = n_modules,
-            Pg_mem    = _pg(design.P_H),
-            W_prod_kW = W_prod_kW,
-            Pg_prod   = _pg(fixed.P_dist),
-            A_cond    = A_cond,
-            Pg_cond   = _pg(fixed.P_dist),
-            Q_cond_kW = Q_cond_kW,
+            A_vap          = A_vap,
+            Pg_vap         = _pg(feed.P_in),
+            Q_vap_kW       = Q_vap_kW,
+            W_feed_kW      = W_feed_kW,
+            Pg_feed        = _pg(design.P_H),
+            A_mem          = design.A_mem,
+            n_modules      = n_modules,
+            Pg_mem         = _pg(design.P_H),
+            W_prod_kW      = W_prod_kW,
+            Pg_prod        = _pg(design.P_dist),
+            A_cond         = A_cond,
+            Pg_cond        = _pg(design.P_dist),
+            Q_cond_kW      = Q_cond_kW,
+            CAPEX_vap      = capex_vap,
+            CAPEX_comp_feed= capex_comp_feed,
+            CAPEX_comp_prod= capex_comp_prod,
+            CAPEX_cond     = capex_cond,
+            CAPEX_mem      = capex_mem,
+            CAPEX_total    = capex_total,
         ),
         stage_cut   = float(np.clip(stage_cut,   0.0, 1.0)),
         perm_purity = float(np.clip(y_C3H6,      0.0, 1.0)),

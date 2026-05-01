@@ -1,8 +1,21 @@
 """
-Bare Module Cost法の定数定義（横型プロセス容器）
+Bare Module Cost 法の定数定義
 
-出典: 授業資料 プロセス設計R08-3.pdf（Turton et al. ベース）
-対象装置: Horizontal process vessel（横型プロセス容器）
+【一次出典】
+  資料名 : プロセス設計R08-3.pdf
+  タイトル: 「プロセス設計(No. 3) 建設費と運転費の推算」
+  著者   : 長谷部 伸治・外輪 健一郎
+
+  各数値の引用元ページ:
+    p.9  : 付録A Table A.1  — K1, K2, K3（熱交換器・圧縮機）
+    p.10 : 付録B Table A.4  — B1, B2（熱交換器）
+    p.11 : 付録C Table A.2  — 圧縮機の圧力補正係数 C1, C2, C3
+    p.13–14: Table A.6 および Bare Module Factor グラフ — 圧縮機 FBM
+
+収録装置:
+  - 横型プロセス容器 (Horizontal process vessel)
+  - 熱交換器・固定管板式 (Shell & tube, Fixed tube sheet)
+  - 遠心式圧縮機 (Centrifugal compressor, CS)
 """
 
 # ---------------------------------------------------------------------------
@@ -52,3 +65,75 @@ K_SWING: float = 1.2
 USD_TO_JPY: float = 110.0           # 為替レート [JPY/USD]
 DEPRECIATION_YEARS: int = 8          # 減価償却年数 [年]
 PLANT_INDIRECT_FACTOR: float = 1.18  # 据付・間接費拡張係数
+
+
+# ---------------------------------------------------------------------------
+# 熱交換器（固定管板式 / Shell & tube, Fixed tube sheet）
+#
+# 【機器タイプ選択理由】
+#   プロピレン/プロパン系の操作温度範囲（−50〜+200°C 程度）では
+#   熱膨張が管理可能であり固定管板式で問題ない。
+#   遊動頭式より構造が単純でコストも低い。
+#
+# 【K1, K2, K3】
+#   出典: プロセス設計R08-3.pdf p.9「付録A Table A.1」
+#   Equipment Type    : Heat exchangers / Fixed tube sheet
+#   サイジングパラメータ: 伝熱面積 A [m²]
+#   K1 = 4.3247 / K2 = -0.3030 / K3 = 0.1634
+#
+# 【B1, B2】
+#   出典: プロセス設計R08-3.pdf p.10「付録B Table A.4」
+#   Equipment Type       : Heat exchangers
+#   Equipment Description: Fixed tube sheet, floating head, U-tube,
+#                          bayonet, kettle reboiler, and Teflon tube
+#   B1 = 1.63 / B2 = 1.66
+# ---------------------------------------------------------------------------
+
+K1_HE: float =  4.3247
+K2_HE: float = -0.3030
+K3_HE: float =  0.1634
+A_HE_MIN: float =  10.0  # 適用範囲下限 [m²]
+A_HE_MAX: float = 1000.0  # 適用範囲上限 [m²]
+
+B1_HE: float = 1.63
+B2_HE: float = 1.66
+
+# FM = 1.0: 炭素鋼/炭素鋼（C3炭化水素サービスの初期設計値）
+FM_HE: float = 1.0
+
+# Fp = 1.0: プロセス設計R08-3.pdf に HE 向け Fp 式の記載なし。
+# 膜分離システムの操作圧力（< 25 bar abs）は中低圧領域であり、
+# 初期設計として Fp = 1.0 を仮定する（やや保守的な見積もり）。
+FP_HE_DEFAULT: float = 1.0
+
+
+# ---------------------------------------------------------------------------
+# 圧縮機（遠心式 / Centrifugal compressor, 炭素鋼）
+#
+# 【K1, K2, K3】
+#   出典: プロセス設計R08-3.pdf p.9「付録A Table A.1」
+#   Equipment Type    : Centrifugal, axial, and reciprocating compressors
+#   サイジングパラメータ: 流体動力（Fluid power） W [kW]
+#   K1 = 2.2897 / K2 = 1.3604 / K3 = -0.1027
+#
+# 【FBM = 2.15】
+#   出典: プロセス設計R08-3.pdf p.13–14「Table A.6」および
+#         「Bare Module Factor, FBM グラフ」
+#   Equipment Type: Centrifugal compressor or blower
+#   Material      : CS → ID番号 1 → グラフ横軸 ID=1 より FBM = 2.15 を読み取り
+#
+# 【Fp = 1.0（圧力補正なし）】
+#   出典: プロセス設計R08-3.pdf p.11「付録C Table A.2」
+#   Equipment Type: Compressors → C1 = 0, C2 = 0, C3 = 0 → Fp = 1.0
+# ---------------------------------------------------------------------------
+
+K1_COMP: float =  2.2897
+K2_COMP: float =  1.3604
+K3_COMP: float = -0.1027
+W_COMP_MIN: float =  450.0  # 適用範囲下限 [kW]
+W_COMP_MAX: float = 3000.0  # 適用範囲上限 [kW]
+# 注意: 膜分離システムのテストケース（100 kmol/h フィード, P_H=10 bar, P_dist=20 bar）では
+# W_feed≈182 kW, W_prod≈108 kW となり適用範囲を下回る。範囲外の外挿となるため
+# コスト推算精度が低下する。最終設計流量が確定した時点で再確認すること。
+
+FBM_COMP: float = 2.15
