@@ -132,6 +132,11 @@ class ThermoParams:
     b: float        # [J K⁻² mol⁻¹]
     c: float        # [J K⁻³ mol⁻¹]
     d: float        # [J K⁻⁴ mol⁻¹]
+    # Peng-Robinson EOS 用パラメータ（膜分離モジュール向け）
+    # PR パラメータが不要な成分は省略可（デフォルト nan）
+    Tc:    float = float('nan')  # [K]  臨界温度
+    Pc:    float = float('nan')  # [Pa] 臨界圧力
+    omega: float = float('nan')  # [-]  アセントリック因子
 
 
 # 成分 A〜F、Z の熱力学データ辞書
@@ -147,6 +152,9 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   3.063e-1,
         c =  -1.586e-4,
         d =   3.215e-8,
+        Tc    = 369.89,        # [K]   NIST
+        Pc    = 4.2512e6,      # [Pa]  NIST
+        omega = 0.1521,        # [-]   NIST
     ),
     "B": ThermoParams(          # Propylene (C3H6)
         dHf_298 =  20.4 * 1_000,   # [J mol⁻¹]  (20.4 kJ/mol → J)
@@ -156,6 +164,9 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   2.346e-1,
         c =  -1.160e-4,
         d =   2.205e-8,
+        Tc    = 364.90,        # [K]   NIST
+        Pc    = 4.6000e6,      # [Pa]  NIST
+        omega = 0.1408,        # [-]   NIST
     ),
     "C": ThermoParams(          # Hydrogen  (H2)
         dHf_298 =   0.0 * 1_000,   # [J mol⁻¹]  (0.0 kJ/mol → J)
