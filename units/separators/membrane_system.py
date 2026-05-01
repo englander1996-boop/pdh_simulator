@@ -63,13 +63,24 @@
                                化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値
   U_cond     = 1.0 kW/(m²·K)  冷却器（軽質炭化水素凝縮/冷却水）
                                化工便覧 改訂六版 表6・18  範囲 0.45〜1.14 の中央〜上限値
-  A_per_module = 500 m²        モジュール面積（メーカーカタログ値で要置換）
-  膜モジュール単価 [USD/m²]   TODO: 根拠文献を確認中。決まり次第 CAPEX_total に組み込む。
-                               （MemEquipmentData.CAPEX_total の TODO コメント参照）
   eta_comp   = 0.75            圧縮機断熱効率
                                化工便覧 改訂六版 p.333  ポリトロープ効率 0.7〜0.8 の中央値
                                （断熱効率とポリトロープ効率は厳密に異なるが初期設計では同値で近似）
   T_vap_superheat = 5 K        気化器出口の過熱度（露点 + 5K）
+
+■ ★★ 仮置き値 — 根拠文献未確定（要確認・要更新） ★★
+
+  A_per_module = 500 m²        モジュール 1 本あたり有効膜面積
+                               確認方法: Evonik SEPURAN・UBE 等のデータシートから
+                               中空糸寸法（外径・長さ・本数）を取得して算出する。
+                               実装箇所: MemFixedParams.A_per_module
+                               → 呼び出し時に UserWarning を発行。
+
+  膜モジュール単価 = 50 USD/m² 根拠未確定。高分子膜の概算値を暫定使用。
+                               確認方法: Hua et al. (2024) または ZIF-8 膜 TEA 論文。
+                               参考: 高分子膜の文献値 $50〜100/m² (Baker & Lokhandwala 2008)
+                               実装箇所: cost_parameters.MEM_UNIT_PRICE_USD_PER_M2
+                               → calc_mem_capex_okuyen 呼び出し時に UserWarning を発行。
 --------------------------------------------------------------------
 """
 
@@ -92,7 +103,7 @@ from src.eos import (
     compress_isentropic,
 )
 from src.thermo import PDHThermo
-from src.cost_calculator import calc_he_capex_okuyen, calc_comp_capex_okuyen
+from src.cost_calculator import calc_he_capex_okuyen, calc_comp_capex_okuyen, calc_mem_capex_okuyen
 
 # 成分順序: index 0 = C3H6 (EOS キー 'B'), index 1 = C3H8 (EOS キー 'A')
 _KEYS    = ['B', 'A']
@@ -146,8 +157,8 @@ class MemFixedParams:
     # 膜性能 — Hua et al. (2024) 実測値
     Q_A_GPU:         float = 40.0    # C3H6 透過度 [GPU]
     alpha:           float = 90.0    # C3H6/C3H8 選択性 [-]
-    # 機器仕様 — 暫定値（メーカーカタログで要確認）
-    A_per_module:    float = 500.0   # モジュール 1 本あたり有効膜面積 [m²]
+    # ★ 仮置き — メーカーカタログで要確認（Evonik SEPURAN 等のデータシートから算出）
+    A_per_module:    float = 500.0   # モジュール 1 本あたり有効膜面積 [m²]（仮置き）
     # 気化器
     T_vap_superheat: float = 5.0     # 露点超過の過熱度 [K]（設計ヒューリスティクス）
     U_vap:           float = 1.0     # 気化器総括伝熱係数 [kW/(m²·K)]
@@ -173,6 +184,12 @@ class MemFixedParams:
             raise ValueError("eta_comp は (0, 1] でなければなりません。")
         if self.T_hot <= 273.15:
             raise ValueError("T_hot は 273K 超でなければなりません。")
+        warnings.warn(
+            f"MemFixedParams: A_per_module = {self.A_per_module} m² は仮置き値です。"
+            " Evonik SEPURAN 等のデータシートから中空糸寸法を取得して算出後に更新してください。",
+            UserWarning,
+            stacklevel=2,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +218,8 @@ class MemProductStream:
 class MemEquipmentData:
     """機器サイズ・コスト推算テーブル（授業資料 R08-3 形式）
 
-    CAPEX は未実装（float('nan')）。事後に cost_calculator で計算予定。
+    CAPEX_mem・CAPEX_total は仮置き値を使用中（UserWarning が発行される）。
+    cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 を確定させると自動的に更新される。
 
     各フィールドの意味:
       A_vap / A_cond   : 熱交換器 伝熱面積 [m²]    → 機器タイプ: 熱交換器
@@ -233,11 +251,9 @@ class MemEquipmentData:
     CAPEX_comp_feed:  float = float('nan')  # フィード圧縮機
     CAPEX_comp_prod:  float = float('nan')  # 製品圧縮機
     CAPEX_cond:       float = float('nan')  # 製品冷却器
-    # TODO: 膜モジュール単価 [USD/m²] — 根拠文献を確認中。
-    #       決まり次第: CAPEX_mem = 単価 × A_mem × CEPCI補正 × 円換算
-    CAPEX_mem:        float = float('nan')  # 膜モジュール（単価未確定）
-    # CAPEX_total は CAPEX_mem が確定するまで nan
-    CAPEX_total:      float = float('nan')  # 合計 [億円]
+    # ★ 仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
+    CAPEX_mem:        float = float('nan')  # 膜モジュール（単価仮置き中）
+    CAPEX_total:      float = float('nan')  # 合計 [億円]（CAPEX_mem が仮置きのため暫定値）
 
 
 @dataclass
@@ -358,13 +374,16 @@ def _y_local(x: float, alpha: float, gamma: float) -> float:
     (1-alpha)*gamma * y² + [(alpha-1)*(x+gamma)+1] * y - alpha*x = 0
     の物理根（正かつ ≤ 1 の根）を返す。
     """
+    # ID-06: alpha=1 は選択性なし → 線形退化を避けて物理的に正しい y=x を直返し
+    if abs(alpha - 1.0) < 1e-10:
+        return x
     a = (1.0 - alpha) * gamma
     b = (alpha - 1.0) * (x + gamma) + 1.0
     c = -alpha * x
     disc = max(0.0, b**2 - 4.0*a*c)
     denom = -b - math.sqrt(disc)
     if abs(denom) < 1e-30:
-        return x  # フォールバック
+        return x
     return max(0.0, min(1.0, (2.0*c) / denom))
 
 
@@ -392,9 +411,23 @@ def _membrane_ode(F_C3H6_feed: float, F_C3H8_feed: float,
         y   = _y_local(x, alpha, gamma)
         J_c = Q_A_SI * (x * P_H - y * P_L)
         J_a = Q_B    * ((1.0-x) * P_H - (1.0-y) * P_L)
-        if J_c <= 0.0 or J_a <= 0.0:
-            return [0.0, 0.0]
-        return [-J_c, -J_a]
+        # 負フラックスをクリップ（逆拡散なし）。[0,0] 返却はやめ event に任せる
+        return [-max(J_c, 0.0), -max(J_a, 0.0)]
+
+    # ID-02: フラックス枯渇（min(J_c,J_a) が 0 を下回った瞬間）に積分を打ち切る。
+    # [0,0] を返し続けると Radau が超大ステップを踏みつつ終了しない場合があるため
+    # terminal event で明示的に終了させる。
+    def _event_no_flux(A, F):
+        fc  = max(F[0], 1e-12)
+        fa  = max(F[1], 1e-12)
+        x   = fc / (fc + fa)
+        y   = _y_local(x, alpha, gamma)
+        J_c = Q_A_SI * (x * P_H - y * P_L)
+        J_a = Q_B    * ((1.0-x) * P_H - (1.0-y) * P_L)
+        return min(J_c, J_a)  # 0 を下から上から切るとき (direction=-1) に停止
+
+    _event_no_flux.terminal  = True
+    _event_no_flux.direction = -1
 
     try:
         sol = solve_ivp(
@@ -404,11 +437,16 @@ def _membrane_ode(F_C3H6_feed: float, F_C3H8_feed: float,
             method='Radau',
             rtol=1e-5,
             atol=1e-8,
+            # ID-01: max_step を設定してステップ数を ~200 に抑えフリーズを防止。
+            # 低駆動力・巨大 A_mem 条件で無限に細かいステップを踏む問題を回避する。
+            max_step=max(A_mem / 200.0, 0.1),
+            events=_event_no_flux,
         )
     except Exception:
         return None, None
 
-    if not sol.success:
+    # status 0: t_span 末端まで完走 / status 1: terminal event 発火（正常終了）
+    if sol.status == -1:
         return None, None
 
     return float(sol.y[0, -1]), float(sol.y[1, -1])
@@ -431,6 +469,15 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
     A_cond    : 伝熱面積 [m²]
     """
     T_bp = bubble_point_T(P_dist, [y_C3H6, 1.0 - y_C3H6], _KEYS)
+
+    # ID-09: 圧縮機出口が既に泡点以下 → エンタルピー差が負になり Q_cond < 0
+    if T_in <= T_bp:
+        warnings.warn(
+            f"製品冷却器: 圧縮機出口温度 {T_in:.1f} K が泡点 {T_bp:.1f} K 以下です。"
+            " 透過ガスが既に凝縮状態のため冷却器モデルが無効です。",
+            UserWarning, stacklevel=3,
+        )
+        return T_bp, float('nan'), float('nan')
 
     H_gas_in  = _h_mol(T_in, P_dist, y_C3H6, 'vapor')
     H_liq_out = _h_mol(T_bp, P_dist, y_C3H6, 'liquid')
@@ -470,10 +517,29 @@ def simulate_membrane_system(
     MemSimulationResult
     """
     # ---- 入力バリデーション ----
+    # ID-08: 非正値チェック
+    if feed.P_in <= 0 or feed.T_in <= 0 or design.P_dist <= 0:
+        return _penalty_result()
     if design.P_H <= design.P_L:
-        warnings.warn("P_H <= P_L: 膜の駆動力がありません。")
+        warnings.warn("P_H <= P_L: 膜の駆動力がありません。", UserWarning, stacklevel=2)
         return _penalty_result()
     if design.A_mem <= 0 or design.P_H <= 0 or design.P_L <= 0:
+        return _penalty_result()
+    # ID-04: 製品圧縮機が減圧方向になる
+    if design.P_dist <= design.P_L:
+        warnings.warn(
+            f"P_dist={design.P_dist/1e5:.2f} bar <= P_L={design.P_L/1e5:.2f} bar:"
+            " 製品圧縮機が減圧方向になります。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result()
+    # ID-05: フィード圧縮機が減圧方向になる
+    if design.P_H <= feed.P_in:
+        warnings.warn(
+            f"P_H={design.P_H/1e5:.2f} bar <= P_in={feed.P_in/1e5:.2f} bar:"
+            " フィード圧縮機が減圧方向になります。",
+            UserWarning, stacklevel=2,
+        )
         return _penalty_result()
     if feed.F_C3H6 < 0 or feed.F_C3H8 < 0:
         return _penalty_result()
@@ -483,6 +549,19 @@ def simulate_membrane_system(
         return _penalty_result()
 
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
+
+    # ID-03: フィードが既にガス状（T_in >= 露点）の場合は液相エンタルピー計算が無効
+    try:
+        T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
+        if feed.T_in >= T_dew_feed:
+            warnings.warn(
+                f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
+                " 液相フィードを前提とするモデルと矛盾します。",
+                UserWarning, stacklevel=2,
+            )
+            return _penalty_result()
+    except Exception:
+        pass  # 露点計算失敗時は気化器内で検出される
 
     # mol/s 換算（内部計算用）
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
@@ -495,7 +574,8 @@ def simulate_membrane_system(
         )
     except Exception:
         return _penalty_result()
-    if math.isnan(Q_vap_kW):
+    # ID-10: Q_vap_kW だけでなく A_vap も nan チェック（LMTD 温度クロス時に nan になる）
+    if math.isnan(Q_vap_kW) or math.isnan(A_vap):
         return _penalty_result()
 
     # ---- ユニット 2: フィード圧縮機 ----
@@ -555,6 +635,9 @@ def simulate_membrane_system(
         )
     except Exception:
         return _penalty_result()
+    # ID-09/10: Q_cond_kW または A_cond が nan（圧縮機出口が泡点以下・LMTD クロス）
+    if math.isnan(Q_cond_kW) or math.isnan(A_cond):
+        return _penalty_result()
 
     # Case A 制約: 製品の泡点が冷却水出口温度を下回ると温度クロスが発生し
     # 冷却水では凝縮できない。冷媒は使用しない設計判断のため、この条件は
@@ -585,10 +668,15 @@ def simulate_membrane_system(
         capex_cond      = calc_he_capex_okuyen(A_cond)
     except Exception:
         capex_vap = capex_comp_feed = capex_comp_prod = capex_cond = float('nan')
-    # CAPEX_mem は膜モジュール単価が未確定のため nan
-    # CAPEX_total は CAPEX_mem 確定後に合算する
-    capex_mem   = float('nan')
-    capex_total = float('nan')   # TODO: capex_vap+comp_feed+comp_prod+cond+mem が揃ったら合算
+    # ★ 仮置き — MEM_UNIT_PRICE_USD_PER_M2 が根拠文献未確定のため暫定値
+    #   calc_mem_capex_okuyen 呼び出し時に UserWarning が発行される
+    try:
+        capex_mem = calc_mem_capex_okuyen(design.A_mem)
+    except Exception:
+        capex_mem = float('nan')
+    _capex_sum = capex_vap + capex_comp_feed + capex_comp_prod + capex_cond + capex_mem
+    # ID-07: 個別 CAPEX が nan（計算例外）のとき合計も nan になり最適化器がハングする
+    capex_total = _capex_sum if not math.isnan(_capex_sum) else _PENALTY
 
     return MemSimulationResult(
         retentate=MemRetentateStream(

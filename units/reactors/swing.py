@@ -30,7 +30,6 @@ from src.thermo import PDHThermo
 from src.kinetics import PDHKinetics
 from src.catalyst_model import calculate_activity_a
 from src.cost_calculator import calc_reactor_capex_okuyen
-from src.cost_parameters import DEPRECIATION_YEARS
 
 _thermo = PDHThermo()
 _kinetics = PDHKinetics()
@@ -162,7 +161,6 @@ class SimulationResult:
     effluent:    EffluentStream
     equipment:   EquipmentCost
     performance: PerformanceMetrics
-    TAC:         float  # Total Annualized Cost [億円/年]（= C_TM/8 + Annual_OPEX）
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +191,6 @@ def _penalty_result() -> SimulationResult:
             Conversion=0.0,
             Selectivity=0.0,
         ),
-        TAC=_PENALTY_CAPEX / DEPRECIATION_YEARS,
     )
 
 
@@ -391,10 +388,8 @@ def simulate_swing_reactor_system(
             D_m=design.D,
             N_reactors_total=N_reactors_total,
         )
-        tac = reactor_capex / DEPRECIATION_YEARS
     except Exception:
         reactor_capex = _PENALTY_CAPEX
-        tac = _PENALTY_CAPEX / DEPRECIATION_YEARS
 
     # ---- パフォーマンス指標 ----
     F_A_in  = feed.F_in.get('C3H8', 0.0)
@@ -427,5 +422,4 @@ def simulate_swing_reactor_system(
             Conversion=conversion,
             Selectivity=selectivity,
         ),
-        TAC=tac,
     )
