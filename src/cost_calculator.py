@@ -24,6 +24,8 @@ from .cost_parameters import (
     CEPCI_BASE, CEPCI_CURRENT,
     K_SWING,
     USD_TO_JPY, DEPRECIATION_YEARS, PLANT_INDIRECT_FACTOR,
+    K1_HE, K2_HE, K3_HE, A_HE_MIN, A_HE_MAX, B1_HE, B2_HE, FM_HE, FP_HE_DEFAULT,
+    K1_COMP, K2_COMP, K3_COMP, W_COMP_MIN, W_COMP_MAX, FBM_COMP,
 )
 
 
@@ -126,4 +128,73 @@ def calc_reactor_capex_okuyen(
     c_tm_usd = PLANT_INDIRECT_FACTOR * current_cost_usd * N_reactors_total
     return c_tm_usd * USD_TO_JPY / 1.0e8
 
+
+# ---------------------------------------------------------------------------
+# 熱交換器（固定管板式）
+# 出典: R08-3.pdf p.9 Table A.1 / p.10 Table A.4
+# ---------------------------------------------------------------------------
+
+def calc_he_capex_okuyen(
+    A_m2: float,
+    Fp: float = FP_HE_DEFAULT,
+    FM: float = FM_HE,
+) -> float:
+    """
+    熱交換器（固定管板式）の総建設費 [億円]。
+
+    C_BM = Cp0 × (B1_HE + B2_HE × Fp × FM)
+    C_TM = PLANT_INDIRECT_FACTOR × C_BM × CEPCI補正
+
+    Parameters
+    ----------
+    A_m2 : 伝熱面積 [m²]
+    Fp   : 圧力補正係数 [-]（デフォルト 1.0、低〜中圧仮定）
+    FM   : 材質係数 [-]（デフォルト 1.0、炭素鋼）
+    """
+    if A_m2 <= 0:
+        raise ValueError(f"calc_he_capex_okuyen: A={A_m2} は正値でなければなりません。")
+    if not (A_HE_MIN <= A_m2 <= A_HE_MAX):
+        warnings.warn(
+            f"calc_he_capex_okuyen: A={A_m2:.2f} m² は適用範囲 "
+            f"[{A_HE_MIN}, {A_HE_MAX}] m² 外です。",
+            UserWarning, stacklevel=2,
+        )
+
+    log_A  = math.log10(A_m2)
+    cp0    = 10.0 ** (K1_HE + K2_HE * log_A + K3_HE * log_A ** 2)
+    cbm    = cp0 * (B1_HE + B2_HE * Fp * FM)
+    current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
+    return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
+
+
+# ---------------------------------------------------------------------------
+# 圧縮機（遠心式、炭素鋼）
+# 出典: R08-3.pdf p.9 Table A.1 / p.13–14 Table A.6
+# ---------------------------------------------------------------------------
+
+def calc_comp_capex_okuyen(W_kW: float) -> float:
+    """
+    遠心式圧縮機の総建設費 [億円]。
+
+    C_BM = Cp0 × FBM_COMP  (Fp = 1.0、圧力補正なし)
+    C_TM = PLANT_INDIRECT_FACTOR × C_BM × CEPCI補正
+
+    Parameters
+    ----------
+    W_kW : 流体動力（実圧縮仕事） [kW]
+    """
+    if W_kW <= 0:
+        raise ValueError(f"calc_comp_capex_okuyen: W={W_kW} は正値でなければなりません。")
+    if not (W_COMP_MIN <= W_kW <= W_COMP_MAX):
+        warnings.warn(
+            f"calc_comp_capex_okuyen: W={W_kW:.1f} kW は適用範囲 "
+            f"[{W_COMP_MIN}, {W_COMP_MAX}] kW 外です。",
+            UserWarning, stacklevel=2,
+        )
+
+    log_W  = math.log10(W_kW)
+    cp0    = 10.0 ** (K1_COMP + K2_COMP * log_W + K3_COMP * log_W ** 2)
+    cbm    = cp0 * FBM_COMP
+    current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
+    return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
 

@@ -2,7 +2,7 @@
 
 **ファイルパス**: `units/separators/membrane_system.py`  
 **依存 EOS モジュール**: `src/eos.py`  
-**最終更新**: 2026-05-01
+**最終更新**: 2026-05-01（CAPEX実装・P_dist設計変数化・温度仕様修正）
 
 ---
 
@@ -39,7 +39,7 @@ PDH プロセスにおける **C₃H₆/C₃H₈ 膜分離システム** を 5 �
 | 分離対象 | C₃H₆ (プロピレン) / C₃H₈ (プロパン) 二成分系 |
 | 分離方式 | ZIF-8 系ポリマー膜（クロスフロー、圧力駆動型） |
 | 熱力学モデル | Peng-Robinson EOS（実在気体補正） |
-| 設計変数 | 膜供給側圧力 $P_H$、透過側圧力 $P_L$、総膜面積 $A_{mem}$ |
+| 設計変数 | 膜供給側圧力 $P_H$、透過側圧力 $P_L$、総膜面積 $A_{mem}$、後段蒸留塔操作圧力 $P_{dist}$ |
 | 出力 | 後段蒸留塔向け飽和液ストリーム＋機器サイズ（OPEX/CAPEX 推算テーブル） |
 
 ### プロセスフロー
@@ -299,8 +299,8 @@ $$A_{vap} = \frac{Q_{vap}\,[\mathrm{kW}]}{U_{vap}\,[\mathrm{kW/(m^2 K)}] \times 
 | $T_{vap,out}$ | 気化器出口ガス温度 | K |
 | $Q_{vap}$ | 気化器加熱量（= OPEX 蒸気消費基礎） | kW |
 | $A_{vap}$ | 気化器伝熱面積（= CAPEX サイズ） | m² |
-| $U_{vap}$ | 気化器総括伝熱係数（デフォルト 1.5） | kW/(m²·K) |
-| $T_{hot}$ | 熱媒（低圧蒸気）温度（デフォルト 423.15 K = 150°C） | K |
+| $U_{vap}$ | 気化器総括伝熱係数（1.0, 化工便覧 改訂六版 表6・18） | kW/(m²·K) |
+| $T_{hot}$ | 熱媒（LP Steam）温度（433.15 K = 160°C, コンテスト仕様） | K |
 
 ---
 
@@ -416,9 +416,9 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 | $T_{bp}$ | 透過ガス組成・$P_{dist}$ における泡点温度 | K |
 | $Q_{cond}$ | 冷却量（= OPEX 冷却水消費基礎） | kW |
 | $A_{cond}$ | 冷却器伝熱面積（= CAPEX サイズ） | m² |
-| $U_{cond}$ | 冷却器総括伝熱係数（デフォルト 1.0） | kW/(m²·K) |
-| $T_{cold,in}$ | 冷却水入口温度（デフォルト 303.15 K = 30°C） | K |
-| $T_{cold,out}$ | 冷却水出口温度（デフォルト 318.15 K = 45°C） | K |
+| $U_{cond}$ | 冷却器総括伝熱係数（1.0, 化工便覧 改訂六版 表6・18） | kW/(m²·K) |
+| $T_{cold,in}$ | 冷却水入口温度（303.15 K = 30°C, コンテスト仕様） | K |
+| $T_{cold,out}$ | 冷却水出口温度（313.15 K = 40°C, コンテスト仕様） | K |
 
 ---
 
@@ -434,18 +434,40 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 | 製品冷却器 | `Q_cond_kW` [kW] | 冷却水消費量換算の基礎 |
 | 膜モジュール | `n_modules` [本] | 膜交換コスト計算の基礎 |
 
-### 9-2. CAPEX 用データ（授業資料 R08-3 形式）
+### 9-2. CAPEX 推算（Turton Bare Module Cost 法）
 
-| 機器名 | 機器タイプ | 特徴サイズ $A$ | 単位 | ゲージ圧 $P_g$ [barg] |
-|---|---|---|---|---|
-| Vaporizer | 熱交換器 | `A_vap` | m² | `Pg_vap` = $P_{in}/10^5 - 1.01325$ |
-| Feed Compressor | 圧縮機 | `W_feed_kW` | kW | `Pg_feed` = $P_H/10^5 - 1.01325$ |
-| Membrane | 特殊機器 | `A_mem` | m² | `Pg_mem` = $P_H/10^5 - 1.01325$ |
-| Product Compressor | 圧縮機 | `W_prod_kW` | kW | `Pg_prod` = $P_{dist}/10^5 - 1.01325$ |
-| Condenser | 熱交換器 | `A_cond` | m² | `Pg_cond` = $P_{dist}/10^5 - 1.01325$ |
+**一次出典**: プロセス設計R08-3.pdf「プロセス設計(No. 3) 建設費と運転費の推算」（長谷部 伸治・外輪 健一郎）
 
-> **注**: ゲージ圧は絶対圧 [bar] から大気圧 1.01325 bar を引いて算出する。  
-> CAPEX 相関係数（$K_1$, $K_2$, $K_3$, $B_1$, $B_2$ 等）は `src/cost_parameters.py` に実装予定（現在 `CAPEX_total = nan`）。
+計算フロー（`src/cost_calculator.py`）:
+
+$$C_{p0} = 10^{K_1 + K_2 \log_{10}A + K_3 (\log_{10}A)^2}$$
+
+$$C_{BM} = C_{p0} \times F_{BM}$$
+
+$$C_{TM} [\text{億円}] = 1.18 \times C_{BM} \times \frac{\text{CEPCI}_{2016}}{\text{CEPCI}_{2001}} \times \frac{\text{JPY}}{\text{USD}} \times 10^{-8}$$
+
+CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
+
+| 機器名 | 機器タイプ | サイズ変数 | $K_1$ / $K_2$ / $K_3$ | $F_{BM}$ | 出典ページ |
+|---|---|---|---|---|---|
+| 気化器（Vaporizer） | 熱交換器（固定管板式） | $A_{vap}$ [m²] | 4.3247 / −0.3030 / 0.1634 | $B_1 + B_2 F_p F_M = 1.63 + 1.66 \times 1.0 \times 1.0$ | p.9, p.10 |
+| フィード圧縮機 | 遠心式圧縮機（CS） | $W_{feed}$ [kW] | 2.2897 / 1.3604 / −0.1027 | 2.15（グラフ ID=1） | p.9, p.13–14 |
+| 製品圧縮機 | 遠心式圧縮機（CS） | $W_{prod}$ [kW] | 同上 | 2.15 | 同上 |
+| 製品冷却器（Condenser） | 熱交換器（固定管板式） | $A_{cond}$ [m²] | 同上（気化器と同型） | 同上（気化器と同値） | p.9, p.10 |
+| 膜モジュール | 特殊機器 | $A_{mem}$ [m²] | — | — | **TODO: 単価未確定** |
+
+> **圧縮機の適用範囲注意**: Turton 相関の適用範囲は 450–3000 kW。  
+> 100 kmol/h フィード・P_H=10 bar・P_dist=20 bar 条件では W_feed≈182 kW, W_prod≈108 kW となり  
+> 範囲外の外挿になる。最終設計流量確定後に再確認すること。
+
+| 出力フィールド | 単位 | 状態 |
+|---|---|---|
+| `CAPEX_vap` | 億円 | 実装済み（`calc_he_capex_okuyen`） |
+| `CAPEX_comp_feed` | 億円 | 実装済み（`calc_comp_capex_okuyen`） |
+| `CAPEX_comp_prod` | 億円 | 実装済み（`calc_comp_capex_okuyen`） |
+| `CAPEX_cond` | 億円 | 実装済み（`calc_he_capex_okuyen`） |
+| `CAPEX_mem` | 億円 | **TODO**: 膜モジュール単価 [USD/m²] 未確定 |
+| `CAPEX_total` | 億円 | **TODO**: CAPEX_mem 確定後に合算 |
 
 ---
 
@@ -453,16 +475,17 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 
 | # | 仮定 | 根拠・影響 |
 |---|---|---|
-| 1 | **膜等温操作** | 透過ガスの出口温度はフィード圧縮機出口温度と等しいとする |
+| 1 | **膜等温操作** | 透過ガスの出口温度はフィード圧縮機出口温度と等しいとする。Hua et al. (2024) の測定条件（室温・大気圧）と整合 |
 | 2 | **膜等圧操作** | 非透過側 $P_H$ = 一定、透過側 $P_L$ = 一定（圧力損失なし） |
-| 3 | **クロスフローモデル** | 非透過側プラグフロー、透過ガスは即時排出（逆拡散なし） |
+| 3 | **クロスフローモデル** | 非透過側プラグフロー、透過ガスは即時排出（逆拡散なし）。スパイラル型モジュールの標準近似 |
 | 4 | **線形透過則（溶解拡散）** | フラックス = 透過度 × 分圧差（非線形効果は無視） |
 | 5 | **透過度は組成・圧力非依存** | $Q_A$, $\alpha$ は膜設計時の代表値を使用 |
-| 6 | **van der Waals 混合則 kij=0** | C₃H₆/C₃H₈ 近似成分のため交差パラメータを省略 |
+| 6 | **van der Waals 混合則 kij=0** | C₃H₆/C₃H₈ は分子構造が近く文献値 kij≈0.01 と小さいため初期設計では省略 |
 | 7 | **2 成分系のみ** | 反応器流出ガス中の C₂H₄, CH₄, C₂H₆, H₂, n-C₄H₁₀ は前段蒸留塔で除去済みと仮定 |
-| 8 | **気化器 LMTD: 熱媒温度一定** | 蒸気凝縮を熱媒と仮定し $T_{hot}$ = const |
-| 9 | **冷却器 LMTD: 向流** | ガス入口端 = $T_{in} - T_{cold,out}$、液出口端 = $T_{bp} - T_{cold,in}$ |
-| 10 | **CAPEX は現在 NaN** | `cost_parameters.py` 拡張後に実装予定 |
+| 8 | **気化器 LMTD: 熱媒温度一定** | 蒸気凝縮を熱媒と仮定し $T_{hot}$ = const（LP Steam 160°C, コンテスト仕様） |
+| 9 | **冷却器 LMTD: 向流** | ガス入口端 = $T_{in} - T_{cold,out}$、液出口端 = $T_{bp} - T_{cold,in}$（冷却水 30→40°C, コンテスト仕様） |
+| 10 | **冷媒不使用（Case A）** | 製品冷却器は冷却水のみ。泡点が $T_{cold,out}$(40°C) を下回る場合は温度クロスが発生しペナルティ返却。冷媒モデルは目的関数の不連続性を生むため採用しない |
+| 11 | **CAPEX: 熱交・圧縮機は実装済み** | Turton Bare Module Cost 法（プロセス設計R08-3.pdf）。膜モジュール単価のみ未確定（CAPEX_total = nan） |
 
 ---
 
@@ -477,6 +500,7 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 | `P_H` | float | Pa | 膜供給側（高圧）圧力 |
 | `P_L` | float | Pa | 膜透過側（低圧）圧力 |
 | `A_mem` | float | m² | 総膜面積 |
+| `P_dist` | float | Pa | 後段蒸留塔操作圧力（製品圧縮機出口圧力）。C3H6 97%組成では PR EOS 試算で ≳ 17 bar が冷却水使用の目安。P_L より大きくなければならない（`__post_init__` で検証） |
 
 #### `MemFeedStream` — 入力ストリーム（前段蒸留塔底液）
 
@@ -489,21 +513,21 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 
 #### `MemFixedParams` — 固定パラメータ
 
-| フィールド | デフォルト | 単位 | 説明 |
+| フィールド | デフォルト | 単位 | 説明・根拠 |
 |---|---|---|---|
-| `Q_A_GPU` | 40.0 | GPU | C₃H₆ 透過度 |
-| `alpha` | 90.0 | — | C₃H₆/C₃H₈ 膜選択性 |
-| `A_per_module` | 500.0 | m² | 1 モジュールあたり有効膜面積 |
-| `P_dist` | 15.0×10⁵ | Pa | 後段蒸留塔操作圧力 |
-| `T_vap_superheat` | 5.0 | K | 気化器 露点超過過熱度 |
-| `U_vap` | 1.5 | kW/(m²·K) | 気化器総括伝熱係数 |
-| `T_hot` | 423.15 | K | 熱媒（低圧蒸気）温度 |
-| `U_cond` | 1.0 | kW/(m²·K) | 冷却器総括伝熱係数 |
-| `T_cold_in` | 303.15 | K | 冷却水入口温度 |
-| `T_cold_out` | 318.15 | K | 冷却水出口温度 |
-| `eta_comp` | 0.75 | — | 圧縮機断熱効率 |
+| `Q_A_GPU` | 40.0 | GPU | C₃H₆ 透過度。Hua et al. (2024) 実測値 |
+| `alpha` | 90.0 | — | C₃H₆/C₃H₈ 膜選択性。Hua et al. (2024) 実測値 |
+| `A_per_module` | 500.0 | m² | 1 モジュールあたり有効膜面積（**暫定**、メーカーカタログ値で要確認） |
+| `T_vap_superheat` | 5.0 | K | 気化器 露点超過過熱度（設計ヒューリスティクス） |
+| `U_vap` | 1.0 | kW/(m²·K) | 気化器総括伝熱係数。化工便覧 改訂六版 表6・18（範囲 0.45〜1.14 の中央〜上限値） |
+| `T_hot` | 433.15 | K | 熱媒（LP Steam）温度 = 160°C。コンテスト仕様（入手可能スチームのうち最安） |
+| `U_cond` | 1.0 | kW/(m²·K) | 冷却器総括伝熱係数。化工便覧 改訂六版 表6・18（範囲 0.45〜1.14 の中央〜上限値） |
+| `T_cold_in` | 303.15 | K | 冷却水入口温度 = 30°C。コンテスト仕様 |
+| `T_cold_out` | 313.15 | K | 冷却水出口温度 = 40°C。コンテスト仕様 |
+| `eta_comp` | 0.75 | — | 圧縮機断熱効率。化工便覧 改訂六版 p.333（ポリトロープ効率 0.7〜0.8 の中央値） |
 
-> `MemFixedParams` は `__post_init__` で `P_dist > 0`、`0 < eta_comp ≤ 1.0`、`T_hot > 273 K` を検証する。
+> `MemFixedParams` の `__post_init__` は `0 < eta_comp ≤ 1.0`、`T_hot > 273 K` を検証する。  
+> `P_dist` は MemDesignVars に移動済み（最適化変数）。
 
 ### 出力
 
@@ -553,7 +577,12 @@ $$A_{cond} = \frac{Q_{cond}\,[\mathrm{kW}]}{U_{cond}\,[\mathrm{kW/(m^2 K)}] \tim
 | `A_cond` | m² | 製品冷却器伝熱面積 |
 | `Pg_cond` | barg | 製品冷却器ゲージ圧 |
 | `Q_cond_kW` | kW | 製品冷却器冷却量（OPEX 用） |
-| `CAPEX_total` | 億円 | 合計資本費（現在 `nan`） |
+| `CAPEX_vap` | 億円 | 気化器 CAPEX（実装済み） |
+| `CAPEX_comp_feed` | 億円 | フィード圧縮機 CAPEX（実装済み） |
+| `CAPEX_comp_prod` | 億円 | 製品圧縮機 CAPEX（実装済み） |
+| `CAPEX_cond` | 億円 | 製品冷却器 CAPEX（実装済み） |
+| `CAPEX_mem` | 億円 | 膜モジュール CAPEX（**TODO: 単価未確定**, `nan`） |
+| `CAPEX_total` | 億円 | 合計資本費（CAPEX_mem 確定後に合算、現在 `nan`） |
 
 ---
 
@@ -626,9 +655,10 @@ feed = MemFeedStream(
     P_in   = P_in,    # Pa
 )
 design = MemDesignVars(
-    P_H   = 15.0e5,   # Pa (15 bar)
-    P_L   =  1.5e5,   # Pa (1.5 bar)
-    A_mem = 30000.0,  # m²
+    P_H    = 15.0e5,   # Pa (15 bar)
+    P_L    =  1.5e5,   # Pa (1.5 bar)
+    A_mem  = 30000.0,  # m²
+    P_dist = 20.0e5,   # Pa (20 bar) — 冷却水使用のため ≳ 17 bar 目安
 )
 
 result = simulate_membrane_system(design, feed, MemFixedParams())
@@ -643,8 +673,8 @@ print(f"Q_vap_kW    = {result.equipment.Q_vap_kW:.0f} kW")
 
 ```python
 def objective(x):
-    P_H, P_L, A_mem = x
-    design = MemDesignVars(P_H=P_H, P_L=P_L, A_mem=A_mem)
+    P_H, P_L, A_mem, P_dist = x
+    design = MemDesignVars(P_H=P_H, P_L=P_L, A_mem=A_mem, P_dist=P_dist)
     r = simulate_membrane_system(design, feed, fixed)
     purity_penalty = max(0.0, 0.99 - r.perm_purity) * 1e6
     return r.equipment.W_feed_kW + r.equipment.W_prod_kW + purity_penalty
@@ -658,8 +688,8 @@ def objective(x):
 # 膜性能を変更する場合
 fixed = MemFixedParams(Q_A_GPU=60.0, alpha=100.0)
 
-# 後段蒸留塔操作圧力を変更する場合
-fixed = MemFixedParams(P_dist=18.0e5)
+# 後段蒸留塔操作圧力を変更する場合（MemDesignVars で指定）
+design = MemDesignVars(P_H=15.0e5, P_L=1.5e5, A_mem=30000.0, P_dist=22.0e5)
 
 # 圧縮機効率を変更する場合
 fixed = MemFixedParams(eta_comp=0.80)
