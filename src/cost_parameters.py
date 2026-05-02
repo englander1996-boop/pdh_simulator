@@ -62,8 +62,10 @@ K_SWING: float = 1.2
 # 経済パラメータ
 # ---------------------------------------------------------------------------
 
-USD_TO_JPY: float = 110.0           # 為替レート [JPY/USD]
+USD_TO_JPY: float = 157.08          # 為替レート [JPY/USD] 5月2日 14:24 UTC · Morningstar
 DEPRECIATION_YEARS: int = 8          # 減価償却年数 [年]
+#from 『減価償却資産の耐用年数等に関する省令』の別表第二（機械及び装置の耐用年数表）
+# 化学工業用設備（その他の設備）
 PLANT_INDIRECT_FACTOR: float = 1.18  # 据付・間接費拡張係数
 
 
