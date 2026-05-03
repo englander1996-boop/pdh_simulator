@@ -127,9 +127,13 @@ class PDHKinetics:
         K_eq: float,
     ) -> float:
         """
-        反応1 速度 r1 [mol m⁻³ s⁻¹]
+        反応1 速度 r1 [mol m⁻³-cat s⁻¹]
 
         r1 = a * k1 * (P_A − P_B·P_C / K_eq) / (1 + P_B / K_B)
+
+        単位は触媒体積基準 (m³-cat)。コンテスト要項 §3-2 参照。
+        活性係数 a は脱水素反応 r1 のみに適用。
+        コンテスト要項 §3-2 の速度式定義による仕様であり、r2・r3 には a が含まれない。
 
         Parameters
         ----------
@@ -146,9 +150,12 @@ class PDHKinetics:
 
     def _r2(self, P_A: float, T: float) -> float:
         """
-        反応2 速度 r2 [mol m⁻³ s⁻¹]
+        反応2 速度 r2 [mol m⁻³-cat s⁻¹]
 
-        r2 = k2 * P_A
+        r2 = k2 * P_A   ← 活性係数 a なし
+
+        単位は触媒体積基準 (m³-cat)。コンテスト要項 §3-2 参照。
+        コンテスト要項 §3-2 でクラッキング反応 r2 の式に a は含まれない。
 
         Parameters
         ----------
@@ -159,9 +166,12 @@ class PDHKinetics:
 
     def _r3(self, P_D: float, P_C: float, T: float) -> float:
         """
-        反応3 速度 r3 [mol m⁻³ s⁻¹]
+        反応3 速度 r3 [mol m⁻³-cat s⁻¹]
 
-        r3 = k3 * P_D * P_C
+        r3 = k3 * P_D * P_C   ← 活性係数 a なし
+
+        単位は触媒体積基準 (m³-cat)。コンテスト要項 §3-2 参照。
+        コンテスト要項 §3-2 でエチレン水素化反応 r3 の式に a は含まれない。
 
         Parameters
         ----------
