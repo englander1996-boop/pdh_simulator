@@ -1,7 +1,7 @@
 """
 Bare Module Cost法の計算ロジック
 
-対象装置: 横型プロセス容器（Horizontal process vessel）
+対象装置: 縦型プロセス容器（Vertical process vessel）
 出典: 授業資料 プロセス設計R08-3.pdf
 
 計算フロー
@@ -39,7 +39,7 @@ def calc_cp0(A: float) -> float:
     Parameters
     ----------
     A : float
-        容器体積 [m³]（推算式適用範囲: 0.1〜628 m³）
+        容器体積 [m³]（推算式適用範囲: 0.3〜520 m³）
 
     Returns
     -------

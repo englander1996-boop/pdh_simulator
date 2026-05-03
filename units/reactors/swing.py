@@ -250,8 +250,8 @@ def _ode_axial(z: float, y: np.ndarray,
 
     rates = np.array([r1, r2, r3])  # [mol/m³_cat/s]
 
-    # 物質収支: dF_i/dz = eps * A * Σ stoich[i,j] * r[j]  [mol/(s·m)]
-    dFdz = eps * A_cross * (_STOICH @ rates)
+    # 物質収支: dF_i/dz = (1-eps) * A * Σ stoich[i,j] * r[j]  [mol/(s·m)]
+    dFdz = (1.0 - eps) * A_cross * (_STOICH @ rates)
 
     # エネルギー収支（断熱）: dT/dz = -((1-eps) * A * Σ ΔH_j * r_j) / Σ F_i * Cp_i
     cp_dict = calc_Cp(T_local)
@@ -369,18 +369,18 @@ def simulate_swing_reactor_system(
 
     # ---- 装置計算 ----
     A_cross = math.pi / 4.0 * design.D ** 2
-    V_cat_total = A_cross * design.z_cat * fixed.eps
+    V_cat_total = A_cross * design.z_cat * (1.0 - fixed.eps)
     N_parallel = max(math.ceil(V_cat_total / fixed.V_cat_max_per_vessel), 1)
     N_swing_sets = math.ceil(fixed.t_regen / design.t_cyc) + 1
     N_reactors_total = N_parallel * N_swing_sets
 
-    V_vessel_actual = (V_cat_total / N_parallel) / fixed.eps  # [m³]
+    V_vessel_actual = (V_cat_total / N_parallel) / (1.0 - fixed.eps)  # [m³]
     catalyst_weight_total = V_cat_total * N_swing_sets * fixed.rho_p  # [kg]
 
     if V_vessel_actual <= 0:
         return _penalty_result()
 
-    # CAPEX: Bare Module Cost法による推算（横型プロセス容器として計算）
+    # CAPEX: Bare Module Cost法による推算（縦型プロセス容器）
     try:
         reactor_capex = calc_reactor_capex_okuyen(
             V_vessel_m3=V_vessel_actual,

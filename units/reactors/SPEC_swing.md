@@ -363,7 +363,7 @@ $$W_{cat,total} = V_{cat,total} \times N_{swing,sets} \times \rho_p \quad [\math
 
 ## 7. コスト計算（Bare Module Cost法）
 
-`src/cost_calculator.py` の関数を使用。対象装置は **横型プロセス容器（Horizontal process vessel）**。
+`src/cost_calculator.py` の関数を使用。対象装置は **縦型プロセス容器（Vertical process vessel）**。
 
 ### 7-1. 計算フロー
 
@@ -391,7 +391,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | 記号 | 意味 | 単位 |
 |---|---|---|
 | $C_p^0$ | 基本コスト（Turton 相関式） | USD（2001年基準） |
-| $K_1,\, K_2,\, K_3$ | 横型プロセス容器の基本コスト相関係数 | — |
+| $K_1,\, K_2,\, K_3$ | 縦型プロセス容器の基本コスト相関係数 | — |
 | $A$ | 容器体積（$= V_{vessel,actual}$） | m³ |
 | $F_p$ | 圧力係数 | — |
 | $P_g$ | ゲージ圧力（$= P_{abs}[\mathrm{bar}] - 1.01325$） | bar |
@@ -439,7 +439,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | 5 | **触媒活性は空間方向に均一**（入口温度で代表） | コーキングが軸方向温度プロファイルに依存しないという簡略化 |
 | 6 | **再生後の触媒は完全回復**（$a(t=0) = 1.0$） | 各サイクル開始時に新鮮触媒として初期化 |
 | 7 | **時間サンプリング間の内挿は台形則** | 20 点（デフォルト）で精度十分と仮定 |
-| 8 | **CAPEX は横型プロセス容器として推算** | 竪型や特殊形状には適用外 |
+| 8 | **CAPEX は縦型プロセス容器として推算** | 出典: 授業資料 プロセス設計R08-3.pdf 付録A Table A.1 |
 | 9 | **OPEX は計算対象外**（CAPEX のみ出力） | 反応器単体では後段分離コスト等を確定できないため。TAC は上位スクリプトで全ユニット CAPEX を合算してから計算する |
 
 ---
