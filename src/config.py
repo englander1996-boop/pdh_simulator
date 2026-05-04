@@ -188,6 +188,10 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   9.274e-3,
         c =  -1.381e-5,
         d =   7.645e-9,
+        # PR EOS パラメータ — 化学工学便覧 改訂六版 表1.3
+        Tc    =  33.2,         # [K]
+        Pc    = 1.30e6,        # [Pa]  (1.30 MPa)
+        omega = -0.220,        # [-]
     ),
     "D": ThermoParams(          # Ethylene  (C2H4)
         dHf_298 =  52.3 * 1_000,   # [J mol⁻¹]  (52.3 kJ/mol → J)
@@ -197,6 +201,10 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   1.566e-1,
         c =  -8.349e-5,
         d =   1.755e-8,
+        # PR EOS パラメータ — 化学工学便覧 改訂六版 表1.3
+        Tc    = 282.4,         # [K]
+        Pc    = 5.03e6,        # [Pa]  (5.03 MPa)
+        omega =  0.085,        # [-]
     ),
     "E": ThermoParams(          # Methane   (CH4)
         dHf_298 = -74.9 * 1_000,   # [J mol⁻¹]  (-74.9 kJ/mol → J)
@@ -206,6 +214,10 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   5.213e-2,
         c =   1.197e-5,
         d =  -1.132e-8,
+        # PR EOS パラメータ — 化学工学便覧 改訂六版 表1.3
+        Tc    = 190.6,         # [K]
+        Pc    = 4.60e6,        # [Pa]  (4.60 MPa)
+        omega =  0.008,        # [-]
     ),
     "F": ThermoParams(          # Ethane    (C2H6)
         dHf_298 = -84.7 * 1_000,   # [J mol⁻¹]  (-84.7 kJ/mol → J)
@@ -215,6 +227,10 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   1.781e-1,
         c =  -6.938e-5,
         d =   8.713e-9,
+        # PR EOS パラメータ — 化学工学便覧 改訂六版 表1.3
+        Tc    = 305.4,         # [K]
+        Pc    = 4.88e6,        # [Pa]  (4.88 MPa)
+        omega =  0.098,        # [-]
     ),
     "Z": ThermoParams(          # n-Butane  (C4H10)
         dHf_298 = -126.2 * 1_000,  # [J mol⁻¹]  (-126.2 kJ/mol → J)
