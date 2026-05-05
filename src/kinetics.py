@@ -142,7 +142,7 @@ class PDHKinetics:
         P_C   : 分圧 水素       (C: H2)    [Pa]
         T     : 温度                        [K]
         a     : 触媒劣化パラメータ（活性）  [-]
-        K_eq  : 反応1 平衡定数              [Pa²]
+        K_eq  : 反応1 平衡定数              [Pa]
         """
         driving_force = P_A - (P_B * P_C / K_eq)
         adsorption = 1.0 + P_B / self._K_B(T)
@@ -214,7 +214,7 @@ class PDHKinetics:
         T    : 温度                        [K]
         a    : 触媒劣化パラメータ（0〜1）  [-]
               1.0 = 新鮮な触媒、0.0 = 完全失活
-        K_eq : 反応1（脱水素）の平衡定数   [Pa²]
+        K_eq : 反応1（脱水素）の平衡定数   [Pa]
               外部（熱力学モデル等）から供給すること。
 
         Returns

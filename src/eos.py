@@ -136,7 +136,7 @@ def _cubic_z(A: float, B: float) -> List[float]:
     roots = np.roots(coeffs)
     return sorted([
         r.real for r in roots
-        if abs(r.imag) < 1e-8 and r.real > B + 1e-10
+        if abs(r.imag) < 1e-8 * max(abs(r.real), 1.0) and r.real > B + 1e-10
     ])
 
 
@@ -294,17 +294,27 @@ def bubble_point_T(P: float, x: List[float], keys: List[str],
         y = [yi / max(s, 1e-30) for yi in y]
 
         # 逐次置換: φ^V を y に合わせて更新
-        for _ in range(20):
+        for _ in range(50):
             Z_V   = z_factor(T, P, y, keys, 'vapor')
             phi_V = [fugacity_coeff(i, T, P, y, keys, Z_V) for i in range(n)]
-            K     = [phi_L[i] / max(phi_V[i], 1e-30) for i in range(n)]
-            y     = [x[i]*K[i] for i in range(n)]
-            s     = sum(y)
-            y     = [yi / max(s, 1e-30) for yi in y]
+            K_new = [phi_L[i] / max(phi_V[i], 1e-30) for i in range(n)]
+            y_new = [x[i]*K_new[i] for i in range(n)]
+            s     = sum(y_new)
+            y_new = [yi / max(s, 1e-30) for yi in y_new]
+            if max(abs(y_new[i] - y[i]) for i in range(n)) < 1e-7:
+                K = K_new; y = y_new; break
+            K = K_new; y = y_new
 
         return sum(x[i]*K[i] for i in range(n)) - 1.0
 
-    return brentq(obj, T_lo, T_hi, xtol=0.05, maxiter=200)
+    try:
+        return brentq(obj, T_lo, T_hi, xtol=0.05, maxiter=200)
+    except ValueError:
+        warnings.warn(
+            f"bubble_point_T: brentq 収束失敗 [{T_lo:.1f}, {T_hi:.1f}] K。nan を返します。",
+            UserWarning, stacklevel=2,
+        )
+        return float('nan')
 
 
 # ---------------------------------------------------------------------------
@@ -342,17 +352,27 @@ def dew_point_T(P: float, y: List[float], keys: List[str],
         x = [xi / max(s, 1e-30) for xi in x]
 
         # 逐次置換: φ^L を x に合わせて更新
-        for _ in range(20):
+        for _ in range(50):
             Z_L   = z_factor(T, P, x, keys, 'liquid')
             phi_L = [fugacity_coeff(i, T, P, x, keys, Z_L) for i in range(n)]
-            K     = [phi_L[i] / max(phi_V[i], 1e-30) for i in range(n)]
-            x     = [y[i] / max(K[i], 1e-30) for i in range(n)]
-            s     = sum(x)
-            x     = [xi / max(s, 1e-30) for xi in x]
+            K_new = [phi_L[i] / max(phi_V[i], 1e-30) for i in range(n)]
+            x_new = [y[i] / max(K_new[i], 1e-30) for i in range(n)]
+            s     = sum(x_new)
+            x_new = [xi / max(s, 1e-30) for xi in x_new]
+            if max(abs(x_new[i] - x[i]) for i in range(n)) < 1e-7:
+                K = K_new; x = x_new; break
+            K = K_new; x = x_new
 
         return sum(y[i] / max(K[i], 1e-30) for i in range(n)) - 1.0
 
-    return brentq(obj, T_lo, T_hi, xtol=0.05, maxiter=200)
+    try:
+        return brentq(obj, T_lo, T_hi, xtol=0.05, maxiter=200)
+    except ValueError:
+        warnings.warn(
+            f"dew_point_T: brentq 収束失敗 [{T_lo:.1f}, {T_hi:.1f}] K。nan を返します。",
+            UserWarning, stacklevel=2,
+        )
+        return float('nan')
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +425,14 @@ def compress_isentropic(
     try:
         T2s = brentq(entropy_balance, T_lo, T_hi, xtol=0.1, maxiter=200)
     except ValueError:
-        T2s = brentq(entropy_balance, T1 + 0.5, 1200.0, xtol=0.1, maxiter=300)
+        try:
+            T2s = brentq(entropy_balance, T1 + 0.5, 1200.0, xtol=0.1, maxiter=300)
+        except ValueError:
+            warnings.warn(
+                "compress_isentropic: entropy_balance brentq 収束失敗。理想気体近似で T2s を推算。",
+                UserWarning, stacklevel=2,
+            )
+            T2s = T1 * (P2 / P1) ** ((kappa_approx - 1.0) / kappa_approx)
 
     Z2s  = z_factor(T2s, P2, x, keys, 'vapor')
     Hr2s = residual_enthalpy(T2s, P2, x, keys, Z2s)

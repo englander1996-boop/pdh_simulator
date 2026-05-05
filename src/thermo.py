@@ -244,4 +244,6 @@ class PDHThermo:
         dG_T = dH_T - T * dS_T
 
         # K_eq [Pa] = P_STD · Kp (無次元)
-        return _P_STD * math.exp(-dG_T / (R * T))
+        # exp 引数を上限クランプ (math.exp の最大引数 ≈ 709 を超えると OverflowError)
+        exp_arg = min(-dG_T / (R * T), 700.0)
+        return _P_STD * math.exp(exp_arg)
