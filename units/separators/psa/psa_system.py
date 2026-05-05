@@ -74,6 +74,8 @@ PDE モデル
       フィードの主成分は H2 であり、吸着成分 (CH4, C2H4, C2H6) の
       モル分率は合計で数 mol% 以下。吸着による気相成分の減少が速度に
       与える影響は相対誤差 5% 未満に収まるため等速近似を採用する。
+      ※ C3 成分 (C3H8, C3H6) は u_0 計算から除外（入口付近で即吸着と仮定）。
+      C3 モル分率が大きい場合は入口速度を過小推算するため要確認。
 
   [N_abs_parallel = 1（並列塔なし）]
       必要塔数は N_total = ceil(t_des/t_abs) + 1 で決まる。
@@ -94,6 +96,9 @@ PDE モデル
       低圧パージ (P_des ≈ 1 atm) では吸着平衡値 q* ≈ 0 となるため、
       LDF 式 dq/dt = KFa·(0 - q) の解が q(t) = q₀·exp(-KFa·t) になる。
       空間平均 q_avg に適用することで PDE の再積分を省略する。
+      ※ 固相負荷量の z 方向分布（入口高・出口低）を無視するため、
+      入口高負荷セルが律速になる場合に t_des を過小推算する可能性がある。
+      安全係数 desorption_time_safety_factor=1.2 でこのリスクをカバーしている。
 
 ■ ★★ 仮置き値 — 根拠文献未確定 ★★
 
@@ -143,6 +148,8 @@ _EOS_KEYS   = ['C', 'E', 'D', 'F']              # PR EOS 対象: H2, CH4, C2H4, 
 _C3_KEYS    = ['A', 'B']                         # 全量オフガス成分
 _N_ADS      = 3                                  # 吸着成分数
 _N_Z        = 20  # 空間グリッド点数: 計算速度と数値拡散のバランスから選択（未検証）
+_U0_MAX     = 2.0  # [m/s] 空塔速度の上限: 超過時はペナルティを返す (LSODA フリーズ防止)
+_T_ABS_MIN  = 1.0  # [s]   CSS補正後の最小吸着時間: 未満はペナルティ (scale 発散防止)
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +349,12 @@ def _calc_feed_state(
 
     try:
         Z = z_factor(T_abs, P_in, x, _EOS_KEYS, phase='vapor')
-    except Exception:
+    except Exception as e:
+        warnings.warn(
+            f"_calc_feed_state: z_factor 計算失敗 ({e})。理想気体 Z=1.0 を使用。"
+            f" u_0・C_feed に誤差が混入します。",
+            UserWarning, stacklevel=2,
+        )
         Z = 1.0
 
     C_total = P_in / (Z * R * T_abs)  # [mol/m³]
@@ -362,7 +374,6 @@ def _run_adsorption(
     C_feed:             np.ndarray,  # [mol/m³] (CH4, C2H4, C2H6)
     u_0:                float,       # [m/s] 空塔速度
     L_bed:              float,       # [m]
-    A_col:              float,       # [m²]
     rho_b:              float,       # [kg/m³]
     eps:                float,       # [-]
     kfa:                np.ndarray,  # [1/s]  (CH4, C2H4, C2H6)
@@ -384,17 +395,19 @@ def _run_adsorption(
 
     Returns
     -------
-    t_abs           : float           破過時刻 [s]
-    q_final         : np.ndarray      固相負荷量 shape (N_z, 3) [mol/kg]
-    total_moles_out : np.ndarray      出口累積モル量 shape (3,) [mol]
-    converged       : bool            True = 破過イベントで停止
+    t_abs     : float           破過時刻 [s]
+    q_final   : np.ndarray      固相負荷量 shape (N_z, 3) [mol/kg]
+    sol_t     : np.ndarray      積分時刻列 shape (n_t,) [s]
+    C_outlet  : np.ndarray      出口濃度時系列 shape (N_ADS, n_t) [mol/m³]
+    converged : bool            True = 破過イベントで停止
     """
     dz    = L_bed / _N_Z
     u_eps = u_0 / eps  # 実際の流体速度 [m/s]
 
     def rhs(t, y):
-        C = y[:_N_Z * _N_ADS].reshape(_N_Z, _N_ADS)   # [mol/m³]
-        q = y[_N_Z * _N_ADS:].reshape(_N_Z, _N_ADS)   # [mol/kg]
+        # 数値誤差による負値を防止 (LSODA は非負制約を持たない)
+        C = np.maximum(y[:_N_Z * _N_ADS].reshape(_N_Z, _N_ADS), 0.0)   # [mol/m³]
+        q = np.maximum(y[_N_Z * _N_ADS:].reshape(_N_Z, _N_ADS), 0.0)   # [mol/kg]
 
         # 多成分 Langmuir (Markham-Benton)
         aC    = a_lang * C                              # [-], shape (N_z, 3)
@@ -437,12 +450,11 @@ def _run_adsorption(
     # 固相最終分布
     q_final = sol.y[_N_Z * _N_ADS:, -1].reshape(_N_Z, _N_ADS)
 
-    # 出口累積モル量 [mol] = u_0·A_col · ∫ C_outlet(t) dt
-    i0          = (_N_Z - 1) * _N_ADS
-    C_outlet_t  = sol.y[i0:i0 + _N_ADS, :]                        # (3, n_t)
-    total_moles_out = u_0 * A_col * np.trapezoid(C_outlet_t, sol.t, axis=1)
+    # 出口濃度時系列 (呼び出し側で CSS 補正後の t_abs に合わせて積分範囲を切り詰める)
+    i0       = (_N_Z - 1) * _N_ADS
+    C_outlet = sol.y[i0:i0 + _N_ADS, :]  # shape (N_ADS, n_t)
 
-    return t_abs, q_final, total_moles_out, converged
+    return t_abs, q_final, sol.t, C_outlet, converged
 
 
 def _calc_desorption_time(
@@ -534,6 +546,10 @@ def simulate_psa_system(
 
     u_0 = F_non_C3_mol_s * Z * R * fixed.T_abs / (feed.P_in * A_col)  # [m/s]
 
+    # 空塔速度が上限超過: LSODA が極めて小さいタイムステップを要求しフリーズする
+    if u_0 > _U0_MAX:
+        return _penalty_result()
+
     # CH4 濃度がゼロの場合は破過検知不能
     if C_feed_ads[0] <= 0.0:
         return _penalty_result()
@@ -545,11 +561,28 @@ def simulate_psa_system(
     a_lang = np.array([PSA_LANGMUIR_PARAMS[k]['a']   for k in _ADS_ORDER])  # [m³/mol]
     kfa    = np.array([PSA_KFA[k]                    for k in _ADS_ORDER])  # [1/s]
 
-    t_abs_clean, q_final, total_moles_out, converged = _run_adsorption(
+    # CSS スケーリング近似の妥当性チェック
+    # scaling_ratio = (ρ_b/ε) × (q*(C_feed)/C_feed): シャープフロント指標
+    # この値が >> 1 (目安: ≥ 10) のとき t_abs の線形スケーリングが成立する
+    if fixed.use_css_approximation and C_feed_ads[0] > 0.0:
+        denom_css      = 1.0 + np.sum(a_lang * C_feed_ads)
+        q_star_CH4     = q_s[0] * a_lang[0] * C_feed_ads[0] / denom_css
+        scaling_ratio  = (fixed.rho_b / fixed.eps) * (q_star_CH4 / C_feed_ads[0])
+        if scaling_ratio < 10.0:
+            warnings.warn(
+                f"CSSスケーリング精度低下リスク: scaling_ratio={scaling_ratio:.1f} < 10.0。"
+                f" シャープフロント近似が成立しない可能性があり、"
+                f" t_abs の線形スケーリング (use_css_approximation=True) の誤差が"
+                f" 大きくなります。高圧・高不純物濃度の影響が疑われます。"
+                f" Langmuir パラメータ確定後に再評価してください。",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    t_abs_clean, q_final, sol_t, C_outlet_t, converged = _run_adsorption(
         C_feed=C_feed_ads,
         u_0=u_0,
         L_bed=L_bed,
-        A_col=A_col,
         rho_b=fixed.rho_b,
         eps=fixed.eps,
         kfa=kfa,
@@ -566,12 +599,15 @@ def simulate_psa_system(
     # → 清浄床 t_abs に対して: t_abs_css ≈ t_abs_clean × (1 - desorption_target)
     # 成立条件: rho_b/ε × q*(C_feed)/C_feed >> 1 (吸着容量 >> 気相ホールドアップ)
     # ※ q_init の空間非一様性(入口高・出口低)は無視。補正は保守的(やや短め)。
-    # ※ 製品組成は前破過領域(C_outlet≈0)のためほぼ変化なし → total_moles_out はそのまま。
     # ─────────────────────────────────────────────────────────────────────
     if fixed.use_css_approximation:
         t_abs = t_abs_clean * (1.0 - design.desorption_target)
     else:
         t_abs = t_abs_clean
+
+    # CSS補正後 t_abs が極小の場合: scale 発散防止のためペナルティを返す
+    if t_abs < _T_ABS_MIN:
+        return _penalty_result()
 
     if not converged:
         warnings.warn(
@@ -596,6 +632,21 @@ def simulate_psa_system(
     N_cycle_sets    = math.ceil(t_des / t_abs) + 1
     N_total_columns = N_abs_parallel * N_cycle_sets
 
+    # PSA サイクルスケジュール逼迫チェック
+    # idle_time: 脱着完了から次の吸着開始まで実際に確保される待機時間
+    # = ceil(t_des/t_abs) 個の吸着期間 − 実際の t_des
+    idle_time    = (N_cycle_sets - 1) * t_abs - t_des
+    margin_ratio = idle_time / t_abs
+    if margin_ratio < 0.10:
+        warnings.warn(
+            f"PSAサイクルスケジュール逼迫リスク: idle_time={idle_time:.1f}s,"
+            f" t_abs={t_abs:.1f}s (余裕率={margin_ratio*100:.1f}% < 10%)。"
+            f" 均圧・加圧ステップを考慮した場合、現在の必要塔数"
+            f" ({N_total_columns} 塔) では不足する可能性があります。",
+            UserWarning,
+            stacklevel=2,
+        )
+
     # -------------------------------------------------------------------------
     # 6. 吸着材総重量
     # -------------------------------------------------------------------------
@@ -605,6 +656,20 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 7. 出力ストリーム
     # -------------------------------------------------------------------------
+    # total_moles_out: CSS補正後の t_abs までを積分 (破過後の区間を除外)
+    # sol_t / C_outlet_t は _run_adsorption から受け取った生データ
+    _mask = sol_t <= t_abs
+    if _mask.sum() < 2:
+        return _penalty_result()
+    _t_trunc = sol_t[_mask]
+    _C_trunc = C_outlet_t[:, _mask]
+    # t_abs が sol_t の最後のサンプル点より後にある場合、線形補間で端点を追加
+    if _t_trunc[-1] < t_abs - 1e-9:
+        _C_end   = np.array([np.interp(t_abs, sol_t, C_outlet_t[j]) for j in range(_N_ADS)])
+        _t_trunc = np.append(_t_trunc, t_abs)
+        _C_trunc = np.hstack([_C_trunc, _C_end.reshape(-1, 1)])
+    total_moles_out = u_0 * A_col * np.trapezoid(_C_trunc, _t_trunc, axis=1)
+
     # 吸着ステップ中の平均出口流量 [kmol/h]
     # total_moles_out [mol] ÷ t_abs [s] × 3600 [s/h] ÷ 1000 [mol/kmol]
     scale = 3600.0 / (t_abs * 1000.0)
@@ -621,18 +686,46 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # H2 損失計算
     # -------------------------------------------------------------------------
-    # ブローダウン損失: 1サイクル(t_abs 秒)に 1 塔が空隙 H2 をオフガスへ放出
-    # = V_col × ε × C_H2 [mol/cycle] ÷ t_abs [s/cycle] → [mol/s] → [kmol/h]
-    H2_loss_blowdown = V_col * fixed.eps * C_H2 / t_abs * 3600.0 / 1000.0
+    # ブローダウン損失: P_in → P_des の圧力降下で空隙 H2 が放出される
+    # 脱着後も P_des 条件の H2 が空隙に残るため (1 - Z·P_des/P_in) 倍だけ放出
+    # C_H2 = x_H2 · P_in/(Z·R·T) なので、P_des 残留量 = C_H2 · Z · P_des/P_in
+    H2_loss_blowdown = (
+        V_col * fixed.eps * C_H2 * (1.0 - Z * fixed.P_des / feed.P_in)
+        / t_abs * 3600.0 / 1000.0
+    )
 
     # パージ損失: 1サイクルに 1 塔が t_des 秒間、向流パージを受ける
     # パージ速度 = 吸着空塔速度 u_0 と仮定 (実際は設計次第 — 保守的過大推算)
-    # パージガス濃度 = P_des 条件の H2 純ガス近似
-    C_purge = fixed.P_des / (Z * R * fixed.T_abs)  # [mol/m³] at P_des
+    # C_H2_purge: フィードの H2 モル分率 × P_des 条件の総濃度 (Z≈1 @P_des=1atm)
+    #   = C_H2 · Z · P_des/P_in  (Z はフィード条件の圧縮係数)
+    # N_abs_parallel は「吸着塔数」であり「パージ塔数」とは別概念のため使用しない
+    # (1 塔ずつ順番にパージを受けるサイクル構成につき係数は 1 が正しい)
+    C_H2_purge = C_H2 * Z * fixed.P_des / feed.P_in  # [mol/m³] H2 濃度 at P_des
     H2_loss_purge = (
-        u_0 * A_col * N_abs_parallel * C_purge * t_des / t_abs * 3600.0 / 1000.0
+        u_0 * A_col * C_H2_purge * t_des / t_abs * 3600.0 / 1000.0
     )
 
+    # パージ損失の過大推算チェック
+    # H2_loss_purge が F_H2_in の 30% を超えた場合はペナルティ領域と判定する
+    # (t_des > t_abs 程度では通常は発火しない; 真に非効率な解域でのみ警告)
+    if F_H2_in > 0.0:
+        purge_loss_ratio = H2_loss_purge / F_H2_in
+        if purge_loss_ratio > 0.30:
+            warnings.warn(
+                f"PSAパージ損失の過大推算（ペナルティ）リスク:"
+                f" H2_loss_purge={H2_loss_purge:.2f} kmol/h,"
+                f" F_H2_in={F_H2_in:.2f} kmol/h,"
+                f" 損失率={purge_loss_ratio:.2f} (>30%)。"
+                f" t_des={t_des:.2f}s, t_abs={t_abs:.2f}s"
+                f" (t_des/t_abs={t_des/t_abs:.2f})。"
+                f" パージモデル (u_0 定速・1塔逐次) の保守的過大推算が"
+                f" H2 回収率を非現実的に低下させている可能性があります。",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    # H2 損失が入力流量を超えないようにクランプ (物質収支保護)
+    H2_loss_purge = min(H2_loss_purge, max(0.0, F_H2_in - H2_loss_blowdown))
     F_H2_product = max(0.0, F_H2_in - H2_loss_blowdown - H2_loss_purge)
 
     product = {
