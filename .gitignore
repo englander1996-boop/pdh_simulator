@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
-
+.venv/
+data/
 # Claude Code等のAIツールの履歴があれば（任意）
 .claude/
