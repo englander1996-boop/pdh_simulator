@@ -336,6 +336,8 @@ def _vaporizer(F_feed_mols: float, z_C3H6: float,
     A_vap     : 伝熱面積 [m²]
     """
     T_dew = dew_point_T(P_in, [z_C3H6, 1.0 - z_C3H6], _KEYS)
+    if math.isnan(T_dew):
+        return float('nan'), float('nan'), float('nan')
     T_vap_out = T_dew + fixed.T_vap_superheat
 
     if T_vap_out >= fixed.T_hot:
@@ -469,6 +471,8 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
     A_cond    : 伝熱面積 [m²]
     """
     T_bp = bubble_point_T(P_dist, [y_C3H6, 1.0 - y_C3H6], _KEYS)
+    if math.isnan(T_bp):
+        return float('nan'), float('nan'), float('nan')
 
     # ID-09: 圧縮機出口が既に泡点以下 → エンタルピー差が負になり Q_cond < 0
     if T_in <= T_bp:
@@ -551,17 +555,17 @@ def simulate_membrane_system(
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
 
     # ID-03: フィードが既にガス状（T_in >= 露点）の場合は液相エンタルピー計算が無効
-    try:
-        T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
-        if feed.T_in >= T_dew_feed:
-            warnings.warn(
-                f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
-                " 液相フィードを前提とするモデルと矛盾します。",
-                UserWarning, stacklevel=2,
-            )
-            return _penalty_result()
-    except Exception:
-        pass  # 露点計算失敗時は気化器内で検出される
+    # dew_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except は不要
+    T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
+    if math.isnan(T_dew_feed):
+        return _penalty_result()
+    if feed.T_in >= T_dew_feed:
+        warnings.warn(
+            f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
+            " 液相フィードを前提とするモデルと矛盾します。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result()
 
     # mol/s 換算（内部計算用）
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
