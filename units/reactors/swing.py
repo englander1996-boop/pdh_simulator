@@ -35,18 +35,18 @@ _thermo = PDHThermo()
 _kinetics = PDHKinetics()
 
 # 成分順序（状態ベクトルのインデックスと対応）
-_COMPS = ['C3H8', 'C3H6', 'H2', 'C2H4', 'CH4', 'C2H6']
-_COMP_KEYS = ['A', 'B', 'C', 'D', 'E', 'F']  # THERMO_DATA のキー
+# A=C3H8, B=C3H6, C=H2, D=C2H4, E=CH4, F=C2H6
+_COMPS = ['A', 'B', 'C', 'D', 'E', 'F']
 
 # 化学量論行列 stoich[i, j] = 成分i に対する反応j の量論係数
 #        r1   r2   r3
 _STOICH = np.array([
-    [-1,  -1,   0],  # C3H8
-    [+1,   0,   0],  # C3H6
-    [+1,   0,  -1],  # H2
-    [ 0,  +1,  -1],  # C2H4
-    [ 0,  +1,   0],  # CH4
-    [ 0,   0,  +1],  # C2H6
+    [-1,  -1,   0],  # A (C3H8)
+    [+1,   0,   0],  # B (C3H6)
+    [+1,   0,  -1],  # C (H2)
+    [ 0,  +1,  -1],  # D (C2H4)
+    [ 0,  +1,   0],  # E (CH4)
+    [ 0,   0,  +1],  # F (C2H6)
 ], dtype=float)
 
 _T_REF = 298.15  # [K] エンタルピー計算基準温度
@@ -62,15 +62,8 @@ def calc_a(t: float, T: float, P: float) -> float:
 
 
 def calc_Cp(T: float) -> dict:
-    """各成分のモル熱容量 [J/(mol·K)]。keys: 'C3H8','C3H6','H2','C2H4','CH4','C2H6'"""
-    return {
-        'C3H8': _thermo.calc_cp('A', T),
-        'C3H6': _thermo.calc_cp('B', T),
-        'H2':   _thermo.calc_cp('C', T),
-        'C2H4': _thermo.calc_cp('D', T),
-        'CH4':  _thermo.calc_cp('E', T),
-        'C2H6': _thermo.calc_cp('F', T),
-    }
+    """各成分のモル熱容量 [J/(mol·K)]。keys: 'A','B','C','D','E','F'"""
+    return {k: _thermo.calc_cp(k, T) for k in _COMPS}
 
 
 def calc_rate_constants(T: float) -> dict:
@@ -101,7 +94,7 @@ class DesignVars:
 class FeedStream:
     """入口流体条件"""
     F_in:   Dict[str, float]  # 各成分入口モル流量 [kmol/h]
-                               # keys: 'C3H8','C3H6','H2','C2H4','CH4','C2H6'
+                               # keys: 'A'(C3H8),'B'(C3H6),'C'(H2),'D'(C2H4),'E'(CH4),'F'(C2H6)
     T_feed: float              # 加熱炉入口（予熱前）原料温度 [K]
     P_in:   float              # 反応器入口圧力 [Pa]
 
@@ -200,14 +193,12 @@ def _penalty_result() -> SimulationResult:
 
 def _reaction_enthalpies(T: float) -> np.ndarray:
     """温度T [K] での各反応エンタルピー ΔH_rxn [J/mol]。shape (3,)"""
-    H = {}
-    for comp, key in zip(_COMPS, _COMP_KEYS):
-        H[comp] = (THERMO_DATA[key].dHf_298
-                   + _thermo.calc_enthalpy_change(key, _T_REF, T))
+    H = {k: THERMO_DATA[k].dHf_298 + _thermo.calc_enthalpy_change(k, _T_REF, T)
+         for k in _COMPS}
 
-    dH1 = H['C3H6'] + H['H2']  - H['C3H8']  # C3H8 → C3H6 + H2
-    dH2 = H['C2H4'] + H['CH4'] - H['C3H8']  # C3H8 → C2H4 + CH4
-    dH3 = H['C2H6'] - H['C2H4'] - H['H2']   # C2H4 + H2 → C2H6
+    dH1 = H['B'] + H['C'] - H['A']  # C3H8 → C3H6 + H2
+    dH2 = H['D'] + H['E'] - H['A']  # C3H8 → C2H4 + CH4
+    dH3 = H['F'] - H['D'] - H['C']  # C2H4 + H2 → C2H6
     return np.array([dH1, dH2, dH3])
 
 
@@ -216,7 +207,7 @@ def _ode_axial(z: float, y: np.ndarray,
                ) -> np.ndarray:
     """軸方向(z)の常微分方程式。
 
-    State y = [F_C3H8, F_C3H6, F_H2, F_C2H4, F_CH4, F_C2H6, T]
+    State y = [F_A, F_B, F_C, F_D, F_E, F_F, T]  (A=C3H8, B=C3H6, C=H2, D=C2H4, E=CH4, F=C2H6)
     単位: F [mol/s], T [K]
 
     a : 触媒活性度 [-]。コーキングは入口温度で一律決定されるため、
@@ -243,10 +234,10 @@ def _ode_axial(z: float, y: np.ndarray,
     K_eq = max(rc['K_eq'], 1.0)   # [Pa] 低温での駆動力発散防止
 
     # 反応速度 [mol/m³_cat/s]
-    driving_r1 = P['C3H8'] - P['C3H6'] * P['H2'] / K_eq
-    r1 = a * k1 * driving_r1 / (1.0 + P['C3H6'] / K_B)
-    r2 = k2 * P['C3H8']
-    r3 = k3 * P['C2H4'] * P['H2']
+    driving_r1 = P['A'] - P['B'] * P['C'] / K_eq
+    r1 = a * k1 * driving_r1 / (1.0 + P['B'] / K_B)
+    r2 = k2 * P['A']
+    r3 = k3 * P['D'] * P['C']
 
     rates = np.array([r1, r2, r3])  # [mol/m³_cat/s]
 
@@ -362,9 +353,9 @@ def simulate_swing_reactor_system(
 
     # ---- 予熱熱量 Q_preheat [GJ/h] ----
     q_w = 0.0
-    for comp, key in zip(_COMPS, _COMP_KEYS):
+    for comp in _COMPS:
         F_mol_s = feed.F_in.get(comp, 0.0) * 1000.0 / 3600.0
-        q_w += F_mol_s * _thermo.calc_enthalpy_change(key, feed.T_feed, design.T_in)
+        q_w += F_mol_s * _thermo.calc_enthalpy_change(comp, feed.T_feed, design.T_in)
     Q_preheat_GJh = q_w * 3600.0 / 1e9
 
     # ---- 装置計算 ----
@@ -392,10 +383,10 @@ def simulate_swing_reactor_system(
         reactor_capex = _PENALTY_CAPEX
 
     # ---- パフォーマンス指標 ----
-    F_A_in  = feed.F_in.get('C3H8', 0.0)
-    F_A_out = F_out_avg_kmolh['C3H8']
-    F_B_in  = feed.F_in.get('C3H6', 0.0)
-    F_B_out = F_out_avg_kmolh['C3H6']
+    F_A_in  = feed.F_in.get('A', 0.0)
+    F_A_out = F_out_avg_kmolh['A']
+    F_B_in  = feed.F_in.get('B', 0.0)
+    F_B_out = F_out_avg_kmolh['B']
 
     conversion  = (F_A_in - F_A_out) / F_A_in * 100.0 if F_A_in > 0 else 0.0
     delta_A     = F_A_in - F_A_out
