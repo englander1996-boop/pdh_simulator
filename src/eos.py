@@ -271,6 +271,9 @@ def bubble_point_T(P: float, x: List[float], keys: List[str],
     収束条件: Σ xᵢ Kᵢ = 1,  Kᵢ = φᵢ^L / φᵢ^V
     外側ループ: T を brentq で探索
     内側ループ: x 固定 → φ^L 固定、逐次置換で y・φ^V を収束
+
+    Note: デフォルト探索範囲 [150K, 500K] は C3H6/C3H8 混合を対象として設定。
+          H2・CH4 など沸点が極低温の成分を含む混合物には適用不可。
     """
     n = len(keys)
 
@@ -329,6 +332,9 @@ def dew_point_T(P: float, y: List[float], keys: List[str],
     収束条件: Σ yᵢ / Kᵢ = 1
     外側ループ: T を brentq で探索
     内側ループ: y 固定 → φ^V 固定、逐次置換で x・φ^L を収束
+
+    Note: デフォルト探索範囲 [150K, 500K] は C3H6/C3H8 混合を対象として設定。
+          H2・CH4 など沸点が極低温の成分を含む混合物には適用不可。
     """
     n = len(keys)
 
@@ -417,7 +423,13 @@ def compress_isentropic(
         Sr2 = residual_entropy(T2, P2, x, keys, Z2)
         return _ds_ig(T1, T2, P1, P2, x, keys) + (Sr2 - Sr1)
 
-    kappa_approx = 1.13  # C3 混合の代表値（初期探索範囲の推算用）
+    # T1 における混合 Cp から比熱比 κ = Cp / (Cp - R) を計算（理想気体近似）
+    Cp_mix = sum(
+        x[i] * (THERMO_DATA[keys[i]].a + THERMO_DATA[keys[i]].b * T1
+                + THERMO_DATA[keys[i]].c * T1**2 + THERMO_DATA[keys[i]].d * T1**3)
+        for i in range(len(keys))
+    )
+    kappa_approx = Cp_mix / (Cp_mix - R)
     T2s_ig = T1 * (P2 / P1) ** ((kappa_approx - 1.0) / kappa_approx)
     T_lo = max(T1 + 0.5, T2s_ig * 0.5)
     T_hi = min(T2s_ig * 2.5, 1200.0)
