@@ -6,7 +6,7 @@ Dist2: 脱エタン塔 (ダミーモデル)
   塔底: C3H8(A) + C3H6(B) + C2H6(F) → Membrane
 
 デフォルト設計条件:
-  P_col = 20 bar, N_stages = 20, reflux = 2.0
+  P_col = 8.5 bar, N_stages = 20, reflux = 2.0
   A→0.02, B→0.01, C→0.99, D→0.95, E→0.98, F→0.05
 """
 
@@ -23,7 +23,7 @@ from src.distillation_core import (
 from units.utils.process_stream import ProcessStream
 
 _DEFAULT_DESIGN = DistDesignVars(
-    P_col        = 20.0e5,
+    P_col        = 8.5e5,
     N_stages     = 20,
     reflux_ratio = 2.0,
     split_fracs  = {
