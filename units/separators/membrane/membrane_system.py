@@ -178,6 +178,13 @@ class MemFixedParams:
                                      # 補足: ポリトロープ効率と断熱効率は厳密には異なる（圧縮比が高いほど
                                      #   断熱効率は下がる）が、初期設計では断熱効率 0.75 を用いるのが一般的。
                                      #   同便覧の例題(p.334)でも 0.8 が使用されている。
+    # フィード状態フラグ
+    #   False : 液フィード（Vaporizer で気化）— デフォルト
+    #   True  : ガスフィード（Vaporizer スキップ、フィード圧縮機が直接受け取る）
+    # 用途: Hua et al. (2024) の検証範囲 P_H ≤ 9.5 bar を満たすには、Dist2 を低圧
+    #       運転して P_H > feed.P_in を確保する必要がある。低圧では C3H8/C3H6 の
+    #       泡点が冷却水温度を下回るため液フィードは不可能。ガスフィードに切替える。
+    vapor_feed:      bool  = False
 
     def __post_init__(self) -> None:
         if not 0 < self.eta_comp <= 1.0:
@@ -554,15 +561,22 @@ def simulate_membrane_system(
 
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
 
-    # ID-03: フィードが既にガス状（T_in >= 露点）の場合は液相エンタルピー計算が無効
+    # ID-03: 液/ガス相整合性チェック
     # dew_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except は不要
     T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
     if math.isnan(T_dew_feed):
         return _penalty_result()
-    if feed.T_in >= T_dew_feed:
+    if not fixed.vapor_feed and feed.T_in >= T_dew_feed:
         warnings.warn(
             f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
-            " 液相フィードを前提とするモデルと矛盾します。",
+            " 液相フィードを前提とするモデル(vapor_feed=False)と矛盾します。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result()
+    if fixed.vapor_feed and feed.T_in < T_dew_feed:
+        warnings.warn(
+            f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 未満です。"
+            " ガス相フィードを前提とするモデル(vapor_feed=True)と矛盾します。",
             UserWarning, stacklevel=2,
         )
         return _penalty_result()
@@ -571,16 +585,22 @@ def simulate_membrane_system(
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
     Q_A_SI = fixed.Q_A_GPU * _GPU_SI                # [mol/(m²·s·Pa)]
 
-    # ---- ユニット 1: 気化器 ----
-    try:
-        T_vap_out, Q_vap_kW, A_vap = _vaporizer(
-            F_feed_mols, z_C3H6_feed, feed.T_in, feed.P_in, fixed
-        )
-    except Exception:
-        return _penalty_result()
-    # ID-10: Q_vap_kW だけでなく A_vap も nan チェック（LMTD 温度クロス時に nan になる）
-    if math.isnan(Q_vap_kW) or math.isnan(A_vap):
-        return _penalty_result()
+    # ---- ユニット 1: 気化器（vapor_feed=True ならスキップ）----
+    if fixed.vapor_feed:
+        # ガスフィード: Vaporizer 不要。フィード温度をそのまま圧縮機入口とする。
+        T_vap_out = feed.T_in
+        Q_vap_kW  = 0.0
+        A_vap     = 0.0
+    else:
+        try:
+            T_vap_out, Q_vap_kW, A_vap = _vaporizer(
+                F_feed_mols, z_C3H6_feed, feed.T_in, feed.P_in, fixed
+            )
+        except Exception:
+            return _penalty_result()
+        # ID-10: Q_vap_kW だけでなく A_vap も nan チェック（LMTD 温度クロス時に nan になる）
+        if math.isnan(Q_vap_kW) or math.isnan(A_vap):
+            return _penalty_result()
 
     # ---- ユニット 2: フィード圧縮機 ----
     try:
@@ -666,7 +686,7 @@ def simulate_membrane_system(
 
     # ---- CAPEX 推算（Bare Module Cost 法, R08-3.pdf） ----
     try:
-        capex_vap       = calc_he_capex_okuyen(A_vap)
+        capex_vap       = 0.0 if fixed.vapor_feed else calc_he_capex_okuyen(A_vap)
         capex_comp_feed = calc_comp_capex_okuyen(W_feed_kW)
         capex_comp_prod = calc_comp_capex_okuyen(W_prod_kW)
         capex_cond      = calc_he_capex_okuyen(A_cond)

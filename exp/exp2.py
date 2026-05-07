@@ -91,6 +91,10 @@ F_C4H10_FEED =  166.0
 # T_in は副生成物 (CH4 等) 抑制のため 900K に据置 — 上げても X はほぼ変わらず
 # 選択率だけ低下し PSA フィードの CH4 が増えてかえってペナルティに当たる。
 # いずれも最終的には最適化変数として扱う。
+# 反応器入口 S=5000 kmol/h 目標は X≈30% を要求するが、z_cat=30, D=7 まで拡大しても
+# X=20.8% 止まりで、触媒コスト (50000円/kg・寿命3年) が支配的になり TAC 悪化。
+# 現状 (z_cat=15, D=5, X=14.2%, S≈12800) で TAC 265 億円/年・単価 71 円/kg を
+# ベースラインとし、目標達成は触媒単価/寿命の見直し後に再検討する。
 SWING = SwingDesign(T_in=900.0, z_cat=15.0, t_cyc=15.0, D=5.0)
 
 # PSA — exp2 はスケールが exp1 の 15 倍 + リサイクル系のため副生 H2 も増え、
@@ -101,12 +105,19 @@ PSA = PSADesignVars(D_col=3.0, L_bed=20.0, desorption_target=0.35)
 
 # 膜分離 — A_mem=10000 では C3H6 透過量が ~120 kmol/h で頭打ちになり、リサイクル
 # 系の物質収支 (反応器で生成する C3H6 を毎時系外に抜く必要量 ≈ 1450 kmol/h) を
-# 満たせず C3H8 が保留側に蓄積して発散する。A_mem を 3 倍に増やして C3H6 透過
-# 容量を確保。最終的には最適化変数として扱う。
-MEM = MemDesignVars(P_H=25.0e5, P_L=1.0e5, A_mem=30000.0, P_dist=20.0e5)
+# 満たせず C3H8 が保留側に蓄積して発散する。最終的には最適化変数として扱う。
+# P_H: Hua et al. (2024) で検証された圧力範囲上限 9.5 bar に合わせる。
+# 但し simulate_membrane_system は P_H > feed.P_in を要求するため、
+# Dist2 P_col (= mem feed P) を 8.5 bar に下げて 1 bar の差を確保。
+# A_mem: P_H を 25→9.5 bar に下げた結果、駆動力 (P_H − P_L) が ~25→8.5 → 3倍弱
+# 低下するため、面積を約 3.3 倍に拡大して透過量を維持。
+MEM = MemDesignVars(P_H=9.5e5, P_L=1.0e5, A_mem=100000.0, P_dist=20.0e5)
 
-# 膜入口冷却目標温度（Dist2 塔底をここまで冷却して液相にする）
-T_MEM_FEED = 323.15  # [K] = 50°C
+# 膜入口目標温度
+#   Dist2 を 8.5 bar 運転（C3H8/C3H6 泡点 ~20°C）にしたため、
+#   塔底液は冷却水で液状を保てない。膜は P_H ≤ 9.5 bar を満たすため
+#   ガスフィード運転（vapor_feed=True）。露点 + 30K 程度に過熱する。
+T_MEM_FEED = 323.15  # [K] = 50°C  (8.5 bar 露点 ~22°C に対し過熱度 ~28K)
 
 # ===========================================================================
 # リサイクル収束パラメータ
@@ -199,7 +210,7 @@ def run_one_pass(tear_dist3, tear_mem, T_d3, T_mem):
     cooled = simulate_cooler(rx_out, T_out_target=320.0)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        comp2 = simulate_compressor(cooled.outlet, P_out_target=20.0e5)
+        comp2 = simulate_compressor(cooled.outlet, P_out_target=8.5e5)
         r2 = simulate_column2(comp2.outlet)
 
     # ---- Step 4: PSA ----
@@ -211,6 +222,11 @@ def run_one_pass(tear_dist3, tear_mem, T_d3, T_mem):
         r_psa = simulate_psa_system(PSA, psa_feed, PSAFixedParams())
 
     # ---- Step 5: Membrane ----
+    # Dist2 を 8.5 bar 運転にした影響で塔底液の泡点が ~20°C まで下がり、冷却水
+    # では液状態を保てない。膜の P_H ≤ 9.5 bar (Hua et al. 2024 の検証範囲) を
+    # 守るため、塔底液を T_MEM_FEED まで気化・過熱してガスフィードで膜へ送る。
+    # mem_precool は実質スーパーヒーターとして機能する（dummy cooler は相変化を
+    # 追わないため、OPEX には潜熱分が反映されないことに注意）。
     mem_precool = simulate_cooler(r2.bottom, T_out_target=T_MEM_FEED)
     mem_feed = MemFeedStream(
         F_C3H6=mem_precool.outlet.F_in.get('B', 0.),
@@ -220,7 +236,7 @@ def run_one_pass(tear_dist3, tear_mem, T_d3, T_mem):
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r_mem = simulate_membrane_system(MEM, mem_feed, MemFixedParams())
+        r_mem = simulate_membrane_system(MEM, mem_feed, MemFixedParams(vapor_feed=True))
 
     # ---- Step 6: Dist3 ----
     mem_to_dist3 = ProcessStream(
