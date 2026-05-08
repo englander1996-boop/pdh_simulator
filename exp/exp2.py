@@ -54,13 +54,13 @@ from src.cost_parameters import (
 # スイング反応器
 # 物質収支の定常解 Fresh ≈ S × (0.02 + 0.98X) より、リサイクル系では反応器入口
 # C3H8 流量 S が Fresh の 3〜4 倍に達する (X=22% で S≈6200, X=15% で S≈8700)。
-# exp1 の (T_in=900, z_cat=5, D=2) では WHSV 過大で X が崩れて発散したため
-# 触媒量・断面積を実機 PDH 並み (WHSV 1〜2 1/h) まで拡大。
-# 反応器入口 S=5000 kmol/h 目標は X≈30% を要求するが、z_cat=30, D=7 まで拡大しても
-# X=20.8% 止まりで、触媒コスト (50000円/kg・寿命3年) が支配的になり TAC 悪化。
-# 現状 (z_cat=15, D=5, X=14.2%, S≈12800) で TAC 265 億円/年・単価 71 円/kg を
-# ベースラインとし、目標達成は触媒単価/寿命の見直し後に再検討する。
-SWING = SwingDesign(T_in=900.0, z_cat=15.0, t_cyc=15.0, D=5.0)
+# 設計判断 (2026-05-08): contest §3-3-2 準拠で反応器圧力を 0.5 bar に変更したため、
+# 速度式の P_C3H8 が 1/2 に落ち X が大幅低下 (1atm: ~14% → 0.5bar: ~5%)、リサイクル
+# 暴走に至る。同等 X を維持するため触媒量と入口温度を引き上げ:
+#   - T_in: 900 → 950 K (k_1 を増やして速度補償、副反応 cracking も増えるが T 上限 700°C 内)
+#   - z_cat: 15 → 30 m³ (触媒体積倍増で接触時間倍増)
+#   - D: 5 → 7 m (断面積拡大で u_0 を抑え圧損を回避、S~10000 kmol/h を捌く)
+SWING = SwingDesign(T_in=950.0, z_cat=30.0, t_cyc=15.0, D=7.0)
 
 # PSA — exp2 はスケールが exp1 の 15 倍 + リサイクル系のため副生 H2 も増え、
 # PSA フィード非C3 流量が exp1 から 50 倍以上に膨らむ。t_abs_css ≥ 60s を満たす
@@ -127,7 +127,7 @@ fresh = ProcessStream(
     T_in=config.feed.T_K, P_in=config.feed.P_Pa,
 )
 show_stream("Fresh LPG", fresh)
-show_stream("Dist1 塔頂 (1atm 膨張後)", R['dist1_top_1atm'])
+show_stream("Dist1 塔頂 (0.5bar 膨張後)", R['dist1_top_rx'])
 
 tear_d3  = R['tear_dist3_new']
 tear_mem = R['tear_mem_new']

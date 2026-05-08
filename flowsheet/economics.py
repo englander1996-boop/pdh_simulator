@@ -42,11 +42,13 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
     R = one_pass
 
     capex = {
-        'Comp1':       R['comp1'].equipment.CAPEX,
+        'Pump1':       R['pump1'].equipment.CAPEX,
         'Dist1':       R['r1'].equipment.CAPEX,
         'Reactor':     R['r_rx'].equipment.Reactor_CAPEX,
         'Cooler':      R['cooled'].equipment.CAPEX,
-        'Comp2':       R['comp2'].equipment.CAPEX,
+        'Comp2a':      R['comp2a'].equipment.CAPEX,
+        'Intercool':   R['intercool'].equipment.CAPEX,
+        'Comp2b':      R['comp2b'].equipment.CAPEX,
         'Dist2':       R['r2'].equipment.CAPEX,
         'PSA容器':     R['r_psa'].equipment.CAPEX_vessels,
         'PSA活性炭':   R['r_psa'].equipment.CAPEX_adsorbent,
@@ -60,8 +62,9 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
     }
 
     opex = {
-        'Comp1電力':         _ele(R['comp1'].equipment.W_kW),
-        'Comp2電力':         _ele(R['comp2'].equipment.W_kW),
+        'Pump1電力':         _ele(R['pump1'].equipment.W_kW),
+        'Comp2a電力':        _ele(R['comp2a'].equipment.W_kW),
+        'Comp2b電力':        _ele(R['comp2b'].equipment.W_kW),
         'MemF圧縮機電力':    _ele(R['r_mem'].equipment.W_feed_kW),
         'MemP圧縮機電力':    _ele(R['r_mem'].equipment.W_prod_kW),
         'Dist1リボイラ蒸気': _heat(R['r1'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
@@ -78,9 +81,12 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
     # 単価を equipment に格納するようになったため、それを直接使う。
     # ハードコードの COOLING_WATER_JPY_PER_GJ はここでは使わない。
     cooled_eq      = R['cooled'].equipment
+    intercool_eq   = R['intercool'].equipment
     mem_precool_eq = R['mem_precool'].equipment
     opex[f"Cooler({cooled_eq.utility_name})"] = _heat(
         abs(cooled_eq.Q_duty_kW), cooled_eq.utility_jpy_per_GJ)
+    opex[f"Intercool({intercool_eq.utility_name})"] = _heat(
+        abs(intercool_eq.Q_duty_kW), intercool_eq.utility_jpy_per_GJ)
     opex[f"MemPrecool({mem_precool_eq.utility_name})"] = _heat(
         abs(mem_precool_eq.Q_duty_kW), mem_precool_eq.utility_jpy_per_GJ)
 

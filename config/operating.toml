@@ -10,21 +10,22 @@ target_mta     = 400_000.0  # [t/年]
 mw_kg_per_kmol = 42.08      # C3H6 分子量
 
 [feed]
-# LPG 原料 (常時固定: 25°C, 1 atm)
+# LPG 原料 (30°C 飽和液、C3H8:C4H10 = 9:1)
+# Raoult 近似で 30°C bubble point ≈ 0.9×10.78 + 0.1×2.84 = 9.97 bar
 lpg_c3h8_mol_fraction = 0.9       # 残り 0.1 が C4H10
 # 設計判断 (2026-05-08): yield_assumed=0.9 で固定。実収率は ~71% だが、
 # 初期 Fresh を小さめに見積もる方が早期反復で ODE が軽く完走時間が短くなる
 # (1分41秒@0.8 → 1分10秒@0.9 で実測確認、外側 iter 1回増加のみ)。
 yield_assumed         = 0.9       # 外側ループ初期推定用 (実収率は外側で合わせる)
-T_K                   = 298.15
-P_Pa                  = 101325.0
+T_K                   = 303.15    # 30°C
+P_Pa                  = 9.97e5    # LPG (9:1) の 30°C 飽和液圧 [Pa]
 
 [pressure]
 # 主要昇圧ターゲット [Pa]
 # Dist1/Dist2 の P_col に揃える (蒸留塔本実装が来たら整合性を再確認すること)
-comp1_out_Pa     = 17.0e5     # = Dist1 P_col (脱ブタン塔, 凝縮温度の物理的下限)
+pump1_out_Pa     = 17.0e5     # = Dist1 P_col (原料 10.78 bar → 17 bar、液送ポンプ)
 comp2_out_Pa     = 8.5e5      # = Dist2 P_col (脱エタン塔; 膜の P_H<=9.5 bar に合わせて低圧運転)
-reactor_inlet_Pa = 101325.0   # PDH 1 atm 運転 (Dist1塔頂とリサイクルを膨張弁でこの圧へ)
+reactor_inlet_Pa = 50000.0    # contest §3-3-2 規定: 反応器圧力 0.5 bar (Dist1塔頂とリサイクルを膨張弁でこの圧へ)
 
 [temperature]
 # 主要冷却・予熱ターゲット [K]

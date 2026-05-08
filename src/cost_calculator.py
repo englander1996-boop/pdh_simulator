@@ -26,6 +26,8 @@ from .cost_parameters import (
     USD_TO_JPY, DEPRECIATION_YEARS, PLANT_INDIRECT_FACTOR,
     K1_HE, K2_HE, K3_HE, A_HE_MIN, A_HE_MAX, B1_HE, B2_HE, FM_HE, FP_HE_DEFAULT,
     K1_COMP, K2_COMP, K3_COMP, W_COMP_MIN, W_COMP_MAX, FBM_COMP,
+    K1_PUMP, K2_PUMP, K3_PUMP, W_PUMP_MIN, W_PUMP_MAX,
+    B1_PUMP, B2_PUMP, FM_PUMP, C1_PUMP_FP, C2_PUMP_FP, C3_PUMP_FP,
     MEM_UNIT_PRICE_USD_PER_M2,
 )
 
@@ -196,6 +198,47 @@ def calc_comp_capex_okuyen(W_kW: float) -> float:
     log_W  = math.log10(W_kW)
     cp0    = 10.0 ** (K1_COMP + K2_COMP * log_W + K3_COMP * log_W ** 2)
     cbm    = cp0 * FBM_COMP
+    current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
+    return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
+
+
+# ---------------------------------------------------------------------------
+# ポンプ（遠心式、炭素鋼）
+# 出典: Turton 4th ed. Table A.1 / A.2 / A.4
+# ---------------------------------------------------------------------------
+
+def calc_pump_capex_okuyen(W_kW: float, P_abs_pa: float) -> float:
+    """
+    遠心式ポンプの総建設費 [億円]。
+
+    C_BM = Cp0 × (B1 + B2 × Fp × FM)
+    C_TM = PLANT_INDIRECT_FACTOR × C_BM × CEPCI補正
+
+    Parameters
+    ----------
+    W_kW     : 流体動力 [kW] (W = V_dot × dP / η)
+    P_abs_pa : 出口絶対圧力 [Pa] (Fp は P_gauge[barg] から計算)
+    """
+    if W_kW <= 0:
+        raise ValueError(f"calc_pump_capex_okuyen: W={W_kW} は正値でなければなりません。")
+    if not (W_PUMP_MIN <= W_kW <= W_PUMP_MAX):
+        warnings.warn(
+            f"calc_pump_capex_okuyen: W={W_kW:.2f} kW は適用範囲 "
+            f"[{W_PUMP_MIN}, {W_PUMP_MAX}] kW 外です。",
+            UserWarning, stacklevel=2,
+        )
+
+    log_W = math.log10(W_kW)
+    cp0   = 10.0 ** (K1_PUMP + K2_PUMP * log_W + K3_PUMP * log_W ** 2)
+
+    P_g_bar = P_abs_pa / 1.0e5 - 1.01325
+    if P_g_bar < 10.0:
+        fp = 1.0   # 適用範囲外: 低圧として補正なし
+    else:
+        log_Pg = math.log10(P_g_bar)
+        fp     = 10.0 ** (C1_PUMP_FP + C2_PUMP_FP * log_Pg + C3_PUMP_FP * log_Pg ** 2)
+
+    cbm         = cp0 * (B1_PUMP + B2_PUMP * fp * FM_PUMP)
     current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
     return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
 

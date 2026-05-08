@@ -13,12 +13,14 @@ PDH プロセスの 1 パス計算 (リサイクル収束の 1 反復に相当)�
 リサイクルを収束させる。
 """
 
+import math
 import warnings
 
 from stream.stream import ProcessStream
 from units.utils.mixer import mix_streams
 from units.utils.cooler import simulate_cooler
 from units.utils.compressor import simulate_compressor
+from units.utils.pump import simulate_pump
 from units.separators.column1.fake_column1 import simulate_column1
 from units.separators.column2.fake_column2 import simulate_column2
 from units.separators.column3.fake_column3 import simulate_column3
@@ -71,38 +73,40 @@ def run_one_pass(
     dict
         全ユニット結果 + tear_*_new + T_*_new
     """
-    P_atm = config.pressure.reactor_inlet_Pa  # 反応器入口・膨張弁後の圧力
+    P_rx = config.pressure.reactor_inlet_Pa  # 反応器入口・膨張弁後の圧力 (contest 規定 0.5 bar)
 
-    # ---- Fresh LPG (常時固定: 25°C, 1 atm) ----
+    # ---- Fresh LPG 原料 (30°C 飽和液、C3H8:C4H10 = 9:1, ~9.97 bar) ----
     fresh = ProcessStream(
         F_in={'A': F_C3H8_feed, 'Z': F_C4H10_feed,
               'B': 0., 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
         T_in=config.feed.T_K, P_in=config.feed.P_Pa,
     )
 
-    # ---- Step 1: Comp1 → Dist1 (Fresh のみ) ----
+    # ---- Step 1: Pump1 → Dist1 (Fresh のみ) ----
+    # 原料は液 (30°C 飽和液) のため、Dist1 (17 bar) への昇圧は液送ポンプで行う。
+    # contest §3-3-3 「加圧すべき箇所には、ポンプ(液) を入れること」に従う。
+    pump1 = simulate_pump(fresh, P_out_target=config.pressure.pump1_out_Pa)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        comp1 = simulate_compressor(fresh, P_out_target=config.pressure.comp1_out_Pa)
-        r1 = simulate_column1(comp1.outlet)
+        r1 = simulate_column1(pump1.outlet)
 
-    # 塔頂を 1 atm に膨張 (C4 除去済みの C3 主成分)
-    dist1_top_1atm = ProcessStream(
-        F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=P_atm,
+    # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
+    dist1_top_rx = ProcessStream(
+        F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=P_rx,
     )
 
-    # ---- リサイクルストリーム (1 atm 膨張弁経由、コストなし) ----
+    # ---- リサイクルストリーム (膨張弁経由、コストなし) ----
     recycle_dist3 = ProcessStream(
         F_in={**_ZERO, 'A': tear_dist3['A'], 'B': tear_dist3['B']},
-        T_in=T_d3, P_in=P_atm,
+        T_in=T_d3, P_in=P_rx,
     )
     recycle_mem = ProcessStream(
         F_in={**_ZERO, 'A': tear_mem['A'], 'B': tear_mem['B']},
-        T_in=T_mem, P_in=P_atm,
+        T_in=T_mem, P_in=P_rx,
     )
 
     # ---- Reactor 入口で合流 ----
-    reactor_inlet = mix_streams([dist1_top_1atm, recycle_dist3, recycle_mem])
+    reactor_inlet = mix_streams([dist1_top_rx, recycle_dist3, recycle_mem])
 
     # ---- Step 2: Swing Reactor ----
     swing_feed = SwingFeed(
@@ -118,12 +122,21 @@ def run_one_pass(
         P_in=r_rx.effluent.P_out,
     )
 
-    # ---- Step 3: Cooler → Comp2 → Dist2 ----
+    # ---- Step 3: Cooler → Comp2 (2 段+段間冷却) → Dist2 ----
+    # 反応器圧力 0.5 bar → Dist2 圧力 8.5 bar = 圧縮比 17:1。
+    # 単段では断熱温度上昇が過大になる (~T_in×4) ため等圧縮比 √17≈4.12 の 2 段
+    # に分割し、段間で T_intercool まで冷却して動力と機械的負荷を低減する。
     cooled = simulate_cooler(rx_out, T_out_target=config.temperature.cooler_after_reactor_K)
+    P_in_comp2  = cooled.outlet.P_in
+    P_out_final = config.pressure.comp2_out_Pa
+    P_mid       = math.sqrt(P_in_comp2 * P_out_final)
+    T_intercool = config.temperature.cooler_after_reactor_K
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        comp2 = simulate_compressor(cooled.outlet, P_out_target=config.pressure.comp2_out_Pa)
-        r2 = simulate_column2(comp2.outlet)
+        comp2a    = simulate_compressor(cooled.outlet, P_out_target=P_mid)
+        intercool = simulate_cooler(comp2a.outlet, T_out_target=T_intercool)
+        comp2b    = simulate_compressor(intercool.outlet, P_out_target=P_out_final)
+        r2        = simulate_column2(comp2b.outlet)
 
     # ---- Step 4: PSA ----
     psa_feed = PSAFeedStream(
@@ -177,10 +190,12 @@ def run_one_pass(
     T_mem_new = r_mem.retentate.T_out
 
     return dict(
-        comp1=comp1, r1=r1, dist1_top_1atm=dist1_top_1atm,
+        pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
         reactor_inlet=reactor_inlet,
         r_rx=r_rx, rx_out=rx_out,
-        cooled=cooled, comp2=comp2, r2=r2,
+        cooled=cooled,
+        comp2a=comp2a, intercool=intercool, comp2b=comp2b,
+        r2=r2,
         r_psa=r_psa, mem_precool=mem_precool, r_mem=r_mem, r3=r3,
         tear_dist3_new=tear_dist3_new, tear_mem_new=tear_mem_new,
         T_d3_new=T_d3_new, T_mem_new=T_mem_new,
