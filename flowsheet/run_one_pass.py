@@ -137,7 +137,13 @@ def run_one_pass(
     # Dist2 を 8.5 bar 運転にした影響で塔底液の泡点が ~20°C まで下がり、冷却水
     # では液状態を保てない。膜の P_H <= 9.5 bar (Hua et al. 2024) を守るため、
     # 塔底液を mem_feed_K まで気化・過熱してガスフィードで膜へ送る。
-    mem_precool = simulate_cooler(r2.bottom, T_out_target=config.temperature.mem_feed_K)
+    # 設計判断 (2026-05-08): 旧版は感熱のみで潜熱無視 → Mem 気化器 OPEX が 0
+    # になっていた既知バグ。phase_change=True で潜熱を加算する。
+    mem_precool = simulate_cooler(
+        r2.bottom,
+        T_out_target=config.temperature.mem_feed_K,
+        phase_change=True,
+    )
     mem_feed = MemFeedStream(
         F_C3H6=mem_precool.outlet.F_in.get('B', 0.),
         F_C3H8=mem_precool.outlet.F_in.get('A', 0.),
