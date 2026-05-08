@@ -1,7 +1,7 @@
 # SPEC: swing.py — PDH スイング反応器システム シミュレーター
 
 **ファイルパス**: `units/reactors/swing.py`
-**最終更新**: 2026-05-02（TAC 廃止・CAPEX のみ出力に変更）
+**最終更新**: 2026-05-09 (rho_p 400→700 に更新、触媒単価 50000→30000 円/kg、寿命 3→4 年)
 
 ---
 
@@ -472,7 +472,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | `t_regen` | 30.0 | min | 触媒再生時間 |
 | `V_cat_max_per_vessel` | 200.0 | m³ | 1基最大触媒量 |
 | `eps` | 0.5 | — | 空隙率 |
-| `rho_p` | 400.0 | kg/m³ | 触媒充填密度 |
+| `rho_p` | 700.0 | kg/m³ | 触媒充填密度 (★仮置き、2026-05-09 に 400→700 へ。実触媒 PtSn/Al2O3 ペレットの粒子密度寄り) |
 
 > `FixedParams` は `__post_init__` で全フィールドが正値であることを検証する。
 
