@@ -86,10 +86,12 @@ def run_one_pass(
     # ---- Step 1: Pump1 → Dist1 (Fresh のみ) ----
     # 原料は液 (30°C 飽和液) のため、Dist1 (17 bar) への昇圧は液送ポンプで行う。
     # contest §3-3-3 「加圧すべき箇所には、ポンプ(液) を入れること」に従う。
-    pump1 = simulate_pump(fresh, P_out_target=config.pressure.pump1_out_Pa)
+    # 設計判断 (2026-05-09): 出口圧力は design.dist1.P_col に同期する
+    # (operating.toml の pump1_out_Pa は backward compat のため残置だが未使用)。
+    pump1 = simulate_pump(fresh, P_out_target=design.dist1.P_col)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r1 = simulate_column1(pump1.outlet)
+        r1 = simulate_column1(pump1.outlet, tunables=design.dist1)
 
     # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
     # 設計判断 (2026-05-08): 旧版は P を書き換えるだけで T を維持していたが
@@ -103,12 +105,12 @@ def run_one_pass(
 
     # ---- リサイクルストリーム (膨張弁経由、コストなし) ----
     # tear stream の元圧力:
-    #   recycle_dist3 : Dist3 塔底 = Dist3 P_col = design.mem.P_dist (20 bar デフォルト)
-    #   recycle_mem   : Mem 保留 = design.mem.P_H (9.5 bar デフォルト)
+    #   recycle_dist3 : Dist3 塔底 = design.dist3.P_col
+    #   recycle_mem   : Mem 保留   = design.mem.P_H
     recycle_dist3 = simulate_jt_expansion(
         ProcessStream(
             F_in={**_ZERO, 'A': tear_dist3['A'], 'B': tear_dist3['B']},
-            T_in=T_d3, P_in=design.mem.P_dist,
+            T_in=T_d3, P_in=design.dist3.P_col,
         ),
         P_out=P_rx,
     )
@@ -141,9 +143,11 @@ def run_one_pass(
     # 反応器圧力 0.5 bar → Dist2 圧力 8.5 bar = 圧縮比 17:1。
     # 単段では断熱温度上昇が過大になる (~T_in×4) ため等圧縮比 √17≈4.12 の 2 段
     # に分割し、段間で T_intercool まで冷却して動力と機械的負荷を低減する。
+    # 設計判断 (2026-05-09): Comp2 最終出口圧力は design.dist2.P_col に同期する
+    # (operating.toml の comp2_out_Pa は backward compat のため残置だが未使用)。
     cooled = simulate_cooler(rx_out, T_out_target=config.temperature.cooler_after_reactor_K)
     P_in_comp2  = cooled.outlet.P_in
-    P_out_final = config.pressure.comp2_out_Pa
+    P_out_final = design.dist2.P_col
     P_mid       = math.sqrt(P_in_comp2 * P_out_final)
     T_intercool = config.temperature.cooler_after_reactor_K
     with warnings.catch_warnings():
@@ -151,7 +155,7 @@ def run_one_pass(
         comp2a    = simulate_compressor(cooled.outlet, P_out_target=P_mid)
         intercool = simulate_cooler(comp2a.outlet, T_out_target=T_intercool)
         comp2b    = simulate_compressor(intercool.outlet, P_out_target=P_out_final)
-        r2        = simulate_column2(comp2b.outlet)
+        r2        = simulate_column2(comp2b.outlet, tunables=design.dist2)
 
     # ---- Step 4: PSA ----
     psa_feed = PSAFeedStream(
@@ -190,7 +194,7 @@ def run_one_pass(
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        r3 = simulate_column3(mem_to_dist3)
+        r3 = simulate_column3(mem_to_dist3, tunables=design.dist3)
 
     # ---- tear stream の更新値 ----
     tear_dist3_new = {

@@ -29,47 +29,54 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from src.distillation_core import (
-    DistDesignVars, DistFixedParams, DistResult, simulate_distillation_column,
+    ColumnTunables, DistDesignVars, DistFixedParams, DistResult,
+    simulate_distillation_column,
 )
 from stream.stream import ProcessStream
 
 
-_DEFAULT_DESIGN = DistDesignVars(
-    P_col            = 8.5e5,
-    N_stages         = 20,
-    N_feed           = 10,
-    # 設計判断 (2026-05-09): K_method='pr' 切替に伴い再チューニング。
-    # PR で α(C2H4/C3H8 @8.5bar) は CC より大きく出るが、Dist2 入口組成は
-    # フローシート上の運転状態 (single pass か recycle ありか) で z_LK=C2H4 の
-    # 比率が 0.26〜数% まで変動する。z_LK が小さいフィードでは Underwood の
-    # R_min が大きくなり (exp1 single-pass で R_min ≈ 4.8、recycle 大流量の
-    # exp2 では下がる傾向)、運転状態をまたいで feasible にするには余裕が必要。
-    # R = 6.0 は exp1 想定 (R_min ~4.8) で margin 1.25、exp2 想定で margin 大。
-    # 単純化が進んだら BO で振る範囲は 4.5〜8.0 程度を想定。
-    reflux_ratio     = 6.0,
-    LK               = 'D',       # C2H4 (塔頂主要軽質成分の代表)
-    HK               = 'A',       # C3H8 (塔底主要重質成分の代表)
-    recovery_LK_top  = 0.95,
-    recovery_HK_bot  = 0.98,
-    # 設計判断 (2026-05-09): K_method='pr' に復帰 (column1 と同じ理由)。
-    # x_top に H2/CH4 (Tc << 室温) が混じるため、PR 泡点フラッシュは cryogenic
-    # 領域に張り付くか収束失敗しがち。distillation_core._bubble_T_K は
-    # その場合に CC へ自動フォールバックするので安全。塔底側 (C3 主体) は
-    # 通常 PR が効き、α_geom = sqrt(α_top_cc × α_bot_pr) で精度が出る。
-    K_method         = 'pr',
-    q                = 0.0,        # 気フィード
+# 既定 tunables: BO/exp で上書きされない場合に使う。
+# 設計判断 (2026-05-09):
+#   PR で α(C2H4/C3H8 @8.5bar) は CC より大きく出るが、Dist2 入口組成は
+#   フローシート上の運転状態 (single pass か recycle ありか) で z_LK=C2H4 の
+#   比率が 0.26〜数% まで変動する。z_LK が小さいフィードでは Underwood の
+#   R_min が大きくなり、運転状態をまたいで feasible にするには余裕が必要。
+#   R = 6.0 は single-pass (R_min ~4.8) で margin 1.25、recycle 想定で margin 大。
+_DEFAULT_TUNABLES = ColumnTunables(
+    P_col        = 8.5e5,
+    N_stages     = 20,
+    N_feed       = 10,
+    reflux_ratio = 6.0,
 )
 _DEFAULT_FIXED = DistFixedParams()
 
 
 def simulate_column2(
-    feed:   ProcessStream,
-    design: DistDesignVars | None = None,
-    fixed:  DistFixedParams | None = None,
+    feed:     ProcessStream,
+    tunables: ColumnTunables | None = None,
+    fixed:    DistFixedParams | None = None,
 ) -> DistResult:
-    """Dist2 (脱エタン塔) をシミュレーションする。"""
+    """Dist2 (脱エタン塔) をシミュレーションする。
+
+    LK/HK/回収率/K_method/q は本ラッパで固定:
+      LK='D' (C2H4), HK='A' (C3H8), recovery 0.95/0.98, K_method='pr', q=0.0
+    x_top に H2/CH4 が混じる場合、PR 泡点フラッシュが cryogenic に張り付く
+    ため distillation_core._bubble_T_K が CC へ自動フォールバックする。
+    """
+    t = tunables if tunables is not None else _DEFAULT_TUNABLES
+    design = DistDesignVars(
+        P_col           = t.P_col,
+        N_stages        = t.N_stages,
+        N_feed          = t.N_feed,
+        reflux_ratio    = t.reflux_ratio,
+        LK              = 'D',       # C2H4
+        HK              = 'A',       # C3H8
+        recovery_LK_top = 0.95,
+        recovery_HK_bot = 0.98,
+        K_method        = 'pr',
+        q               = 0.0,       # 気フィード (Comp2b 出口)
+    )
     return simulate_distillation_column(
-        design if design is not None else _DEFAULT_DESIGN,
-        feed,
-        fixed  if fixed  is not None else _DEFAULT_FIXED,
+        design, feed,
+        fixed if fixed is not None else _DEFAULT_FIXED,
     )

@@ -139,7 +139,7 @@ desorption_target」で初期化 → 床全体が飽和の保守的設定 (実 C
 ## 9. 呼び出し箇所
 
 - `flowsheet/run_one_pass.py`: Dist2 塔頂を直接 `simulate_psa_system` へ
-- `exp/exp1.py`, `exp/exp2.py`
+- `exp/exp1.py`
 - `monitor/psa_random_test.ipynb`: 単独感度試験
 
 ## 10. 関連ドキュメント
