@@ -158,6 +158,45 @@ FBM_COMP: float = 2.15
 
 
 # ---------------------------------------------------------------------------
+# ポンプ（遠心式 / Centrifugal pump, 炭素鋼）
+#
+# 【K1, K2, K3】
+#   出典: Turton et al., "Analysis, Synthesis, and Design of Chemical Processes",
+#         4th ed. (2013), Appendix A, Table A.1.
+#   Equipment Type    : Centrifugal pump
+#   サイジングパラメータ: 流体動力 W [kW]
+#   K1 = 3.3892 / K2 = 0.0536 / K3 = 0.1538 (適用範囲 W = 1〜300 kW)
+#
+# 【B1, B2】
+#   出典: Turton 4th ed., Table A.4. Centrifugal pump.
+#   B1 = 1.89 / B2 = 1.35
+#
+# 【Fp 計算式】
+#   出典: Turton 4th ed., Table A.2. Centrifugal pump.
+#   log10(Fp) = C1 + C2*log10(P_g) + C3*(log10(P_g))^2  (P_g [barg], 10〜100 barg)
+#   C1 = -0.3935, C2 = 0.3957, C3 = -0.00226
+#   P_g < 10 barg では Fp = 1.0 (補正なし)。
+#
+# !仮置き — 要出典: 授業資料 R08-3.pdf に Pump entry の記載がない場合は
+#                 Turton 4th ed. の値を流用。確認後にコメントを更新する。
+# ---------------------------------------------------------------------------
+
+K1_PUMP: float =  3.3892
+K2_PUMP: float =  0.0536
+K3_PUMP: float =  0.1538
+W_PUMP_MIN: float =   1.0   # 適用範囲下限 [kW]
+W_PUMP_MAX: float = 300.0   # 適用範囲上限 [kW]
+
+B1_PUMP: float = 1.89
+B2_PUMP: float = 1.35
+FM_PUMP: float = 1.0   # 炭素鋼 (LPG サービスは構造材的に CS で十分)
+
+C1_PUMP_FP: float = -0.3935
+C2_PUMP_FP: float =  0.3957
+C3_PUMP_FP: float = -0.00226
+
+
+# ---------------------------------------------------------------------------
 # 膜モジュール単価 [USD/m²]
 #
 # !仮置き — 要出典: 膜モジュール単価

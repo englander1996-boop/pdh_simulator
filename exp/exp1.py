@@ -5,14 +5,16 @@ exp1.py — PDH プロセス全体フロー シングルパス確認実験
     実装済みの全ユニットを一本のパイプラインとして接続し、
     物質・エネルギー・コストの流れが端から端まで通ることを確認する。
 
-全体フロー:
-    LPG (298K, 1atm)
-     → [Comp1]  昇圧 17bar
-     → [Dist1]  C4除去 (LPG脱ブタン塔)
-     → [膨張弁] 1atm へ減圧（コストなし）
-     → [Reactor] PDH スイング反応 (600°C, 1atm)
+全体フロー (contest §3-3-2/§3-3-3 準拠):
+    Fresh LPG (303K, ~9.97bar 飽和液、C3H8:C4H10 = 9:1)
+     → [Pump1]   17bar へ液送 (contest §3-3-3)
+     → [Dist1]   脱ブタン塔 (C4H10 を除去)
+     → [膨張弁]  0.5bar へ減圧 (contest §3-3-2 反応器圧力)
+     → [Reactor] PDH スイング反応 (600°C, 0.5bar)
      → [Cooler]  320K へ冷却
-     → [Comp2]   昇圧 20bar
+     → [Comp2a]  圧縮比 √17 で 1段目
+     → [Intercool] 段間冷却 320K
+     → [Comp2b]  8.5bar へ 2段目
      → [Dist2]   脱エタン (H2/CH4/C2H4 を頂部に分離)
           塔頂 → [PSA]      H2 製品 + オフガス(燃料)
           塔底 → [Membrane] C3H6/C3H8 分離
@@ -24,6 +26,7 @@ exp1.py — PDH プロセス全体フロー シングルパス確認実験
     リサイクル収束ループは別の実験（exp2.py 予定）で実施する。
 """
 
+import math
 import os
 import sys
 import warnings
@@ -39,6 +42,7 @@ sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..'
 from stream.stream import ProcessStream
 from units.utils.cooler import simulate_cooler
 from units.utils.compressor import simulate_compressor
+from units.utils.pump import simulate_pump
 from units.separators.column1.fake_column1 import simulate_column1
 from units.separators.column2.fake_column2 import simulate_column2
 from units.separators.column3.fake_column3 import simulate_column3
@@ -57,9 +61,9 @@ from units.separators.membrane.membrane_system import (
 # 設計変数（ここを変えて実験する）
 # ===========================================================================
 
-# 原料
+# LPG 原料 (30°C 飽和液、C3H8:C4H10 = 9:1)
 F_C3H8_FEED  = 100.0   # プロパン [kmol/h]
-F_C4H10_FEED =  10.0   # ブタン（LPG 不純物）[kmol/h]
+F_C4H10_FEED =  10.0   # ブタン (LPG 不純物) [kmol/h]
 
 # スイング反応器
 SWING = SwingDesign(T_in=873.15, z_cat=5.0, t_cyc=15.0, D=2.0)
@@ -68,13 +72,16 @@ SWING = SwingDesign(T_in=873.15, z_cat=5.0, t_cyc=15.0, D=2.0)
 # 過小で破過に達せずペナルティ条件に該当する。D=0.7, L=6.0 で H2 回収率 ~84%。
 PSA = PSADesignVars(D_col=0.7, L_bed=6.0, desorption_target=0.35)
 
-# Membrane — フィード圧縮機の昇圧方向を確保するため P_H > P_in (=Dist2塔底=20bar) が必須。
-# P_H=10bar だと「フィード圧縮機が減圧方向」のペナルティに該当する。
-# A_mem=200 では駆動力に対し面積が小さくほぼ透過なし → A_mem=1000 に拡大。
-MEM = MemDesignVars(P_H=25.0e5, P_L=1.0e5, A_mem=1000.0, P_dist=20.0e5)
+# Membrane — P_dist は Dist3 P_col (=20 bar) に揃える (Mem→Dist3 直結のため)。
+# C3H6 ~99wt% の透過側を冷却水で凝縮するには P_dist >= ~17 bar が必要 (low-P 化すると
+# 泡点が冷却水出口温度 40°C 以下になり温度クロス → ペナルティ)。
+# P_H は Hua et al. (2024) で検証された圧力範囲 ≤9.5 bar に合わせる。
+# Dist2 を 8.5 bar 運転にしたため P_H > feed.P_in 制約を 1 bar マージンで満たす 9.5 bar。
+# A_mem は 100 kmol/h スケールでフラックスを取るため 1000 m²。
+MEM = MemDesignVars(P_H=9.5e5, P_L=1.0e5, A_mem=1000.0, P_dist=20.0e5)
 
-# Membrane 入口冷却 — Dist2 塔底の T (≈ 60°C) は P=20bar の露点 55.8°C をわずかに
-# 超えており膜の液相フィード前提条件を満たさない。50°C まで冷却する。
+# Membrane 入口冷却 — Dist2 塔底の T が新運転圧力 8.5 bar の泡点を下回る場合があるため
+# mem_feed_K (50°C) で気化フィード化する (run_one_pass.py と同じ phase_change=True 想定)。
 T_MEM_FEED = 323.15  # [K] = 50°C
 
 # ===========================================================================
@@ -95,33 +102,34 @@ def show_stream(label, stream):
 capex = {}   # 各ユニットの CAPEX [億円] を集計する辞書
 
 # ===========================================================================
-# Step 0: LPG 原料
+# Step 0: LPG 原料 (30°C 飽和液、C3H8:C4H10 = 9:1)
 # ===========================================================================
 hdr("Step 0: LPG 原料")
 
-lpg = ProcessStream(
+# LPG (9:1) の 30°C bubble point は Raoult 近似で ≈ 9.97 bar
+fresh = ProcessStream(
     F_in={'A': F_C3H8_FEED, 'Z': F_C4H10_FEED,
           'B': 0., 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
-    T_in=298.15, P_in=101325.,
+    T_in=303.15, P_in=9.97e5,
 )
-show_stream("原料", lpg)
+show_stream("原料", fresh)
 
 # ===========================================================================
-# Step 1: Comp1 + Dist1 (LPG 脱ブタン塔)
+# Step 1: Pump1 + Dist1 (脱ブタン塔)
 # ===========================================================================
-hdr("Step 1: Comp1 + Dist1 (LPG 脱ブタン塔)")
+hdr("Step 1: Pump1 + Dist1 (脱ブタン塔)")
 
-# LPG は常圧なので Dist1 (17bar) へ送る前に昇圧
+# contest §3-3-3: 加圧すべき箇所には、ポンプ(液) を入れること
+# 30°C 飽和液 → 17 bar (Dist1 圧力) は液送ポンプで行う
+pump1 = simulate_pump(fresh, P_out_target=17.0e5)
+
+capex['Pump1'] = pump1.equipment.CAPEX
+print(f"  Pump1: {pump1.equipment.W_kW:.2f} kW  ρ={pump1.equipment.rho_liq:.0f}kg/m³"
+      f"  V={pump1.equipment.V_dot*3600:.2f}m³/h  CAPEX={pump1.equipment.CAPEX:.4f}億円")
+
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    comp1 = simulate_compressor(lpg, P_out_target=17.0e5)
-
-capex['Comp1'] = comp1.equipment.CAPEX
-print(f"  Comp1: {comp1.equipment.W_kW:.0f} kW  T_out={comp1.equipment.T_out-273.15:.0f}°C  CAPEX={comp1.equipment.CAPEX:.3f}億円")
-
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    r1 = simulate_column1(comp1.outlet)
+    r1 = simulate_column1(pump1.outlet)
 
 capex['Dist1'] = r1.equipment.CAPEX
 print(f"  Dist1: D={r1.equipment.D_col:.2f}m  H={r1.equipment.H_col:.1f}m  CAPEX={r1.equipment.CAPEX:.3f}億円")
@@ -129,13 +137,14 @@ print(f"         Q_cond={r1.equipment.Q_cond:.0f}kW  Q_reb={r1.equipment.Q_reb:.
 show_stream("塔頂 (→反応器)", r1.top)
 show_stream("塔底 (C4製品)", r1.bottom)
 
-# 塔頂を 1 atm に膨張（膨張弁、機器コストなし）
-dist1_top = ProcessStream(F_in=r1.top.F_in, T_in=r1.top.T_in, P_in=101325.)
+# 塔頂を 0.5 bar (反応器圧力) に膨張 (膨張弁、機器コストなし)
+P_RX = 50000.0   # 反応器圧力 [Pa] = 0.5 bar (contest §3-3-2)
+dist1_top = ProcessStream(F_in=r1.top.F_in, T_in=r1.top.T_in, P_in=P_RX)
 
 # ===========================================================================
 # Step 2: Swing Reactor
 # ===========================================================================
-hdr("Step 2: Swing Reactor (PDH 600°C, 1atm)")
+hdr("Step 2: Swing Reactor (PDH 600°C, 0.5bar)")
 
 swing_feed = SwingFeed(F_in=dist1_top.F_in, T_feed=dist1_top.T_in, P_in=dist1_top.P_in)
 r_rx = simulate_swing_reactor_system(SWING, swing_feed, SwingFixed())
@@ -151,23 +160,37 @@ show_stream("Reactor出口", rx_out)
 # ===========================================================================
 # Step 3: Cooler + Comp2 + Dist2 (脱エタン塔)
 # ===========================================================================
-hdr("Step 3: Cooler + Comp2 + Dist2 (脱エタン塔)")
+hdr("Step 3: Cooler + Comp2 (2段) + Dist2 (脱エタン塔)")
 
 # 反応器出口 (~700°C) を 320K まで冷却してから昇圧
 cooled = simulate_cooler(rx_out, T_out_target=320.0)
 capex['Cooler'] = cooled.equipment.CAPEX
 print(f"  Cooler: Q={cooled.equipment.Q_duty_kW:.0f}kW  A={cooled.equipment.A_est_m2:.0f}m2  CAPEX={cooled.equipment.CAPEX:.3f}億円")
 
-with warnings.catch_warnings():
-    warnings.simplefilter("ignore")
-    comp2 = simulate_compressor(cooled.outlet, P_out_target=20.0e5)
-
-capex['Comp2'] = comp2.equipment.CAPEX
-print(f"  Comp2:  {comp2.equipment.W_kW:.0f}kW  T_out={comp2.equipment.T_out-273.15:.0f}°C  CAPEX={comp2.equipment.CAPEX:.3f}億円")
+# Comp2 多段化: 0.5bar → 8.5bar = 圧縮比 17:1。等圧縮比 √17≈4.12 で 2段+段間冷却。
+P_OUT_FINAL = 8.5e5    # Dist2 圧力
+P_MID = math.sqrt(cooled.outlet.P_in * P_OUT_FINAL)
+T_INTERCOOL = 320.0    # 段間冷却ターゲット
 
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    r2 = simulate_column2(comp2.outlet)
+    comp2a    = simulate_compressor(cooled.outlet, P_out_target=P_MID)
+    intercool = simulate_cooler(comp2a.outlet, T_out_target=T_INTERCOOL)
+    comp2b    = simulate_compressor(intercool.outlet, P_out_target=P_OUT_FINAL)
+
+capex['Comp2a']    = comp2a.equipment.CAPEX
+capex['Intercool'] = intercool.equipment.CAPEX
+capex['Comp2b']    = comp2b.equipment.CAPEX
+print(f"  Comp2a:    {comp2a.equipment.W_kW:.0f}kW  T_out={comp2a.equipment.T_out-273.15:.0f}°C"
+      f"  P_mid={P_MID/1e5:.2f}bar  CAPEX={comp2a.equipment.CAPEX:.3f}億円")
+print(f"  Intercool: Q={intercool.equipment.Q_duty_kW:.0f}kW  A={intercool.equipment.A_est_m2:.0f}m2"
+      f"  CAPEX={intercool.equipment.CAPEX:.3f}億円")
+print(f"  Comp2b:    {comp2b.equipment.W_kW:.0f}kW  T_out={comp2b.equipment.T_out-273.15:.0f}°C"
+      f"  CAPEX={comp2b.equipment.CAPEX:.3f}億円")
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    r2 = simulate_column2(comp2b.outlet)
 
 capex['Dist2'] = r2.equipment.CAPEX
 print(f"  Dist2:  D={r2.equipment.D_col:.2f}m  H={r2.equipment.H_col:.1f}m  CAPEX={r2.equipment.CAPEX:.3f}億円")
@@ -199,10 +222,9 @@ else:
 # ===========================================================================
 hdr("Step 5: Membrane (C3H6/C3H8 分離)")
 
-# Dist2 塔底 (≈60°C, 20bar) は液相飽和近傍だが、ダミー塔モデルが +5K の
-# マージンを付けているため露点を超えてしまう。膜の気化器は液相フィード前提
-# のため、軽い冷却で T_MEM_FEED (50°C) まで下げる。
-mem_precool = simulate_cooler(r2.bottom, T_out_target=T_MEM_FEED)
+# Dist2 塔底を mem_feed_K まで気化・過熱してガスフィードで膜へ送る (run_one_pass と同じ)。
+# 8.5bar 運転下では塔底液の泡点が低く、潜熱を含めた相変化計算が必要。
+mem_precool = simulate_cooler(r2.bottom, T_out_target=T_MEM_FEED, phase_change=True)
 capex['MemPrecool'] = mem_precool.equipment.CAPEX
 print(f"  Mem前冷却器: Q={mem_precool.equipment.Q_duty_kW:.0f}kW  A={mem_precool.equipment.A_est_m2:.0f}m2  CAPEX={mem_precool.equipment.CAPEX:.3f}億円")
 
@@ -215,7 +237,7 @@ mem_feed = MemFeedStream(
 )
 with warnings.catch_warnings():
     warnings.simplefilter("ignore")
-    r_mem = simulate_membrane_system(MEM, mem_feed, MemFixedParams())
+    r_mem = simulate_membrane_system(MEM, mem_feed, MemFixedParams(vapor_feed=True))
 
 capex['Membrane'] = r_mem.equipment.CAPEX_total
 print(f"  透過率(stage cut): {r_mem.stage_cut*100:.1f}%")
@@ -289,8 +311,8 @@ import math as _math
 def _row(name, kind, var, val, capex_v):
     print(f"  {name:<14} {kind:<8} {var:<32} {val:<14} {capex_v:>10.3f}")
 
-# Comp1
-_row('Comp1', '圧縮機', 'W_kW [kW]', f'{comp1.equipment.W_kW:.1f}', comp1.equipment.CAPEX)
+# Pump1 (液送、contest §3-3-3)
+_row('Pump1', 'ポンプ', f'W_kW={pump1.equipment.W_kW:.2f}, P=17bar', '', pump1.equipment.CAPEX)
 # Dist1
 _dist1_V = _math.pi/4 * r1.equipment.D_col**2 * r1.equipment.H_col
 _row('Dist1', '塔', f'V≈{_dist1_V:.1f}m³, D={r1.equipment.D_col:.2f}m, P=17bar', '', r1.equipment.CAPEX)
@@ -300,8 +322,10 @@ _row('Reactor', '塔/反応器',
      '', r_rx.equipment.Reactor_CAPEX)
 # Cooler
 _row('Cooler', '熱交', 'A_m2', f'{cooled.equipment.A_est_m2:.1f}', cooled.equipment.CAPEX)
-# Comp2
-_row('Comp2', '圧縮機', 'W_kW [kW]', f'{comp2.equipment.W_kW:.1f}', comp2.equipment.CAPEX)
+# Comp2 (2段+段間冷却)
+_row('Comp2a', '圧縮機', 'W_kW [kW]', f'{comp2a.equipment.W_kW:.1f}', comp2a.equipment.CAPEX)
+_row('Intercool', '熱交', 'A_m2', f'{intercool.equipment.A_est_m2:.1f}', intercool.equipment.CAPEX)
+_row('Comp2b', '圧縮機', 'W_kW [kW]', f'{comp2b.equipment.W_kW:.1f}', comp2b.equipment.CAPEX)
 # Dist2
 _dist2_V = _math.pi/4 * r2.equipment.D_col**2 * r2.equipment.H_col
 _row('Dist2', '塔', f'V≈{_dist2_V:.2f}m³, D={r2.equipment.D_col:.2f}m, P=20bar', '', r2.equipment.CAPEX)
@@ -352,8 +376,9 @@ def _orow(name, kind, qty, val):
     opex[f'{name}_{kind}'] = val
 
 # 電力
-_orow('Comp1', '電力', f'{comp1.equipment.W_kW:.1f}kW', _ele(comp1.equipment.W_kW))
-_orow('Comp2', '電力', f'{comp2.equipment.W_kW:.1f}kW', _ele(comp2.equipment.W_kW))
+_orow('Pump1', '電力', f'{pump1.equipment.W_kW:.2f}kW', _ele(pump1.equipment.W_kW))
+_orow('Comp2a', '電力', f'{comp2a.equipment.W_kW:.1f}kW', _ele(comp2a.equipment.W_kW))
+_orow('Comp2b', '電力', f'{comp2b.equipment.W_kW:.1f}kW', _ele(comp2b.equipment.W_kW))
 _orow('Mem F圧縮機', '電力', f'{r_mem.equipment.W_feed_kW:.1f}kW', _ele(r_mem.equipment.W_feed_kW))
 _orow('Mem P圧縮機', '電力', f'{r_mem.equipment.W_prod_kW:.1f}kW', _ele(r_mem.equipment.W_prod_kW))
 
@@ -375,6 +400,8 @@ _orow('Reactor予熱', '燃料', f'{_Q_preheat_kW:.0f}kW',
 # 冷却水
 _orow('Cooler', '冷水', f'{abs(cooled.equipment.Q_duty_kW):.0f}kW',
       _heat(abs(cooled.equipment.Q_duty_kW), COOLING_WATER_JPY_PER_GJ))
+_orow('Intercool', '冷水', f'{abs(intercool.equipment.Q_duty_kW):.0f}kW',
+      _heat(abs(intercool.equipment.Q_duty_kW), COOLING_WATER_JPY_PER_GJ))
 _orow('Dist1コンデンサ', '冷水', f'{r1.equipment.Q_cond:.0f}kW',
       _heat(r1.equipment.Q_cond, COOLING_WATER_JPY_PER_GJ))
 _orow('Dist2コンデンサ', '冷水', f'{r2.equipment.Q_cond:.0f}kW',

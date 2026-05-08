@@ -88,6 +88,37 @@ LATENT_HEAT_KJ_PER_KMOL: Dict[str, float] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# 液体密度 (代表値、25〜40°C 飽和液) [kg/m³]
+# 出典: NIST WebBook 各成分 30°C 飽和液密度 (粗近似)
+# 設計判断: ポンプの体積流量算出のみに使用 (設計圧力域 10〜20 bar、温度 30°C 近傍)。
+#          温度・圧力依存性は無視 (LPG ポンプ仕事量計算に対し ±5% 以内で十分)。
+# !仮置き — C3H8/C4H10 のみ精緻化済 (LPG 原料用)。他成分は他用途で要れば追加。
+# ---------------------------------------------------------------------------
+LIQUID_DENSITY_KG_PER_M3: Dict[str, float] = {
+    'A': 489.0,    # C3H8 30°C 飽和液
+    'B': 514.0,    # C3H6 30°C 飽和液
+    'Z': 575.0,    # C4H10 30°C 飽和液
+}
+LIQUID_DENSITY_DEFAULT: float = 500.0
+
+
+def liquid_density_mix(F_in: Dict[str, float]) -> float:
+    """組成 F_in [kmol/h] のモル流量加重平均液体密度 [kg/m³]。
+
+    各成分密度は LIQUID_DENSITY_KG_PER_M3 から、未知成分は LIQUID_DENSITY_DEFAULT。
+    粗近似: ρ_mix ≈ Σ(x_i × ρ_i)。実際は v_i = MW_i/ρ_i の加成で扱う方が
+    正確だが、LPG 単成分系では差は無視できる。
+    """
+    total = sum(F_in.values())
+    if total <= 0.0:
+        return LIQUID_DENSITY_DEFAULT
+    return sum(
+        F_in.get(k, 0.0) * LIQUID_DENSITY_KG_PER_M3.get(k, LIQUID_DENSITY_DEFAULT)
+        for k in F_in
+    ) / total
+
+
 def cp_of(component: str) -> float:
     """成分キーから Cp を取得。未知成分は CP_DEFAULT。"""
     return CP_J_PER_MOL_K.get(component, CP_DEFAULT)

@@ -27,7 +27,7 @@ class FeedSpec:
 
 @dataclass(frozen=True)
 class PressureSpec:
-    comp1_out_Pa: float
+    pump1_out_Pa: float       # 原料を液送で 17 bar (Dist1 入口) まで昇圧
     comp2_out_Pa: float
     reactor_inlet_Pa: float
 
