@@ -74,13 +74,22 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
     Q_preheat_kW = R['r_rx'].effluent.Q_preheat * 1.0e9 / 3600.0 / 1000.0
     opex['Reactor予熱燃料'] = _heat(Q_preheat_kW, FUEL_JPY_PER_GJ)
 
-    opex['Cooler冷水']         = _heat(abs(R['cooled'].equipment.Q_duty_kW),
-                                        COOLING_WATER_JPY_PER_GJ)
+    # 設計判断 (2026-05-08): cooler.py が utility_selector で選んだユーティリティ名・
+    # 単価を equipment に格納するようになったため、それを直接使う。
+    # ハードコードの COOLING_WATER_JPY_PER_GJ はここでは使わない。
+    cooled_eq      = R['cooled'].equipment
+    mem_precool_eq = R['mem_precool'].equipment
+    opex[f"Cooler({cooled_eq.utility_name})"] = _heat(
+        abs(cooled_eq.Q_duty_kW), cooled_eq.utility_jpy_per_GJ)
+    opex[f"MemPrecool({mem_precool_eq.utility_name})"] = _heat(
+        abs(mem_precool_eq.Q_duty_kW), mem_precool_eq.utility_jpy_per_GJ)
+
+    # 設計判断: 蒸留塔のコンデンサと膜の冷却器は内部実装が COOLING_WATER 前提のまま
+    # (fake_columnX, membrane_system.py)。本実装フェーズで utility_selector に
+    # 統合する予定だが、現状は冷却水単独で計上 (旧版踏襲)。
     opex['Dist1コンデンサ冷水'] = _heat(R['r1'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
     opex['Dist2コンデンサ冷水'] = _heat(R['r2'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
     opex['Dist3コンデンサ冷水'] = _heat(R['r3'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['MemPrecool冷水']     = _heat(abs(R['mem_precool'].equipment.Q_duty_kW),
-                                        COOLING_WATER_JPY_PER_GJ)
     opex['Mem冷却器冷水']      = _heat(R['r_mem'].equipment.Q_cond_kW,
                                         COOLING_WATER_JPY_PER_GJ)
 
