@@ -35,7 +35,10 @@ _DEFAULT_DESIGN = DistDesignVars(
     P_col            = 17.0e5,
     N_stages         = 20,
     N_feed           = 10,        # Kirkbride 推奨値はランタイムで計算、ここはデフォ
-    reflux_ratio     = 1.5,       # FUG R_min ≈ 1.16 (CC) より余裕を持つ標準値
+    # 設計判断 (2026-05-08): reflux スイープで TAC 最低点を採用。
+    # FUG R_min ≈ 0.44 (CC) に対し R = 0.6 (= R_min × 1.36)。
+    # Dist1 は α 大 (C3/C4 ~3.4) で R_min 小、攻めても余裕あり。
+    reflux_ratio     = 0.6,
     LK               = 'A',       # C3H8
     HK               = 'Z',       # C4H10
     recovery_LK_top  = 0.99,

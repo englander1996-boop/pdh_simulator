@@ -38,11 +38,11 @@ _DEFAULT_DESIGN = DistDesignVars(
     P_col            = 8.5e5,
     N_stages         = 20,
     N_feed           = 10,
-    # 設計判断 (2026-05-08): FUG R_min ≈ 5.7 (CC) のため余裕を持って 8.0。
-    # 旧 fake_column2 の R=2.0 は split_fracs ベースの簡略計算で、Underwood
-    # 法の物理から見ると分離仕様 (D 塔頂 95%, A 塔底 98%) を満たすには
-    # R≧6 が必要 (q=0 ガスフィード、軽質ガスが大量)。
-    reflux_ratio     = 8.0,
+    # 設計判断 (2026-05-08): reflux スイープで TAC 最低点を探索。
+    # FUG R_min ≈ 4.17 (CC, LK=D HK=A) に対し R = 4.5 (= R_min × 1.08)。
+    # 経済最適レンジ下限 (Sinnott 1.05-1.5) ぎりぎりで攻めの設計。
+    # 外乱マージンは小さいため、BO で R を振るときは下限 4.3 程度に留めること。
+    reflux_ratio     = 4.5,
     LK               = 'D',       # C2H4 (塔頂主要軽質成分の代表)
     HK               = 'A',       # C3H8 (塔底主要重質成分の代表)
     recovery_LK_top  = 0.95,
