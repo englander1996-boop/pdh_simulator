@@ -21,9 +21,10 @@ from units.utils.mixer import mix_streams
 from units.utils.cooler import simulate_cooler
 from units.utils.compressor import simulate_compressor
 from units.utils.pump import simulate_pump
-from units.separators.column1.fake_column1 import simulate_column1
-from units.separators.column2.fake_column2 import simulate_column2
-from units.separators.column3.fake_column3 import simulate_column3
+from units.utils.expansion_valve import simulate_jt_expansion
+from units.separators.column1.column1 import simulate_column1
+from units.separators.column2.column2 import simulate_column2
+from units.separators.column3.column3 import simulate_column3
 from units.reactors.swing import (
     FeedStream as SwingFeed, FixedParams as SwingFixed,
     simulate_swing_reactor_system,
@@ -91,18 +92,32 @@ def run_one_pass(
         r1 = simulate_column1(pump1.outlet)
 
     # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
-    dist1_top_rx = ProcessStream(
-        F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=P_rx,
+    # 設計判断 (2026-05-08): 旧版は P を書き換えるだけで T を維持していたが
+    # 物理的には等エンタルピー (JT) 膨張で温度低下する。反応器入口プレヒート
+    # Q_preheat の見積もり精度を上げるため simulate_jt_expansion を経由する。
+    # 膨張弁本体はコストフリー (装置 CAPEX/OPEX に計上しない、配管中の絞り弁)。
+    dist1_top_rx = simulate_jt_expansion(
+        ProcessStream(F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=r1.top.P_in),
+        P_out=P_rx,
     )
 
     # ---- リサイクルストリーム (膨張弁経由、コストなし) ----
-    recycle_dist3 = ProcessStream(
-        F_in={**_ZERO, 'A': tear_dist3['A'], 'B': tear_dist3['B']},
-        T_in=T_d3, P_in=P_rx,
+    # tear stream の元圧力:
+    #   recycle_dist3 : Dist3 塔底 = Dist3 P_col = design.mem.P_dist (20 bar デフォルト)
+    #   recycle_mem   : Mem 保留 = design.mem.P_H (9.5 bar デフォルト)
+    recycle_dist3 = simulate_jt_expansion(
+        ProcessStream(
+            F_in={**_ZERO, 'A': tear_dist3['A'], 'B': tear_dist3['B']},
+            T_in=T_d3, P_in=design.mem.P_dist,
+        ),
+        P_out=P_rx,
     )
-    recycle_mem = ProcessStream(
-        F_in={**_ZERO, 'A': tear_mem['A'], 'B': tear_mem['B']},
-        T_in=T_mem, P_in=P_rx,
+    recycle_mem = simulate_jt_expansion(
+        ProcessStream(
+            F_in={**_ZERO, 'A': tear_mem['A'], 'B': tear_mem['B']},
+            T_in=T_mem, P_in=design.mem.P_H,
+        ),
+        P_out=P_rx,
     )
 
     # ---- Reactor 入口で合流 ----

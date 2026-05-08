@@ -240,5 +240,11 @@ THERMO_DATA: Dict[str, ThermoParams] = {
         b =   3.313e-1,
         c =  -1.108e-4,
         d =  -2.895e-9,
+        # PR EOS パラメータ — 化学工学便覧 改訂六版 表 1.3 物性定数表 物質No.181
+        # JT 膨張弁モジュール (units/utils/expansion_valve.py) が dist1_top_rx の
+        # 微量 C4H10 を扱うために必要。2026-05-08 追記。
+        Tc    = 425.2,         # [K]
+        Pc    = 3.80e6,        # [Pa]   (3.80 MPa)
+        omega = 0.193,         # [-]
     ),
 }
