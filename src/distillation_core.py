@@ -91,6 +91,21 @@ _T_BUBBLE_MAX = 600.0
 # ===========================================================================
 
 @dataclass(frozen=True)
+class ColumnTunables:
+    """蒸留塔の最適化対象パラメータ (P/N/R)。
+
+    LK/HK・回収率・q・K_method といった「塔別の物理セマンティクス」は
+    column1/2/3.py 側で固定。本データクラスは BO や exp で振る部分のみ保持。
+
+    FlowsheetDesignVars.dist1/dist2/dist3 で使う。
+    """
+    P_col:        float    # 塔操作圧力 [Pa]
+    N_stages:     int      # 理論段数
+    N_feed:       int      # フィード段位置 (現状 Kirkbride 推奨値が優先、本値は記録用)
+    reflux_ratio: float    # 還流比 R = L/D
+
+
+@dataclass(frozen=True)
 class DistDesignVars:
     """蒸留塔設計変数 (BO 探索対象 + 仕様)。
 

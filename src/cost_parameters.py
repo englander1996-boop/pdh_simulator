@@ -326,8 +326,7 @@ ADSORBENT_LIFETIME_YEARS: float = 4.0  # [年]
 # ユーティリティ単価 / OPEX パラメータ
 # !仮置き — 要出典: 全てコンテスト課題 Ver.2.0 のサイト仕様に置換予定
 #
-# 使用箇所: exp2.py のリサイクル付き TAC 計算
-#           （exp1.py の audit セクションでも同じ値を流用可能）
+# 使用箇所: exp1.py のリサイクル付き TAC 計算 (flowsheet/economics.py 経由)
 #
 # 単位の取り決め:
 #   電力     : 円/kWh

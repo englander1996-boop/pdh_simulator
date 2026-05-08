@@ -26,45 +26,53 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from src.distillation_core import (
-    DistDesignVars, DistFixedParams, DistResult, simulate_distillation_column,
+    ColumnTunables, DistDesignVars, DistFixedParams, DistResult,
+    simulate_distillation_column,
 )
 from stream.stream import ProcessStream
 
 
-_DEFAULT_DESIGN = DistDesignVars(
-    P_col            = 17.0e5,
-    N_stages         = 20,
-    N_feed           = 10,        # Kirkbride 推奨値はランタイムで計算、ここはデフォ
-    # 設計判断 (2026-05-09): K_method='pr' 切替に伴い再チューニング。
-    # PR で α(C3/C4 @17bar) ≈ 2.3 (CC は 3.4 と過大推定) のため R_min が
-    # 0.44 → 0.95 に上昇。R = 1.5 (= R_min × 1.57) で reflux スイープ後の
-    # TAC 最低点近傍。Dist1 は OPEX 影響が小さいので margin を広めに取る。
-    reflux_ratio     = 1.5,
-    LK               = 'A',       # C3H8
-    HK               = 'Z',       # C4H10
-    recovery_LK_top  = 0.99,
-    recovery_HK_bot  = 0.99,
-    # 設計判断 (2026-05-09): K_method='pr' に復帰。
-    # 旧版 (2026-05-08) は「塔平均 T で K=phi_L/phi_V」を計算しており、
-    # この T-P-x が単相領域に入って Z 根が 1 本 → K_i ≈ 1 になる病理で
-    # CC へ退避していた。distillation_core 側を塔頂/塔底それぞれの泡点
-    # フラッシュで K を取るように改修したため (alpha_geom = sqrt(top×bot))、
-    # PR を本筋に戻す。Dist1 は alpha 大 (C3/C4 ≈ 3〜4) なので CC でも動くが、
-    # 高圧下の PR の方が物性精度が高い。
-    K_method         = 'pr',
-    q                = 1.0,        # 飽和液 (Pump1 後の Fresh)
+# 既定 tunables: BO/exp で上書きされない場合に使う。
+# 設計判断 (2026-05-09):
+#   PR で α(C3/C4 @17bar) ≈ 2.3 (CC は 3.4 と過大推定) のため R_min が
+#   0.44 → 0.95 に上昇。R = 1.5 (= R_min × 1.57) で reflux スイープ後の
+#   TAC 最低点近傍。Dist1 は OPEX 影響が小さいので margin を広めに取る。
+_DEFAULT_TUNABLES = ColumnTunables(
+    P_col        = 17.0e5,
+    N_stages     = 20,
+    N_feed       = 10,        # Kirkbride 推奨値はランタイムで計算、ここはデフォ
+    reflux_ratio = 1.5,
 )
 _DEFAULT_FIXED = DistFixedParams()
 
 
 def simulate_column1(
-    feed:   ProcessStream,
-    design: DistDesignVars | None = None,
-    fixed:  DistFixedParams | None = None,
+    feed:     ProcessStream,
+    tunables: ColumnTunables | None = None,
+    fixed:    DistFixedParams | None = None,
 ) -> DistResult:
-    """Dist1 (脱ブタン塔) をシミュレーションする。"""
+    """Dist1 (脱ブタン塔) をシミュレーションする。
+
+    tunables は P_col/N_stages/N_feed/reflux_ratio のみを保持。
+    LK/HK/回収率/K_method/q は本ラッパで固定:
+      LK='A' (C3H8), HK='Z' (C4H10), recovery 0.99/0.99, K_method='pr', q=1.0
+    """
+    t = tunables if tunables is not None else _DEFAULT_TUNABLES
+    design = DistDesignVars(
+        P_col           = t.P_col,
+        N_stages        = t.N_stages,
+        N_feed          = t.N_feed,
+        reflux_ratio    = t.reflux_ratio,
+        LK              = 'A',       # C3H8
+        HK              = 'Z',       # C4H10
+        recovery_LK_top = 0.99,
+        recovery_HK_bot = 0.99,
+        # 設計判断 (2026-05-09): K_method='pr' に復帰。distillation_core 側を
+        # bubble-point ベースに改修したため単相 root 病理は解消済み。
+        K_method        = 'pr',
+        q               = 1.0,       # 飽和液 (Pump1 後の Fresh)
+    )
     return simulate_distillation_column(
-        design if design is not None else _DEFAULT_DESIGN,
-        feed,
-        fixed  if fixed  is not None else _DEFAULT_FIXED,
+        design, feed,
+        fixed if fixed is not None else _DEFAULT_FIXED,
     )

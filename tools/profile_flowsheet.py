@@ -10,7 +10,7 @@ tear 法をどう変えても効かない。
     python tools/profile_flowsheet.py
     python tools/profile_flowsheet.py --top 30 --output profile.txt
 
-設計変数は exp/exp2.py と同じ値を使う (リファクタ後の挙動を測定するため)。
+設計変数は exp/exp1.py と同じ値を使う (リファクタ後の挙動を測定するため)。
 """
 
 import argparse
@@ -24,17 +24,21 @@ sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..'
 
 from config.load import load_operating_config
 from flowsheet import evaluate, FlowsheetDesignVars
+from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 
 
-def _exp2_design() -> FlowsheetDesignVars:
-    """exp/exp2.py の設計変数と同じ値。リファクタ前後の比較用に固定。"""
+def _exp1_design() -> FlowsheetDesignVars:
+    """exp/exp1.py の設計変数と同じ値。リファクタ前後の比較用に固定。"""
     return FlowsheetDesignVars(
         swing=SwingDesign(T_in=900.0, z_cat=15.0, t_cyc=15.0, D=5.0),
         psa  =PSADesignVars(D_col=3.0, L_bed=20.0, desorption_target=0.35),
         mem  =MemDesignVars(P_H=9.5e5, P_L=1.0e5, A_mem=100000.0, P_dist=20.0e5),
+        dist1=ColumnTunables(P_col=17.0e5, N_stages=20, N_feed=10, reflux_ratio=1.5),
+        dist2=ColumnTunables(P_col= 8.5e5, N_stages=20, N_feed=10, reflux_ratio=6.0),
+        dist3=ColumnTunables(P_col=20.0e5, N_stages=200, N_feed=100, reflux_ratio=12.0),
     )
 
 
@@ -55,7 +59,7 @@ def main():
         pass
 
     config = load_operating_config()
-    design = _exp2_design()
+    design = _exp1_design()
 
     # ---- プロファイル実行 ----
     print("プロファイリング開始 (verbose=False で実行)...")

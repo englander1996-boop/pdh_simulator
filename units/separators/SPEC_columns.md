@@ -97,7 +97,7 @@ Pump1 後の Fresh LPG (30°C, 17 bar 飽和液) から C4H10 を分離。
 |---|---|---|
 | `P_col` | 8.5 bar | Mem の P_H ≤ 9.5 bar 制約に合わせ低圧運転。差圧 1bar マージン |
 | `N_stages` / `N_feed` | 20 / 10 | N_min ≈ 1〜1.4 (α 大なので余裕大) |
-| `reflux_ratio` | **6.0** | PR R_min は供給組成依存 (1.5〜4.8 のレンジ)。exp1 想定 (z_LK=0.26%) で R_min=4.8、margin 1.25。**旧 4.5 は CC 基準で過大設計だったが、PR でも feasibility ぎりぎり** |
+| `reflux_ratio` | **6.0** | PR R_min は供給組成依存 (1.5〜4.8 のレンジ)。single-pass 想定 (z_LK=0.26%) で R_min=4.8、margin 1.25。**旧 4.5 は CC 基準で過大設計だったが、PR でも feasibility ぎりぎり** |
 | `LK` / `HK` | D (C2H4) / A (C3H8) | C2H6 を key にすると Underwood 過大評価、C2H4 を LK にして R_min 現実値 |
 | `K_method` | **'pr'** | 'pr' に切替 (2026-05-09)。x_top に H2/CH4 主体だと CC へ自動フォールバック |
 | `q` | 0.0 | 気フィード |
@@ -107,7 +107,7 @@ Pump1 後の Fresh LPG (30°C, 17 bar 飽和液) から C4H10 を分離。
 - T_bot ≈ 16°C (8.5bar 下の C3 主体液)
 
 ### 注意点
-exp1 (single-pass, z_LK=0.26%) と exp2 (recycle, z_LK 大) で R_min が大きく変動するため、
+single-pass (z_LK=0.26%) と recycle (z_LK 大) で R_min が大きく変動するため、
 最適化器は R_min を見ながら R を振る必要がある。
 
 ---
@@ -131,7 +131,7 @@ Membrane 透過後 (20 bar, 飽和液) からポリマーグレード C3H6 を�
 
 ### 物性
 - T_top ≈ 49°C, T_bot ≈ 57°C
-- Q_reb ≈ 80 MW (exp2 規模)、**OPEX の主要因** (exp2 で 42.6 億円/年)
+- Q_reb ≈ 80 MW (実プラント規模)、**OPEX の主要因** (exp1 で 42.6 億円/年)
 
 ### 設計感度
 α 極小ゆえ R_min/N_min が α に超敏感。BO で R を振る場合、下限 11.0 程度
