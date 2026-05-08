@@ -34,19 +34,23 @@ _DEFAULT_DESIGN = DistDesignVars(
     P_col            = 20.0e5,
     N_stages         = 200,        # C3H6/C3H8 分離は 150〜250 段が典型
     N_feed           = 100,
-    # 設計判断 (2026-05-08): reflux スイープで TAC 最低点を採用。
-    # FUG R_min ≈ 7.22 (CC, LK=B HK=A) に対し R = 7.7 (= R_min × 1.07)。
-    # Dist3 は OPEX 支配的 (Q_reb ~80MW) なので R を下げる効果が最も大きい。
-    # ぎりぎりまで攻めた値、BO で R を振るときは下限 7.5 程度に留めること。
-    reflux_ratio     = 7.7,        # 標準は 10〜15 だが TAC 最適化のため攻めの値
+    # 設計判断 (2026-05-09): K_method='pr' 切替に伴い再チューニング。
+    # PR で α(C3H6/C3H8 @20bar) ≈ 1.07 (CC は 1.10 と過大推定) のため R_min が
+    # 7.22 → 10.08 に上昇。R = 12.0 (= R_min × 1.19) は経済最適レンジの下限近傍。
+    # 旧版の R=7.7 は CC 基準では feasible だったが PR では infeasible。
+    # Dist3 は OPEX 支配的 (Q_reb ~80MW) で R を下げる効果が最も大きく、
+    # BO で振るときは下限 11.0 程度 (margin 1.09) を限度に。
+    reflux_ratio     = 12.0,
     LK               = 'B',         # C3H6 (製品)
     HK               = 'A',         # C3H8 (リサイクル)
     recovery_LK_top  = 0.99,        # C3H6 製品回収率 99%
     recovery_HK_bot  = 0.99,
-    # 設計判断 (2026-05-08): K_method='cc' 暫定採用 (column1 と同じ理由)。
-    # Dist3 は α が極小なので本来 PR が望ましいが、現状 PR の単相判定
-    # 問題が解決するまで CC で運用 (alpha_LK ≈ 1.07-1.10 が CC で出る)。
-    K_method         = 'cc',
+    # 設計判断 (2026-05-09): K_method='pr' に復帰。Dist3 は α が極小 (1.05〜1.10)
+    # で R_min/N_min が α に超敏感なため、本来 PR が必須。distillation_core 側を
+    # bubble-point ベースに改修したことで「単相 root → K=1」病理が解消され、
+    # PR が安定動作する。CC との比較では PR の方が α が ~1〜2% 高めに出るため
+    # R_min が小さくなり、reflux_ratio の最適化余地が広がる方向。
+    K_method         = 'pr',
     q                = 1.0,
 )
 _DEFAULT_FIXED = DistFixedParams()

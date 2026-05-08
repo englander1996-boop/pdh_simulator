@@ -105,7 +105,13 @@ class FixedParams:
     t_regen:              float = 30.0    # 触媒再生時間 [min]
     V_cat_max_per_vessel: float = 200.0   # 1基最大触媒量 [m³]
     eps:                  float = 0.5     # 空隙率 [-]
-    rho_p:                float = 400.0   # 触媒充填密度 [kg/m³]
+    # 触媒充填密度 [kg/m³]
+    # 設計判断 (2026-05-09): 旧値 400 は実触媒データ (PtSn/Al2O3 ペレット 700-1000)
+    # の半分以下と低すぎ。一方で W_cat = V_cat × ρ_p の V_cat は (1-eps) 込みの
+    # 「固体体積」 (swing.py:368 参照) なので、ρ_p には粒子密度ではなく充填密度を
+    # 入れる現行式の意図に従い、実触媒の「粒子密度の代表値」700 を採用。
+    # (空隙の二重控除になっている可能性は別途要確認だが、形式整合のため形式を保持。)
+    rho_p:                float = 700.0
 
     def __post_init__(self) -> None:
         _checks = {

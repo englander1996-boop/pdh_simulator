@@ -56,10 +56,14 @@ from src.cost_parameters import (
 # C3H8 流量 S が Fresh の 3〜4 倍に達する (X=22% で S≈6200, X=15% で S≈8700)。
 # 設計判断 (2026-05-08): contest §3-3-2 準拠で反応器圧力を 0.5 bar に変更したため、
 # 速度式の P_C3H8 が 1/2 に落ち X が大幅低下 (1atm: ~14% → 0.5bar: ~5%)、リサイクル
-# 暴走に至る。同等 X を維持するため触媒量と入口温度を引き上げ:
+# 暴走に至る。同等 X を維持するため入口温度と断面積を引き上げ:
 #   - T_in: 900 → 950 K (k_1 を増やして速度補償、副反応 cracking も増えるが T 上限 700°C 内)
-#   - z_cat: 15 → 30 m³ (触媒体積倍増で接触時間倍増)
 #   - D: 5 → 7 m (断面積拡大で u_0 を抑え圧損を回避、S~10000 kmol/h を捌く)
+# 設計判断 (2026-05-09): z_cat=15 で試したが per-pass X が 31% → 18% に低下、
+# リサイクル C3H8 が 7,400 → 8,300 kmol/h まで膨らんで PSA/Mem 容量制約を破り
+# CAPEX ペナルティに突入 → 設計NG。0.5 bar の反応器条件で必要な触媒接触時間
+# を確保するには z_cat=30 m (V_cat=577 m³, W=1,212 t @ ρ_p=700) が最低ライン。
+# 触媒費の大きさは設計の問題ではなく単価/寿命の見直し (cost_parameters.py) で対応。
 SWING = SwingDesign(T_in=950.0, z_cat=30.0, t_cyc=15.0, D=7.0)
 
 # PSA — exp2 はスケールが exp1 の 15 倍 + リサイクル系のため副生 H2 も増え、
@@ -184,11 +188,18 @@ print(f"  {'-'*26}")
 print(f"  {'合計':<14}: {result.economics.total_capex:8.4f}")
 
 
-hdr("OPEX 内訳 [億円/年]")
+hdr("OPEX 内訳 [億円/年]  (utility + 触媒 + 吸着剤 + 原料費 — 全て TAC に含む)")
 for n, v in result.economics.opex.items():
-    print(f"  {n:<24}: {v:8.4f}")
+    print(f"  {n:<24}: {v:9.4f}")
 print(f"  {'-'*36}")
-print(f"  {'合計':<24}: {result.economics.total_opex:8.4f}")
+print(f"  {'OPEX 合計':<24}: {result.economics.total_opex:9.4f}")
+
+
+hdr("Revenue 内訳 [億円/年]  (売上 + オフガス燃料クレジット)")
+for n, v in result.economics.revenue.items():
+    print(f"  {n:<24}: {v:9.4f}")
+print(f"  {'-'*36}")
+print(f"  {'Revenue 合計':<24}: {result.economics.total_revenue:9.4f}")
 
 
 hdr("製品仕様 compliance")
@@ -206,24 +217,29 @@ if not specs.all_pass:
     print(f"  違反内訳 : {result.failure_reason}")
 
 
-hdr("TAC(年間総費用)")
-TAC = result.economics.TAC
-print(f"  CAPEX/{DEPRECIATION_YEARS}年(償却) : {result.economics.total_capex/DEPRECIATION_YEARS:8.4f}  億円/年")
-print(f"  OPEX 合計          : {result.economics.total_opex:8.4f}  億円/年")
-print(f"  ──────────────────────────────")
-print(f"  TAC (実コスト)     : {TAC:8.4f}  億円/年")
-# 設計判断: 最適化器は effective_TAC を最小化対象にする。
-# spec 違反時はソフトペナルティが上乗せされ、違反 0 のときは TAC と一致する。
-penalty_amount = result.effective_TAC - TAC
+hdr("TAC・Revenue・Profit")
+TAC     = result.economics.TAC
+revenue = result.economics.total_revenue
+profit  = result.economics.profit
+print(f"  CAPEX/{DEPRECIATION_YEARS}年(償却)   : {result.economics.total_capex/DEPRECIATION_YEARS:9.4f}  億円/年")
+print(f"  OPEX 合計           : {result.economics.total_opex:9.4f}  億円/年  (utility + 触媒 + 原料費)")
+print(f"  ────────────────────────────────────")
+print(f"  TAC                 : {TAC:9.4f}  億円/年  (年間総費用)")
+print(f"  Revenue             : {revenue:9.4f}  億円/年  (売上 + 燃料CR)")
+print(f"  ────────────────────────────────────")
+print(f"  Profit = Rev − TAC  : {profit:+9.4f}  億円/年  (正なら黒字)")
+# 設計判断: 最適化器は effective_TAC = TAC − Revenue + soft_penalty を最小化
+# (= Profit + ペナルティ を最大化) する。違反 0 のときは effective_TAC = -Profit。
+penalty_amount = result.effective_TAC - (TAC - revenue)
 if penalty_amount > 0:
-    print(f"  + spec違反ペナルティ : {penalty_amount:8.4f}  億円/年")
-print(f"  ──────────────────────────────")
-print(f"  effective_TAC      : {result.effective_TAC:8.4f}  億円/年  (← 最適化器の目的関数)")
+    print(f"  + spec 違反ペナルティ : {penalty_amount:+9.4f}  億円/年")
+print(f"  ────────────────────────────────────")
+print(f"  effective_TAC       : {result.effective_TAC:+9.4f}  億円/年  (← 最適化器の目的関数、小さいほど良い)")
 print()
 if C3H6_product > 0:
-    print(f"  C3H6 年間生産量    : {result.economics.annual_kg_C3H6/1000.0:.0f}  ton/年")
-    print(f"  C3H6 製品単価      : {result.economics.unit_jpy_per_t:.0f}  円/ton"
-          f"  ({result.economics.unit_jpy_per_t/1000:.1f} 円/kg)")
+    print(f"  C3H6 年間生産量       : {result.economics.annual_kg_C3H6/1000.0:.0f}  ton/年")
+    print(f"  C3H6 製造原単価 (TAC) : {result.economics.unit_jpy_per_t:9.0f}  円/ton"
+          f"  ({result.economics.unit_jpy_per_t/1000:5.1f} 円/kg)")
 print()
 print(f"  仮ユーティリティ単価:")
 print(f"    電力 {ELECTRICITY_JPY_PER_KWH}円/kWh  /  LP蒸気 {LP_STEAM_JPY_PER_GJ}円/GJ")
@@ -232,4 +248,3 @@ print(f"    PtSn触媒 {CATALYST_PTSN_JPY_PER_KG:.0f}円/kg / 寿命{CATALYST_PT
 print(f"    稼働 {OPERATING_HOURS_PER_YEAR:.0f}h/年  /  償却 {DEPRECIATION_YEARS}年")
 print()
 print(f"  ★ 仮値は src/cost_parameters.py に集約。コンテスト課題 Ver.2.0 のサイト仕様に置換のこと。")
-print(f"  ★ 蒸留塔は fake_columnX (split_fracs ベースのダミー)。正式 VLE モデル実装後に置換のこと。")

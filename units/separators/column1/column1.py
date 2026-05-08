@@ -35,19 +35,23 @@ _DEFAULT_DESIGN = DistDesignVars(
     P_col            = 17.0e5,
     N_stages         = 20,
     N_feed           = 10,        # Kirkbride 推奨値はランタイムで計算、ここはデフォ
-    # 設計判断 (2026-05-08): reflux スイープで TAC 最低点を採用。
-    # FUG R_min ≈ 0.44 (CC) に対し R = 0.6 (= R_min × 1.36)。
-    # Dist1 は α 大 (C3/C4 ~3.4) で R_min 小、攻めても余裕あり。
-    reflux_ratio     = 0.6,
+    # 設計判断 (2026-05-09): K_method='pr' 切替に伴い再チューニング。
+    # PR で α(C3/C4 @17bar) ≈ 2.3 (CC は 3.4 と過大推定) のため R_min が
+    # 0.44 → 0.95 に上昇。R = 1.5 (= R_min × 1.57) で reflux スイープ後の
+    # TAC 最低点近傍。Dist1 は OPEX 影響が小さいので margin を広めに取る。
+    reflux_ratio     = 1.5,
     LK               = 'A',       # C3H8
     HK               = 'Z',       # C4H10
     recovery_LK_top  = 0.99,
     recovery_HK_bot  = 0.99,
-    # 設計判断 (2026-05-08): K_method='cc' を暫定採用。
-    # 'pr' (PR EOS) は 17 bar の C3/C4 系で z_factor が単相 root を返し
-    # K_i ≈ 1 になる問題があり別途調査要。CC は fake_column と同じ
-    # 物性値ベースで動作確認済み (alpha_LK ≈ 3.4)。
-    K_method         = 'cc',
+    # 設計判断 (2026-05-09): K_method='pr' に復帰。
+    # 旧版 (2026-05-08) は「塔平均 T で K=phi_L/phi_V」を計算しており、
+    # この T-P-x が単相領域に入って Z 根が 1 本 → K_i ≈ 1 になる病理で
+    # CC へ退避していた。distillation_core 側を塔頂/塔底それぞれの泡点
+    # フラッシュで K を取るように改修したため (alpha_geom = sqrt(top×bot))、
+    # PR を本筋に戻す。Dist1 は alpha 大 (C3/C4 ≈ 3〜4) なので CC でも動くが、
+    # 高圧下の PR の方が物性精度が高い。
+    K_method         = 'pr',
     q                = 1.0,        # 飽和液 (Pump1 後の Fresh)
 )
 _DEFAULT_FIXED = DistFixedParams()
