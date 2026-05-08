@@ -34,7 +34,11 @@ _DEFAULT_DESIGN = DistDesignVars(
     P_col            = 20.0e5,
     N_stages         = 200,        # C3H6/C3H8 分離は 150〜250 段が典型
     N_feed           = 100,
-    reflux_ratio     = 12.0,        # 高還流比 (C3 スプリッター標準 10〜15)
+    # 設計判断 (2026-05-08): reflux スイープで TAC 最低点を採用。
+    # FUG R_min ≈ 7.22 (CC, LK=B HK=A) に対し R = 7.7 (= R_min × 1.07)。
+    # Dist3 は OPEX 支配的 (Q_reb ~80MW) なので R を下げる効果が最も大きい。
+    # ぎりぎりまで攻めた値、BO で R を振るときは下限 7.5 程度に留めること。
+    reflux_ratio     = 7.7,        # 標準は 10〜15 だが TAC 最適化のため攻めの値
     LK               = 'B',         # C3H6 (製品)
     HK               = 'A',         # C3H8 (リサイクル)
     recovery_LK_top  = 0.99,        # C3H6 製品回収率 99%
