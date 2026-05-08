@@ -79,6 +79,12 @@ _LAMBDA_DEFAULT = 15.0
 _T_COND_MIN = 313.15  # 40°C — 冷却水使用時の凝縮器最低温度
 _PENALTY = 1e9
 
+# PR 泡点フラッシュの探索範囲 [K]。これを外れた解は CC へフォールバック。
+# 下限: H2/CH4 が混じる x_top で「全成分の和」泡点が cryogenic に張り付くケースを除外。
+# 上限: 探索失敗時に hi で打ち切られて非物理になるのを除外。
+_T_BUBBLE_MIN = 200.0
+_T_BUBBLE_MAX = 600.0
+
 
 # ===========================================================================
 # データクラス: 入力・出力
@@ -243,6 +249,93 @@ def _alpha_dict(K: Dict[str, float], HK: str) -> Dict[str, float]:
     if K_HK <= 1e-30:
         K_HK = 1e-30
     return {c: K[c] / K_HK for c in K}
+
+
+def _bubble_T_K(
+    x_list: List[float],
+    comps:  List[str],
+    P_col:  float,
+    method: str,
+) -> Tuple[float, List[float]]:
+    """組成 x (mol fraction) の泡点温度と各成分 K 値を返す。
+
+    method='pr' のとき: PR EOS で泡点フラッシュ (eos.bubble_point_T) を実行し、
+    収束 T で K_i = φ_L/φ_V を取る。FUG 法で「平均 T で K=phi_L/phi_V」を計算
+    すると、その T-P-x が単相領域に入り Z 根が 1 本で K_i ≈ 1 になる病理を
+    回避できる (泡点では飽和包絡線上なので必ず 2 根存在)。
+
+    PR が _T_BUBBLE_MIN..MAX を外れる解を返したり例外を出した場合 (例: H2 や CH4
+    が x_top の主成分で泡点が cryogenic に張り付くケース) は CC にフォールバック。
+    成分単位の失敗は当該成分のみ CC へ。
+
+    method='cc' のとき: 加重平均沸点 + 純成分 P_sat ベース (旧来の挙動)。
+    """
+    s = sum(max(xi, 0.0) for xi in x_list)
+    if s <= 1e-12:
+        T_def = 298.15
+        return T_def, [_K_cc(c, T_def, P_col) for c in comps]
+    x_norm = [max(xi, 0.0) / s for xi in x_list]
+
+    if method == 'cc':
+        F = {comps[i]: x_norm[i] for i in range(len(comps))}
+        T = _weighted_boil(F, P_col)
+        return T, [_K_cc(c, T, P_col) for c in comps]
+
+    # ---- PR 経路 ----
+    pr_capable = [
+        c in THERMO_DATA and not math.isnan(THERMO_DATA[c].Tc)
+        for c in comps
+    ]
+    if sum(pr_capable) < 2:
+        # PR パラメータを持つ成分が 2 つ未満 → 飽和挙動を計算できない。CC へ。
+        F = {comps[i]: x_norm[i] for i in range(len(comps))}
+        T = _weighted_boil(F, P_col)
+        return T, [_K_cc(c, T, P_col) for c in comps]
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            T_bub = bubble_point_T(P_col, x_norm, comps,
+                                   T_lo=_T_BUBBLE_MIN, T_hi=_T_BUBBLE_MAX)
+        if (math.isnan(T_bub)
+            or T_bub <= _T_BUBBLE_MIN + 1.0
+            or T_bub >= _T_BUBBLE_MAX - 1.0):
+            raise ValueError("bubble T pinned to bound or nan")
+    except Exception:
+        F = {comps[i]: x_norm[i] for i in range(len(comps))}
+        T = _weighted_boil(F, P_col)
+        return T, [_K_cc(c, T, P_col) for c in comps]
+
+    # 収束 T で K = phi_L/phi_V を成分別に取得 (個別失敗は CC へ)。
+    K = []
+    for i, c in enumerate(comps):
+        if not pr_capable[i]:
+            K.append(_K_cc(c, T_bub, P_col))
+            continue
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                K_i = _K_pr(i, comps, x_norm, T_bub, P_col)
+            if math.isfinite(K_i) and K_i > 0.0:
+                K.append(K_i)
+            else:
+                K.append(_K_cc(c, T_bub, P_col))
+        except Exception:
+            K.append(_K_cc(c, T_bub, P_col))
+
+    # 単相 root 検出: K の spread が小さいと単相領域に張り付いており物理的でない。
+    # 例: x に H2/CH4 (Tc << 室温) が混じる x_top で bubble_point_T が cryogenic な
+    # 偽解に収束し、cubic が 1 根しかないため Z_L=Z_V → φ_L/φ_V=1 → K_i ≈ 1 全成分。
+    # この状態では α 計算が破綻するため CC に退避する。
+    K_pos = [k for k in K if k > 0.0]
+    if K_pos:
+        K_max = max(K_pos)
+        K_min = min(K_pos)
+        if K_max / max(K_min, 1e-30) < 1.1:
+            F = {comps[i]: x_norm[i] for i in range(len(comps))}
+            T = _weighted_boil(F, P_col)
+            return T, [_K_cc(c, T, P_col) for c in comps]
+    return T_bub, K
 
 
 # ===========================================================================
@@ -469,8 +562,8 @@ def simulate_distillation_column(
     # フィード組成 z (mol fraction)
     z = {c: max(feed.F_in[c], 0.0) / F_total for c in comps}
 
-    # ---- Step 1: 動作温度の初期推定 ----
-    # 簡易: 塔頂は LK 主体、塔底は HK 主体と仮定して沸点を取る
+    # ---- Step 1: 動作温度・K の初期推定 (CC、x=z で粗推定) ----
+    # 塔頂は LK 主体、塔底は HK 主体と仮定して純成分沸点で T 範囲を見立てる。
     T_top = _boil_cc(_T_BOIL_ATM.get(design.LK, _T_BOIL_DEFAULT),
                      _LAMBDA_KJ.get(design.LK, _LAMBDA_DEFAULT),
                      design.P_col)
@@ -478,34 +571,71 @@ def simulate_distillation_column(
                      _LAMBDA_KJ.get(design.HK, _LAMBDA_DEFAULT),
                      design.P_col)
     T_top = max(T_top, _T_COND_MIN)
-    T_avg_init = 0.5 * (T_top + T_bot)
 
-    # ---- Step 2-4 を反復 (温度収束のため) ----
-    F_top: Dict[str, float] = {}
-    F_bot: Dict[str, float] = {}
-    N_min = 0.0
-    alpha: Dict[str, float] = {}
+    # CC で初期 α・初期 split を 1 回作る (PR 反復の出発点)。
+    K_init = _K_dict(comps, [z[c] for c in comps],
+                     0.5 * (T_top + T_bot), design.P_col, 'cc')
+    alpha = _alpha_dict(K_init, design.HK)
+    N_min = _fenske_N_min(
+        alpha.get(design.LK, 1.0),
+        design.recovery_LK_top, design.recovery_HK_bot,
+    )
+    F_top, F_bot = _split_streams(
+        feed.F_in, alpha, N_min, design.HK,
+        design.recovery_LK_top, design.recovery_HK_bot, design.LK,
+    )
 
-    for _ in range(3):    # 簡易 3 反復
-        x_for_K = [z[c] for c in comps]   # K 計算用 (塔平均組成として z で近似)
-        K_avg = _K_dict(comps, x_for_K, T_avg_init, design.P_col, design.K_method)
-        alpha = _alpha_dict(K_avg, design.HK)
-        alpha_LK = alpha.get(design.LK, 1.0)
-        N_min = _fenske_N_min(alpha_LK,
-                              design.recovery_LK_top,
-                              design.recovery_HK_bot)
-        F_top, F_bot = _split_streams(
-            feed.F_in, alpha, N_min, design.HK,
+    # ---- Step 2-4: 塔頂/塔底それぞれの泡点で α を評価して反復 ----
+    # 設計判断 (2026-05-09): 旧版は K_avg を「塔平均 T で x=z」で計算していたが、
+    # この T-P-x は単相領域に入りやすく、PR の 3 次方程式が 1 根しか返さない結果
+    # K_i = phi_L/phi_V ≈ 1 → α ≈ 1 → N_min = ∞ で全塔 infeasible になる病理が
+    # あった (column1.py 旧コメント参照)。本版では塔頂/塔底それぞれの組成で
+    # 泡点フラッシュを実行し、必ず 2 相が成立する点で K を取る。
+    # α_geom = sqrt(α_top × α_bot) は FUG の標準的な平均化 (Sinnott 17.5.3)。
+    for _ in range(5):
+        F_top_total_it = sum(F_top.values())
+        F_bot_total_it = sum(F_bot.values())
+        if F_top_total_it <= 0.0 or F_bot_total_it <= 0.0:
+            return _penalty_result(design, "split failed (top or bottom flow ≤ 0)")
+        x_top_list = [F_top[c] / F_top_total_it for c in comps]
+        x_bot_list = [F_bot[c] / F_bot_total_it for c in comps]
+
+        T_top_new, K_top_list = _bubble_T_K(
+            x_top_list, comps, design.P_col, design.K_method,
+        )
+        T_bot_new, K_bot_list = _bubble_T_K(
+            x_bot_list, comps, design.P_col, design.K_method,
+        )
+        T_top_new = max(T_top_new, _T_COND_MIN)
+
+        HK_idx = comps.index(design.HK)
+        K_top_HK = max(K_top_list[HK_idx], 1e-30)
+        K_bot_HK = max(K_bot_list[HK_idx], 1e-30)
+        alpha_new: Dict[str, float] = {}
+        for i, c in enumerate(comps):
+            a_top = K_top_list[i] / K_top_HK
+            a_bot = K_bot_list[i] / K_bot_HK
+            alpha_new[c] = math.sqrt(max(a_top * a_bot, 1e-30))
+
+        N_min_new = _fenske_N_min(
+            alpha_new.get(design.LK, 1.0),
+            design.recovery_LK_top, design.recovery_HK_bot,
+        )
+        F_top_new, F_bot_new = _split_streams(
+            feed.F_in, alpha_new, N_min_new, design.HK,
             design.recovery_LK_top, design.recovery_HK_bot, design.LK,
         )
-        # 動作温度を塔頂・塔底組成で更新
-        T_top_new = max(_weighted_boil(F_top, design.P_col), _T_COND_MIN)
-        T_bot_new = _weighted_boil(F_bot, design.P_col)
-        if abs(T_top_new - T_top) < 0.5 and abs(T_bot_new - T_bot) < 0.5:
-            T_top, T_bot = T_top_new, T_bot_new
-            break
+
+        # 収束判定: 塔頂流量の相対変化 (フィードに対して 0.1% 未満で打ち切り)
+        diff = max(
+            (abs(F_top_new[c] - F_top[c]) / max(feed.F_in.get(c, 0.0), 1e-9))
+            for c in comps if feed.F_in.get(c, 0.0) > 0.0
+        )
+        F_top, F_bot = F_top_new, F_bot_new
+        alpha, N_min = alpha_new, N_min_new
         T_top, T_bot = T_top_new, T_bot_new
-        T_avg_init = 0.5 * (T_top + T_bot)
+        if diff < 1e-3:
+            break
 
     # ---- 流量・組成 (mol fraction) ----
     F_top_total = sum(F_top.values())

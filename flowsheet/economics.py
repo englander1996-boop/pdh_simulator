@@ -12,19 +12,34 @@ from src.cost_parameters import (
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ,
     CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
+    LPG_FEED_JPY_PER_KG, C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
+    HHV_MJ_PER_KMOL,
 )
+from src.component_data import MW
 
 
 @dataclass
 class Economics:
-    """経済計算結果。最適化器はこの TAC (または unit_jpy_per_t) を目的関数に使う。"""
-    capex:          dict   # [億円]
-    opex:           dict   # [億円/年]
-    total_capex:    float  # [億円]
-    total_opex:    float   # [億円/年]
-    TAC:            float  # [億円/年]
-    annual_kg_C3H6: float  # [kg/年]
-    unit_jpy_per_t: float  # [円/ton]
+    """経済計算結果。
+
+    定義 (化工テキスト標準):
+      TAC      = CAPEX/年 + OPEX (= utility + 触媒 + 吸着剤 + 原料費)
+      Revenue  = C3H6 売上 + H2 売上 + オフガス燃料クレジット (全て正)
+      Profit   = Revenue - TAC   (正なら黒字)
+
+    最適化器は effective_TAC = TAC - Revenue + soft_penalty を最小化する
+    (利益最大化と等価)。runner.py 側で計算。
+    """
+    capex:          dict    # [億円]
+    opex:           dict    # [億円/年]   utility + 触媒 + 吸着剤 + 原料費 (全て正)
+    revenue:        dict    # [億円/年]   売上 + 燃料クレジット (全て正)
+    total_capex:    float   # [億円]
+    total_opex:     float   # [億円/年]
+    total_revenue:  float   # [億円/年]
+    TAC:            float   # [億円/年]   = total_capex/DEPR + total_opex
+    profit:         float   # [億円/年]   = total_revenue - TAC (正=黒字)
+    annual_kg_C3H6: float   # [kg/年]
+    unit_jpy_per_t: float   # [円/ton]   TAC ベース (製造原単位)
 
 
 def _ele(W_kW: float) -> float:
@@ -37,8 +52,29 @@ def _heat(Q_kW: float, jpy_per_GJ: float) -> float:
     return Q_kW * 3.6e-3 * OPERATING_HOURS_PER_YEAR * jpy_per_GJ / 1.0e8
 
 
-def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
-    """run_one_pass の戻り値から CAPEX・OPEX 内訳を抽出。"""
+def _annual_okuyen(F_kmol_h: float, MW_kg_per_kmol: float, jpy_per_kg: float) -> float:
+    """流量 [kmol/h] × MW × 単価 → [億円/年]。"""
+    return (F_kmol_h * MW_kg_per_kmol
+            * OPERATING_HOURS_PER_YEAR * jpy_per_kg / 1.0e8)
+
+
+def _offgas_GJ_per_h(offgas: dict) -> float:
+    """PSA オフガス組成 (dict {A,B,...: kmol/h}) を高位発熱量ベースで GJ/h 換算。"""
+    return sum(
+        offgas.get(c, 0.0) * HHV_MJ_PER_KMOL.get(c, 0.0) / 1000.0
+        for c in offgas
+    )
+
+
+def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
+    """run_one_pass の戻り値から CAPEX・OPEX・Revenue 内訳を抽出。
+
+    Returns
+    -------
+    capex   : 装置別 CAPEX [億円]
+    opex    : OPEX (utility + 触媒 + 吸着剤 + 原料費) [億円/年]   全て正
+    revenue : 売上 (C3H6 + H2) + 燃料クレジット (オフガス) [億円/年]   全て正
+    """
     R = one_pass
 
     capex = {
@@ -109,29 +145,68 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
                                 / CATALYST_PTSN_LIFE_YEARS / 1.0e8)
     opex['PSA活性炭交換']   = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
 
-    return capex, opex
+    # ---- 原料費を OPEX に追加 (TAC に含める標準的な定義) ----
+    # 設計判断 (2026-05-09): TAC には化工標準で原料費を含める (Sinnott §6.5,
+    # Turton §8.2)。utility と並べて opex dict に置く。
+    fresh_F = R['pump1'].outlet.F_in        # Pump1 inlet/outlet 同じ組成
+    F_C3H8_feed  = fresh_F.get('A', 0.0)
+    F_C4H10_feed = fresh_F.get('Z', 0.0)
+    opex['Fresh LPG 原料費'] = (
+        _annual_okuyen(F_C3H8_feed,  MW['A'], LPG_FEED_JPY_PER_KG)
+        + _annual_okuyen(F_C4H10_feed, MW['Z'], LPG_FEED_JPY_PER_KG)
+    )
+
+    # ---- Revenue (売上 + 燃料クレジット、全て正値で計上) ----
+    revenue: dict = {}
+
+    F_C3H6_prod = R['r3'].top.F_in.get('B', 0.0)
+    revenue['C3H6 製品売上'] = _annual_okuyen(
+        F_C3H6_prod, MW['B'], C3H6_PRODUCT_JPY_PER_KG,
+    )
+
+    F_H2_prod = R['r_psa'].product.get('C', 0.0)
+    revenue['H2 製品売上'] = _annual_okuyen(
+        F_H2_prod, MW['C'], H2_PRODUCT_JPY_PER_KG,
+    )
+
+    # オフガスは反応器プリヒーター燃料として利用 → equivalent な FUEL_JPY_PER_GJ で
+    # 燃料費が浮く。Revenue 側に正値として計上。
+    offgas_GJ_per_h = _offgas_GJ_per_h(R['r_psa'].offgas)
+    revenue['PSA オフガス燃料クレジット'] = (
+        offgas_GJ_per_h * OPERATING_HOURS_PER_YEAR * FUEL_JPY_PER_GJ / 1.0e8
+    )
+
+    return capex, opex, revenue
 
 
 def calculate_economics(one_pass: dict, mw_C3H6_kg_per_kmol: float) -> Economics:
-    """CAPEX/OPEX 集計と TAC・製品単価を計算。"""
-    capex, opex = collect_capex_opex(one_pass)
+    """CAPEX/OPEX/Revenue 集計と TAC・Profit・製品単価を計算。"""
+    capex, opex, revenue = collect_capex_opex(one_pass)
 
     # ペナルティ装置 (CAPEX >= 1e8 億円相当) は集計から除外
-    total_capex = sum(v for v in capex.values() if v < 1e6)
-    total_opex  = sum(opex.values())
-    TAC         = total_capex / DEPRECIATION_YEARS + total_opex
+    total_capex   = sum(v for v in capex.values() if v < 1e6)
+    total_opex    = sum(opex.values())
+    total_revenue = sum(revenue.values())
+    TAC           = total_capex / DEPRECIATION_YEARS + total_opex
+    profit        = total_revenue - TAC
 
-    # 製品単価
+    # 製品単価 (TAC ベース、製造原単位)
     C3H6_product_kmol_h = one_pass['r3'].top.F_in.get('B', 0.0)
     annual_kg = C3H6_product_kmol_h * OPERATING_HOURS_PER_YEAR * mw_C3H6_kg_per_kmol
-    unit_jpy_per_t = (TAC * 1.0e8 / (annual_kg / 1000.0)) if annual_kg > 0 else float('inf')
+    if annual_kg > 0:
+        unit_jpy_per_t = TAC * 1.0e8 / (annual_kg / 1000.0)
+    else:
+        unit_jpy_per_t = float('inf')
 
     return Economics(
         capex          =capex,
         opex           =opex,
+        revenue        =revenue,
         total_capex    =total_capex,
         total_opex     =total_opex,
+        total_revenue  =total_revenue,
         TAC            =TAC,
+        profit         =profit,
         annual_kg_C3H6 =annual_kg,
         unit_jpy_per_t =unit_jpy_per_t,
     )

@@ -129,7 +129,11 @@ def evaluate(
 
     soft_penalty = (n_violations * pen.spec_base_okuyen
                     + total_violation_pp * pen.spec_coef_okuyen)
-    effective_TAC = economics.TAC + soft_penalty
+    # 設計判断 (2026-05-09): 最適化器は (TAC − Revenue) を最小化することで
+    # 利益最大化と等価。TAC = CAPEX/年 + OPEX (utility + 触媒 + 原料費) は
+    # 既に原料費を含み、Revenue は C3H6/H2 売上 + オフガス燃料クレジット。
+    # effective_TAC が小さいほど Profit が大きい。
+    effective_TAC = economics.TAC - economics.total_revenue + soft_penalty
 
     return FlowsheetResult(
         solver=solver_result,
