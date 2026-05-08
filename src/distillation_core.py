@@ -19,7 +19,7 @@ _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from units.utils.process_stream import ProcessStream
+from stream.stream import ProcessStream
 from src.cost_calculator import calc_cp0, calc_fp
 from src.cost_parameters import (
     B1, B2, FM, CEPCI_BASE, CEPCI_CURRENT,

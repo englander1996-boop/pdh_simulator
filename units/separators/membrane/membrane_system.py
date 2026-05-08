@@ -438,14 +438,18 @@ def _membrane_ode(F_C3H6_feed: float, F_C3H8_feed: float,
     _event_no_flux.terminal  = True
     _event_no_flux.direction = -1
 
+    # 設計判断 (2026-05-08, profile 結果反映):
+    # 元値 rtol=1e-5, atol=1e-8 は scipy デフォルトの 100倍厳しい設定。
+    # profile で全体時間の 9% を占めていた。膜の透過量積分は反応器ほど厳密性が
+    # 要らないため、reactor と統一して rtol=1e-4, atol=1e-7 に緩める。
     try:
         sol = solve_ivp(
             ode,
             t_span=(0.0, A_mem),
             y0=[F_C3H6_feed, F_C3H8_feed],
             method='Radau',
-            rtol=1e-5,
-            atol=1e-8,
+            rtol=1e-4,
+            atol=1e-7,
             # ID-01: max_step を設定してステップ数を ~200 に抑えフリーズを防止。
             # 低駆動力・巨大 A_mem 条件で無限に細かいステップを踏む問題を回避する。
             max_step=max(A_mem / 200.0, 0.1),

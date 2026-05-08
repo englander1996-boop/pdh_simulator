@@ -17,7 +17,7 @@ _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from units.utils.process_stream import ProcessStream
+from stream.stream import ProcessStream
 from src.cost_calculator import calc_he_capex_okuyen
 
 # 成分ごとの代表定圧比熱 [J/(mol·K)] (300-600 K 範囲の粗近似)

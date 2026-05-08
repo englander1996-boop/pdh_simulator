@@ -1,0 +1,117 @@
+# 固定運転条件 (操作ファイル)
+#
+# 設計変数 (SWING/PSA/MEM dataclass) はコード側に残し、optimizer が触る。
+# このファイルは「設計者が決め打ちしている運転条件」を集約する。
+# 経済パラメータ (電気代, 蒸気代, 触媒単価等) は src/cost_parameters.py。
+
+[product]
+# C3H6 製品仕様 (コンテスト課題 Ver.2.0)
+target_mta     = 400_000.0  # [t/年]
+mw_kg_per_kmol = 42.08      # C3H6 分子量
+
+[feed]
+# LPG 原料 (常時固定: 25°C, 1 atm)
+lpg_c3h8_mol_fraction = 0.9       # 残り 0.1 が C4H10
+yield_assumed         = 0.8       # 外側ループ初期推定用 (実収率は外側で合わせる)
+T_K                   = 298.15
+P_Pa                  = 101325.0
+
+[pressure]
+# 主要昇圧ターゲット [Pa]
+# Dist1/Dist2 の P_col に揃える (蒸留塔本実装が来たら整合性を再確認すること)
+comp1_out_Pa     = 17.0e5     # = Dist1 P_col (脱ブタン塔, 凝縮温度の物理的下限)
+comp2_out_Pa     = 8.5e5      # = Dist2 P_col (脱エタン塔; 膜の P_H<=9.5 bar に合わせて低圧運転)
+reactor_inlet_Pa = 101325.0   # PDH 1 atm 運転 (Dist1塔頂とリサイクルを膨張弁でこの圧へ)
+
+[temperature]
+# 主要冷却・予熱ターゲット [K]
+cooler_after_reactor_K = 320.0    # Reactor 出口冷却 (Comp2 入口)
+mem_feed_K             = 323.15   # Mem フィード温度 (露点+30K の過熱)
+
+# ===========================================================================
+# 収束ソルバ設定
+# ===========================================================================
+# 設計判断 (2026-05-08):
+#   旧設計は内側 TOL=0.10 kmol/h (絶対値)・外側 TOL=1.0 kmol/h (両側絶対) で、
+#   tear=7500 に対し 1.3e-5 という過剰精度を要求していた。fake_column が
+#   split_fracs ベースでこの精度を物理的に保証できないため、後半の反復は
+#   ノイズを追っていた状態。実測で内側 200 反復・1評価 40 分。
+#   → 内側を相対 TOL に切替、小流量での過度な厳しさを floor で回避。
+#   → 外側を片側相対 TOL に切替 (overshoot 任意、undershoot のみ違反)。
+
+[solver.inner]
+# リサイクル収束 (tear stream: Mem retentate + Dist3 bottom の A,B 計4変数)
+#   判定式: max( |Δtear[k]| / max(|tear[k]|, tol_floor_kmol_h) ) < tol_relative
+#   tear=7500 → 7.5 kmol/h 相当 (旧 0.10 比 75倍緩い、相対 0.1%)
+#   tear=30   → tol_floor が効いて 0.10 kmol/h 相当 (小流量で過度に厳しくしない)
+max_iter            = 500
+tol_relative        = 0.001
+tol_floor_kmol_h    = 100.0
+relax               = 0.50      # アンダーリラックス係数 (Wegstein 第1反復にも使用)
+recycle_guard_ratio = 15.0      # tear_mem.A > Fresh × これ で暴走打ち切り
+
+# 設計判断 (2026-05-08, profile 結果を踏まえて):
+#   逐次置換 (relax=0.5) は実測で内側 200 反復、収束比 ~0.96。
+#   profile 結果より時間の 99% は ODE 積分なので、反復回数を減らせば全体が速くなる。
+#   Wegstein は履歴2点から最適加速係数 q を自動計算するため、人手チューニング不要で
+#   3-5 倍速 (内側 70 → 20 反復) が期待できる。
+#   q_min は加速強度の下限。-5 が標準的安全値、-10 以下は発散リスク。
+method         = "wegstein"             # "successive_substitution" or "wegstein"
+wegstein_q_min = -5.0                   # wegstein のみ: 加速強度の下限
+wegstein_q_max =  0.0                   # wegstein のみ: q の上限 (0=完全置換まで)
+
+[solver.outer]
+# 製品流量を目標に合わせるための Fresh 調整ループ
+#   判定式: max(0, target - actual) < target × tol_relative
+#   片側 (undershoot のみ違反): contest.md は「400 kt/年 以上」のため overshoot OK。
+#   実測で 4 outer iter 必要 → 片側化で 2-3 iter に短縮見込み。
+max_iter     = 30
+tol_relative = 0.01      # 片側 1% 不足まで収束扱い
+relax        = 0.7
+
+[solver.init]
+# 初期推定値 (Fresh=1500 を基準とした線形スケーリング)
+T_d3_K                    = 333.15
+T_mem_K                   = 323.15
+tear_d3_A_per_1500_fresh  = 30.0
+tear_d3_B_per_1500_fresh  = 3.0
+tear_mem_A_per_1500_fresh = 6500.0
+tear_mem_B_per_1500_fresh = 600.0
+
+
+# ===========================================================================
+# 製品仕様 (spec) — feasibility 制約
+# ===========================================================================
+# 設計判断 (2026-05-08):
+#   contest.md §2-1 の C3H6 99.5 wt% は必須。
+#   H2 はコンテスト規定では「水素+メタンの混合オフガス」扱いだが、本設計では
+#   PSA で分離して H2 を製品として販売する想定。化学グレード水準 99.9 mol%
+#   を独自に設定 (PSA で物理的に到達可能)。
+#   オフガス (CH4 主体) は contest 規定通り純度制約なし。
+#   contest §3-3 の C2 留分 99.8 mol% は、本フローでは C2H4 (PSA行) と
+#   C2H6 (Mem行) で別ストリームに分かれるため該当ストリーム不在 → 制約なし。
+[spec]
+c3h6_min_wtfrac         = 0.995    # Dist3 塔頂の C3H6 質量分率 (contest 必須)
+h2_min_molfrac          = 0.999    # PSA 製品の H2 モル分率 (販売想定で独自設定)
+production_min_relative = 0.01     # 生産量 1% 不足まで許容 (= 外側 TOL と同値)
+
+
+# ===========================================================================
+# ペナルティ — 最適化器が見る effective_TAC への加算ロジック
+# ===========================================================================
+# 設計判断 (2026-05-08):
+#   2 階層構造を採用。
+#   (a) solver-level 失敗 (PSA/Mem CAPEX 1e8, リサイクル暴走, NaN, 未収束):
+#       数値結果が信頼できないので「評価不能」扱い → 大きな固定値で打ち切り。
+#       optimizer は SCALAR で受け取るため 1e4 億円 (現実 TAC 200-300 の数十倍)。
+#   (b) spec 違反 (純度・生産量):
+#       数値結果は信頼できるので、連続的なソフトペナルティで方向感を与える。
+#       penalty = base + coef × violation%pt
+#       全 spec 違反を %ポイント単位に揃えるため、spec.py 側で正規化する。
+#   採用理由: 化学プロセス最適化は微分不要系 (DE/GA/BO) が実用的で、
+#   それらは feasibility 領域外でもスカラー値を必要とする。陽な制約より
+#   ソフトペナルティの方が探索効率が良い (相談時の合意 2026-05-08)。
+[penalty]
+solver_failure_okuyen = 10000.0   # solver-level 失敗時の TAC 固定値 [億円/年]
+spec_base_okuyen      = 1000.0    # spec 違反 1 つにつき固定加算 [億円/年]
+spec_coef_okuyen      = 100.0     # 違反%pt 当たりの加算係数 [億円/(年・%pt)]

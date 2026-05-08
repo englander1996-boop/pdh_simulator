@@ -36,7 +36,7 @@ except Exception:
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..')))
 
-from units.utils.process_stream import ProcessStream
+from stream.stream import ProcessStream
 from units.utils.cooler import simulate_cooler
 from units.utils.compressor import simulate_compressor
 from units.separators.column1.fake_column1 import simulate_column1
