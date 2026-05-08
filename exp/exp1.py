@@ -43,9 +43,9 @@ from stream.stream import ProcessStream
 from units.utils.cooler import simulate_cooler
 from units.utils.compressor import simulate_compressor
 from units.utils.pump import simulate_pump
-from units.separators.column1.fake_column1 import simulate_column1
-from units.separators.column2.fake_column2 import simulate_column2
-from units.separators.column3.fake_column3 import simulate_column3
+from units.separators.column1.column1 import simulate_column1
+from units.separators.column2.column2 import simulate_column2
+from units.separators.column3.column3 import simulate_column3
 from units.reactors.swing import (
     DesignVars as SwingDesign, FeedStream as SwingFeed,
     FixedParams as SwingFixed, simulate_swing_reactor_system,

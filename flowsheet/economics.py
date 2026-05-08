@@ -71,6 +71,11 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict]:
         'Dist2リボイラ蒸気': _heat(R['r2'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
         'Dist3リボイラ蒸気': _heat(R['r3'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
         'Mem気化器蒸気':     _heat(R['r_mem'].equipment.Q_vap_kW, LP_STEAM_JPY_PER_GJ),
+        # 設計判断 (2026-05-08): 蒸留塔フィード予熱を独立計上 (旧版は抜けていた)。
+        # distillation_core.py の DistEquipment.Q_feed_preheat_kW から読み取る。
+        'Dist1フィード予熱蒸気': _heat(R['r1'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
+        'Dist2フィード予熱蒸気': _heat(R['r2'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
+        'Dist3フィード予熱蒸気': _heat(R['r3'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
     }
 
     # 反応器プリヒーター (GJ/h → kW 換算)

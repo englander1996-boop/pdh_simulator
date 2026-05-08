@@ -28,6 +28,9 @@ from .cost_parameters import (
     K1_COMP, K2_COMP, K3_COMP, W_COMP_MIN, W_COMP_MAX, FBM_COMP,
     K1_PUMP, K2_PUMP, K3_PUMP, W_PUMP_MIN, W_PUMP_MAX,
     B1_PUMP, B2_PUMP, FM_PUMP, C1_PUMP_FP, C2_PUMP_FP, C3_PUMP_FP,
+    K1_TRAY_SIEVE, K2_TRAY_SIEVE, K3_TRAY_SIEVE,
+    A_TRAY_MIN, A_TRAY_MAX, FBM_TRAY,
+    FQ_C0, FQ_C1, FQ_C2,
     MEM_UNIT_PRICE_USD_PER_M2,
 )
 
@@ -239,6 +242,66 @@ def calc_pump_capex_okuyen(W_kW: float, P_abs_pa: float) -> float:
         fp     = 10.0 ** (C1_PUMP_FP + C2_PUMP_FP * log_Pg + C3_PUMP_FP * log_Pg ** 2)
 
     cbm         = cp0 * (B1_PUMP + B2_PUMP * fp * FM_PUMP)
+    current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
+    return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
+
+
+# ---------------------------------------------------------------------------
+# 蒸留塔トレイ（Sieve trays、炭素鋼）
+# 出典: プロセス設計授業資料 (R08-3.pdf) 付録 A Table A.1
+# ---------------------------------------------------------------------------
+
+def calc_tray_capex_okuyen(D_col_m: float, N_stages: int) -> float:
+    """
+    Sieve trays (多孔板トレイ) の総建設費 [億円]。
+
+    C_BM,trays = Cp0_tray × N × FBM_TRAY × Fq
+
+    式の構造:
+      Cp0_tray = 10^(K1 + K2*log10(A) + K3*(log10(A))^2)   [基本コスト/段]
+        A = 塔断面積 [m²] = π/4 × D_col²
+      Fq = トレイ段数係数 (N<20 で割高補正、N≥20 で 1)
+        log10(Fq) = 0.4771 + 0.08516*log10(N) - 0.3473*(log10(N))^2  (N<20)
+
+    塔本体側の Fp は適用しない (出典明記)。
+
+    Parameters
+    ----------
+    D_col_m  : 塔径 [m]
+    N_stages : トレイ段数 (理論段)
+
+    Returns
+    -------
+    CAPEX [億円] (CEPCI 補正 + 1.18 据付間接費 + USD→JPY 換算済み)
+    """
+    if D_col_m <= 0:
+        raise ValueError(
+            f"calc_tray_capex_okuyen: D_col={D_col_m} は正値でなければなりません。")
+    if N_stages <= 0:
+        raise ValueError(
+            f"calc_tray_capex_okuyen: N_stages={N_stages} は正値でなければなりません。")
+
+    A_tray = math.pi / 4.0 * D_col_m ** 2   # トレイ面積 [m²]
+    if not (A_TRAY_MIN <= A_tray <= A_TRAY_MAX):
+        warnings.warn(
+            f"calc_tray_capex_okuyen: A_tray={A_tray:.3f} m² は適用範囲 "
+            f"[{A_TRAY_MIN}, {A_TRAY_MAX}] m² 外です。",
+            UserWarning, stacklevel=2,
+        )
+
+    log_A = math.log10(A_tray)
+    cp0_tray = 10.0 ** (
+        K1_TRAY_SIEVE + K2_TRAY_SIEVE * log_A + K3_TRAY_SIEVE * log_A ** 2
+    )
+
+    # トレイ段数係数 Fq
+    if N_stages < 20:
+        log_N = math.log10(float(N_stages))
+        fq = 10.0 ** (FQ_C0 + FQ_C1 * log_N + FQ_C2 * log_N ** 2)
+    else:
+        fq = 1.0
+
+    cbm = cp0_tray * float(N_stages) * FBM_TRAY * fq
     current_usd = cbm * (CEPCI_CURRENT / CEPCI_BASE)
     return PLANT_INDIRECT_FACTOR * current_usd * USD_TO_JPY / 1.0e8
 

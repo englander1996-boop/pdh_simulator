@@ -261,6 +261,17 @@ class MemEquipmentData:
     # ★ 仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
     CAPEX_mem:        float = float('nan')  # 膜モジュール（単価仮置き中）
     CAPEX_total:      float = float('nan')  # 合計 [億円]（CAPEX_mem が仮置きのため暫定値）
+    # 設計判断 (2026-05-08): ヒートインテグレーション用ストリーム温度。
+    # 気化器: vapor_feed=True のとき in/out は feed.T_in 同値、Q_vap_kW=0。
+    T_vap_in_K:   float = float('nan')  # 気化器入口温度 [K] (= feed.T_in)
+    T_vap_out_K:  float = float('nan')  # 気化器出口温度 [K] (= 露点+過熱度、または feed.T_in)
+    T_cond_in_K:  float = float('nan')  # 製品冷却器入口温度 [K] (= 製品圧縮機出口)
+    T_cond_out_K: float = float('nan')  # 製品冷却器出口温度 [K] (= 泡点 @ P_dist)
+    # 設計判断 (2026-05-08): 製品冷却器を顕熱(ガスT_in→T_bp)+潜熱(T_bpで凝縮)に分離。
+    # HI 抽出時に温度範囲を持つ顕熱ストリームと潜熱ストリームを別扱いするため。
+    # Q_cond_kW = Q_cond_sensible_kW + Q_cond_latent_kW (互換性のため両方保持)。
+    Q_cond_sensible_kW: float = 0.0   # ガス顕熱 [kW] (T_cond_in → T_cond_out)
+    Q_cond_latent_kW:   float = 0.0   # 凝縮潜熱 [kW] (T_cond_out で凝縮)
 
 
 @dataclass
@@ -475,15 +486,22 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
     """
     製品冷却器: 圧縮後の透過ガスを飽和液まで冷却・凝縮。
 
+    設計判断 (2026-05-08, HI 用途追加): 顕熱（ガス T_in → T_bp）と潜熱
+    （T_bp での凝縮）を分離して返す。HI 抽出関数が温度範囲を持つ顕熱
+    ストリームと潜熱ストリームを別々に扱えるようにするため。
+    Q_cond_kW (合計) は従来互換のため残す。
+
     Returns
     -------
-    T_bp  : 出口（泡点）温度 [K]
-    Q_cond_kW : 必要冷却量 [kW]
-    A_cond    : 伝熱面積 [m²]
+    T_bp                 : 出口（泡点）温度 [K]
+    Q_cond_kW            : 必要冷却量 [kW] = 顕熱 + 潜熱
+    A_cond               : 伝熱面積 [m²]
+    Q_cond_sensible_kW   : ガス顕熱分 [kW] (T_in → T_bp)
+    Q_cond_latent_kW     : 凝縮潜熱分 [kW] (T_bp で凝縮)
     """
     T_bp = bubble_point_T(P_dist, [y_C3H6, 1.0 - y_C3H6], _KEYS)
     if math.isnan(T_bp):
-        return float('nan'), float('nan'), float('nan')
+        return float('nan'), float('nan'), float('nan'), float('nan'), float('nan')
 
     # ID-09: 圧縮機出口が既に泡点以下 → エンタルピー差が負になり Q_cond < 0
     if T_in <= T_bp:
@@ -492,12 +510,19 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
             " 透過ガスが既に凝縮状態のため冷却器モデルが無効です。",
             UserWarning, stacklevel=3,
         )
-        return T_bp, float('nan'), float('nan')
+        return T_bp, float('nan'), float('nan'), float('nan'), float('nan')
 
-    H_gas_in  = _h_mol(T_in, P_dist, y_C3H6, 'vapor')
-    H_liq_out = _h_mol(T_bp, P_dist, y_C3H6, 'liquid')
-    Q_cond    = F_perm_mols * (H_gas_in - H_liq_out)   # [W]
-    Q_cond_kW = Q_cond / 1e3
+    # 顕熱: ガス T_in → ガス T_bp
+    H_gas_in    = _h_mol(T_in, P_dist, y_C3H6, 'vapor')
+    H_gas_at_bp = _h_mol(T_bp, P_dist, y_C3H6, 'vapor')
+    # 潜熱: ガス T_bp → 液 T_bp (温度同一)
+    H_liq_out   = _h_mol(T_bp, P_dist, y_C3H6, 'liquid')
+
+    Q_cond_sensible_W = F_perm_mols * (H_gas_in    - H_gas_at_bp)   # 顕熱 [W]
+    Q_cond_latent_W   = F_perm_mols * (H_gas_at_bp - H_liq_out  )   # 潜熱 [W]
+    Q_cond_sensible_kW = Q_cond_sensible_W / 1e3
+    Q_cond_latent_kW   = Q_cond_latent_W   / 1e3
+    Q_cond_kW          = Q_cond_sensible_kW + Q_cond_latent_kW
 
     # 向流熱交換器 LMTD
     # ガス側: T_in → T_bp,  冷却水側: T_cold_in → T_cold_out
@@ -506,7 +531,7 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
     lmtd = _lmtd(dT1, dT2)
     A_cond = Q_cond_kW / (fixed.U_cond * lmtd) if lmtd > 0 else float('nan')
 
-    return T_bp, Q_cond_kW, A_cond
+    return T_bp, Q_cond_kW, A_cond, Q_cond_sensible_kW, Q_cond_latent_kW
 
 
 # ---------------------------------------------------------------------------
@@ -656,7 +681,7 @@ def simulate_membrane_system(
 
     # ---- ユニット 5: 製品冷却器 ----
     try:
-        T_bp_perm, Q_cond_kW, A_cond = _condenser(
+        T_bp_perm, Q_cond_kW, A_cond, Q_cond_sens_kW, Q_cond_lat_kW = _condenser(
             F_perm_total_mols, y_C3H6,
             T_prod_comp_out, design.P_dist,
             fixed,
@@ -739,6 +764,12 @@ def simulate_membrane_system(
             CAPEX_cond     = capex_cond,
             CAPEX_mem      = capex_mem,
             CAPEX_total    = capex_total,
+            T_vap_in_K     = feed.T_in,
+            T_vap_out_K    = T_vap_out,
+            T_cond_in_K    = T_prod_comp_out,
+            T_cond_out_K   = T_bp_perm,
+            Q_cond_sensible_kW = Q_cond_sens_kW,
+            Q_cond_latent_kW   = Q_cond_lat_kW,
         ),
         stage_cut   = float(np.clip(stage_cut,   0.0, 1.0)),
         perm_purity = float(np.clip(y_C3H6,      0.0, 1.0)),
