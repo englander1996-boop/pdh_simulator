@@ -1,47 +1,28 @@
 """
 exp2.py — リサイクルあり PDH プロセス全体フロー シミュレーション
 
+このスクリプトは flowsheet.evaluate() を呼ぶ薄いランナー。
+構成:
+  - 運転条件 (固定値)  → config/operating.toml
+  - 設計変数 (最適化対象) → 下記 SWING/PSA/MEM
+  - 物理計算・収束・経済計算 → flowsheet/* に移譲
+
+最適化器を組むときは flowsheet.evaluate(design, config) を直接呼ぶ。
+
 リサイクル構成:
   - Membrane 保留側 (C3H8 富化, 残留 C3H6 含)        ─┐
   - Dist3 塔底       (未透過 C3H8, 残留 C3H6 含)     ─┴→ Reactor 直前で合流
-  Dist1 (脱ブタン) には戻さない
-    ↳ 軽質ガス・C4 は既に系外へ抜けているためエネルギーロスを避ける
-
-全体フロー:
-  Fresh LPG (1atm) → Comp1 → Dist1 (脱ブタン)
-       ↓ 塔頂(C3) を 1atm 膨張
-   ┌→ Mixer ←┬─ Membrane 保留側 (1atm 膨張)
-   │         └─ Dist3 塔底     (1atm 膨張)
-   │
-   └→ Reactor (PDH 600°C, 1atm)
-       → Cooler → Comp2 → Dist2 (脱エタン)
-            塔頂 → PSA (H2 製品 + オフガス)
-            塔底 → Mem前冷却 → Membrane
-                     透過側  → Dist3 → 塔頂 C3H6 製品
-                                       塔底 → Recycle ↑
-                     保留側 → Recycle ↑
-
-収束方式:
-  逐次置換 + アンダーリラックス (alpha=0.7)
-  tear stream: Mem retentate (A,B) と Dist3 bottom (A,B) の 2 本（合計 4 変数）
-  収束基準  : ‖tear_new − tear‖_∞ < TOL_F
-  ペナルティガード: PSA/Mem の CAPEX_total ≥ 1e8 で打ち切り
-  暴走ガード      : tear_mem.A が Fresh × RECYCLE_GUARD_RATIO 超で打ち切り
+  Dist1 (脱ブタン) には戻さない (軽質ガス・C4 は既に系外へ抜けているため)
 
 差し替えポイント:
   1. 蒸留塔モデル (fake_column1/2/3 → 正式 VLE モデル):
        同一インターフェイス (ProcessStream → DistResult) なら import 行のみ変更
   2. ユーティリティ単価:
-       src/cost_parameters.py の以下 7 定数を実値に置換するだけ
-         ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
-         COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ,
-         CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
-         OPERATING_HOURS_PER_YEAR
+       src/cost_parameters.py の定数を実値に置換
 """
 
 import os
 import sys
-import warnings
 
 # Windows コンソール (cp932) でも記号を表示
 try:
@@ -51,23 +32,14 @@ except Exception:
 
 sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..')))
 
-from units.utils.process_stream import ProcessStream
-from units.utils.mixer import mix_streams
-from units.utils.cooler import simulate_cooler
-from units.utils.compressor import simulate_compressor
-from units.separators.column1.fake_column1 import simulate_column1
-from units.separators.column2.fake_column2 import simulate_column2
-from units.separators.column3.fake_column3 import simulate_column3
-from units.reactors.swing import (
-    DesignVars as SwingDesign, FeedStream as SwingFeed,
-    FixedParams as SwingFixed, simulate_swing_reactor_system,
-)
-from units.separators.psa.psa_system import (
-    PSADesignVars, PSAFeedStream, PSAFixedParams, simulate_psa_system,
-)
-from units.separators.membrane.membrane_system import (
-    MemDesignVars, MemFeedStream, MemFixedParams, simulate_membrane_system,
-)
+from stream.stream import ProcessStream
+from config.load import load_operating_config
+from flowsheet import FlowsheetDesignVars, evaluate
+
+from units.reactors.swing import DesignVars as SwingDesign
+from units.separators.psa.psa_system import PSADesignVars
+from units.separators.membrane.membrane_system import MemDesignVars
+
 from src.cost_parameters import (
     ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ,
@@ -76,21 +48,14 @@ from src.cost_parameters import (
 )
 
 # ===========================================================================
-# 設計変数（最適化対象）
+# 設計変数 (最適化対象)
 # ===========================================================================
-
-# 原料 [kmol/h]
-F_C3H8_FEED  = 1500.0
-F_C4H10_FEED =  166.0
 
 # スイング反応器
 # 物質収支の定常解 Fresh ≈ S × (0.02 + 0.98X) より、リサイクル系では反応器入口
 # C3H8 流量 S が Fresh の 3〜4 倍に達する (X=22% で S≈6200, X=15% で S≈8700)。
 # exp1 の (T_in=900, z_cat=5, D=2) では WHSV 過大で X が崩れて発散したため
 # 触媒量・断面積を実機 PDH 並み (WHSV 1〜2 1/h) まで拡大。
-# T_in は副生成物 (CH4 等) 抑制のため 900K に据置 — 上げても X はほぼ変わらず
-# 選択率だけ低下し PSA フィードの CH4 が増えてかえってペナルティに当たる。
-# いずれも最終的には最適化変数として扱う。
 # 反応器入口 S=5000 kmol/h 目標は X≈30% を要求するが、z_cat=30, D=7 まで拡大しても
 # X=20.8% 止まりで、触媒コスト (50000円/kg・寿命3年) が支配的になり TAC 悪化。
 # 現状 (z_cat=15, D=5, X=14.2%, S≈12800) で TAC 265 億円/年・単価 71 円/kg を
@@ -99,39 +64,20 @@ SWING = SwingDesign(T_in=900.0, z_cat=15.0, t_cyc=15.0, D=5.0)
 
 # PSA — exp2 はスケールが exp1 の 15 倍 + リサイクル系のため副生 H2 も増え、
 # PSA フィード非C3 流量が exp1 から 50 倍以上に膨らむ。t_abs_css ≥ 60s を満たす
-# には容積を相応に拡大する必要がある (容積 ∝ t_abs)。最終的には最適化変数として
-# 扱う。
+# には容積を相応に拡大する必要がある (容積 ∝ t_abs)。
 PSA = PSADesignVars(D_col=3.0, L_bed=20.0, desorption_target=0.35)
 
 # 膜分離 — A_mem=10000 では C3H6 透過量が ~120 kmol/h で頭打ちになり、リサイクル
 # 系の物質収支 (反応器で生成する C3H6 を毎時系外に抜く必要量 ≈ 1450 kmol/h) を
-# 満たせず C3H8 が保留側に蓄積して発散する。最終的には最適化変数として扱う。
+# 満たせず C3H8 が保留側に蓄積して発散する。
 # P_H: Hua et al. (2024) で検証された圧力範囲上限 9.5 bar に合わせる。
 # 但し simulate_membrane_system は P_H > feed.P_in を要求するため、
 # Dist2 P_col (= mem feed P) を 8.5 bar に下げて 1 bar の差を確保。
-# A_mem: P_H を 25→9.5 bar に下げた結果、駆動力 (P_H − P_L) が ~25→8.5 → 3倍弱
-# 低下するため、面積を約 3.3 倍に拡大して透過量を維持。
 MEM = MemDesignVars(P_H=9.5e5, P_L=1.0e5, A_mem=100000.0, P_dist=20.0e5)
 
-# 膜入口目標温度
-#   Dist2 を 8.5 bar 運転（C3H8/C3H6 泡点 ~20°C）にしたため、
-#   塔底液は冷却水で液状を保てない。膜は P_H ≤ 9.5 bar を満たすため
-#   ガスフィード運転（vapor_feed=True）。露点 + 30K 程度に過熱する。
-T_MEM_FEED = 323.15  # [K] = 50°C  (8.5 bar 露点 ~22°C に対し過熱度 ~28K)
 
 # ===========================================================================
-# リサイクル収束パラメータ
-# ===========================================================================
-
-MAX_ITER            = 500     # 最大反復
-TOL_F               = 0.10    # 収束判定 [kmol/h]
-RELAX_ALPHA         = 0.50    # アンダーリラックス係数 (0<α≤1, 小さいほど安定)
-RECYCLE_GUARD_RATIO = 15.0    # tear_mem.A が Fresh × この値超で暴走打ち切り
-
-ZERO = {'A': 0.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0, 'Z': 0.0}
-
-# ===========================================================================
-# ユーティリティ
+# 表示ヘルパ
 # ===========================================================================
 
 def hdr(title):
@@ -139,346 +85,145 @@ def hdr(title):
     print(f"  {title}")
     print('='*64)
 
+
 def show_stream(label, stream):
     comp_names = {'A':'C3H8','B':'C3H6','C':'H2','D':'C2H4','E':'CH4','F':'C2H6','Z':'C4H10'}
     parts = [f"{comp_names.get(k,k)}:{v:.1f}" for k, v in sorted(stream.F_in.items()) if v > 0.01]
     print(f"  {label}: {', '.join(parts)}")
-    print(f"  {' '*len(label)}  T={stream.T_in-273.15:.0f}°C  P={stream.P_in/1e5:.1f}bar  F={stream.total_flow():.1f}kmol/h")
-
-# ===========================================================================
-# 1 周回シミュレーション
-# ===========================================================================
-
-def run_one_pass(tear_dist3, tear_mem, T_d3, T_mem):
-    """
-    Parameters
-    ----------
-    tear_dist3 : dict {'A','B'} [kmol/h]  Dist3 塔底由来のリサイクル
-    tear_mem   : dict {'A','B'} [kmol/h]  Mem 保留側由来のリサイクル
-    T_d3, T_mem: float [K]                各リサイクルの温度（前ループの値）
-
-    Returns
-    -------
-    dict  全ユニット結果＋ tear_*_new ＋ T_*_new
-    """
-    # ---- Fresh LPG (1 atm, 25°C) ----
-    fresh = ProcessStream(
-        F_in={'A': F_C3H8_FEED, 'Z': F_C4H10_FEED,
-              'B': 0., 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
-        T_in=298.15, P_in=101325.,
-    )
-
-    # ---- Step 1: Comp1 → Dist1 (Fresh のみ) ----
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        comp1 = simulate_compressor(fresh, P_out_target=17.0e5)
-        r1 = simulate_column1(comp1.outlet)
-
-    # 塔頂を 1 atm に膨張（C4 除去済みの C3 主成分）
-    dist1_top_1atm = ProcessStream(
-        F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=101325.,
-    )
-
-    # ---- リサイクルストリーム（1 atm 膨張弁経由、コストなし）----
-    recycle_dist3 = ProcessStream(
-        F_in={**ZERO, 'A': tear_dist3['A'], 'B': tear_dist3['B']},
-        T_in=T_d3, P_in=101325.,
-    )
-    recycle_mem = ProcessStream(
-        F_in={**ZERO, 'A': tear_mem['A'], 'B': tear_mem['B']},
-        T_in=T_mem, P_in=101325.,
-    )
-
-    # ---- Reactor 入口で合流 ----
-    reactor_inlet = mix_streams([dist1_top_1atm, recycle_dist3, recycle_mem])
-
-    # ---- Step 2: Swing Reactor ----
-    swing_feed = SwingFeed(
-        F_in=reactor_inlet.F_in,
-        T_feed=reactor_inlet.T_in,
-        P_in=reactor_inlet.P_in,
-    )
-    r_rx = simulate_swing_reactor_system(SWING, swing_feed, SwingFixed())
-
-    rx_out = ProcessStream(
-        F_in=r_rx.effluent.F_out_avg,
-        T_in=r_rx.effluent.T_out_avg,
-        P_in=r_rx.effluent.P_out,
-    )
-
-    # ---- Step 3: Cooler → Comp2 → Dist2 ----
-    cooled = simulate_cooler(rx_out, T_out_target=320.0)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        comp2 = simulate_compressor(cooled.outlet, P_out_target=8.5e5)
-        r2 = simulate_column2(comp2.outlet)
-
-    # ---- Step 4: PSA ----
-    psa_feed = PSAFeedStream(
-        F_in=r2.top.F_in, T_in=r2.top.T_in, P_in=r2.top.P_in,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r_psa = simulate_psa_system(PSA, psa_feed, PSAFixedParams())
-
-    # ---- Step 5: Membrane ----
-    # Dist2 を 8.5 bar 運転にした影響で塔底液の泡点が ~20°C まで下がり、冷却水
-    # では液状態を保てない。膜の P_H ≤ 9.5 bar (Hua et al. 2024 の検証範囲) を
-    # 守るため、塔底液を T_MEM_FEED まで気化・過熱してガスフィードで膜へ送る。
-    # mem_precool は実質スーパーヒーターとして機能する（dummy cooler は相変化を
-    # 追わないため、OPEX には潜熱分が反映されないことに注意）。
-    mem_precool = simulate_cooler(r2.bottom, T_out_target=T_MEM_FEED)
-    mem_feed = MemFeedStream(
-        F_C3H6=mem_precool.outlet.F_in.get('B', 0.),
-        F_C3H8=mem_precool.outlet.F_in.get('A', 0.),
-        T_in=mem_precool.outlet.T_in,
-        P_in=mem_precool.outlet.P_in,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r_mem = simulate_membrane_system(MEM, mem_feed, MemFixedParams(vapor_feed=True))
-
-    # ---- Step 6: Dist3 ----
-    mem_to_dist3 = ProcessStream(
-        F_in={'A': r_mem.product.F_C3H8, 'B': r_mem.product.F_C3H6,
-              'C': 0., 'D': 0., 'E': 0., 'F': 0.},
-        T_in=r_mem.product.T_out, P_in=r_mem.product.P_out,
-    )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        r3 = simulate_column3(mem_to_dist3)
-
-    # ---- tear stream の更新値 ----
-    tear_dist3_new = {
-        'A': r3.bottom.F_in.get('A', 0.0),
-        'B': r3.bottom.F_in.get('B', 0.0),
-    }
-    tear_mem_new = {
-        'A': r_mem.retentate.F_C3H8,
-        'B': r_mem.retentate.F_C3H6,
-    }
-    T_d3_new  = r3.bottom.T_in
-    T_mem_new = r_mem.retentate.T_out
-
-    return dict(
-        comp1=comp1, r1=r1, dist1_top_1atm=dist1_top_1atm,
-        reactor_inlet=reactor_inlet,
-        r_rx=r_rx, rx_out=rx_out,
-        cooled=cooled, comp2=comp2, r2=r2,
-        r_psa=r_psa, mem_precool=mem_precool, r_mem=r_mem, r3=r3,
-        tear_dist3_new=tear_dist3_new, tear_mem_new=tear_mem_new,
-        T_d3_new=T_d3_new, T_mem_new=T_mem_new,
-    )
+    print(f"  {' '*len(label)}  T={stream.T_in-273.15:.0f}°C  P={stream.P_in/1e5:.1f}bar"
+          f"  F={stream.total_flow():.1f}kmol/h")
 
 
 # ===========================================================================
-# 収束ループ
+# 実行
 # ===========================================================================
 
-hdr("リサイクル収束ループ (逐次置換 + アンダーリラックス)")
-print(f"  TOL_F = {TOL_F} kmol/h    RELAX_ALPHA = {RELAX_ALPHA}    MAX_ITER = {MAX_ITER}")
-print()
-print(f"  iter | tear_d3 (A,B) | tear_mem (A,B) | Δ_max  | Reactor転化率")
-print(f"  -----+---------------+----------------+--------+--------------")
+config = load_operating_config()
+design = FlowsheetDesignVars(swing=SWING, psa=PSA, mem=MEM)
 
-# 初期値は物質収支から推定した定常リサイクル量の概算で初期化する
-#   Fresh ≈ S × (0.02 + 0.98X)  → X=0.17 と仮定すると S ≈ 8200, Recycle ≈ 6800
-#   ほぼ全て Mem retentate を経由する (Dist3 塔底は ~30 kmol/h オーダー)
-tear_dist3 = {'A':   30.0, 'B':    3.0}
-tear_mem   = {'A': 6500.0, 'B':  600.0}
-T_d3       = 333.15
-T_mem      = 323.15
+hdr("外側ループ: 製品流量厳密化 (Fresh を調整)")
+result = evaluate(design, config, verbose=True)
 
-results       = None
-converged     = False
-penalty_hit   = False
-guard_hit     = False
-
-for it in range(1, MAX_ITER + 1):
-    results = run_one_pass(tear_dist3, tear_mem, T_d3, T_mem)
-
-    # ペナルティガード（PSA/Mem が無効解を返した時）
-    if (results['r_psa'].equipment.CAPEX_total >= 1e8 or
-        results['r_mem'].equipment.CAPEX_total >= 1e8):
-        print(f"  {it:4d} | --- PSA/Mem ペナルティ発火 → 設計変数の見直しが必要 ---")
-        penalty_hit = True
-        break
-
-    diff_d3  = max(abs(results['tear_dist3_new'][k] - tear_dist3[k]) for k in tear_dist3)
-    diff_mem = max(abs(results['tear_mem_new'][k]   - tear_mem[k])   for k in tear_mem)
-    diff = max(diff_d3, diff_mem)
-
-    conv = results['r_rx'].performance.Conversion
-    print(f"  {it:4d} | {results['tear_dist3_new']['A']:5.2f},{results['tear_dist3_new']['B']:5.2f}"
-          f"   | {results['tear_mem_new']['A']:6.2f},{results['tear_mem_new']['B']:5.2f}"
-          f"   | {diff:6.3f} | {conv:5.1f}%")
-
-    # 暴走ガード
-    if results['tear_mem_new']['A'] > F_C3H8_FEED * RECYCLE_GUARD_RATIO:
-        print(f"  → リサイクル暴走ガード発火 (tear_mem.A > {F_C3H8_FEED * RECYCLE_GUARD_RATIO} kmol/h)")
-        guard_hit = True
-        break
-
-    if diff < TOL_F:
-        converged = True
-        print(f"  → 収束 (Δ={diff:.4f} < TOL_F={TOL_F})")
-        break
-
-    # アンダーリラックス更新
-    tear_dist3 = {k: RELAX_ALPHA * results['tear_dist3_new'][k]
-                     + (1 - RELAX_ALPHA) * tear_dist3[k] for k in tear_dist3}
-    tear_mem   = {k: RELAX_ALPHA * results['tear_mem_new'][k]
-                     + (1 - RELAX_ALPHA) * tear_mem[k] for k in tear_mem}
-    T_d3  = RELAX_ALPHA * results['T_d3_new']  + (1 - RELAX_ALPHA) * T_d3
-    T_mem = RELAX_ALPHA * results['T_mem_new'] + (1 - RELAX_ALPHA) * T_mem
-
-if not (converged or penalty_hit or guard_hit):
-    print(f"  → 未収束 ({MAX_ITER} 回打ち切り、最終状態で集計)")
-
-if penalty_hit:
-    print("\n設計NG。設計変数を見直してから再実行してください。")
+# solver-level 失敗 (economics=None) は結果が信頼できないため早期終了。
+# spec 違反 (economics 計算済み) は最後まで走らせて TAC + ペナルティ内訳を表示する。
+if result.economics is None:
+    print(f"\n設計NG: {result.failure_reason}")
+    print(f"  effective_TAC = {result.effective_TAC:.0f} 億円/年 (固定打ち切り値)")
+    print("  設計変数を見直してから再実行してください。")
     sys.exit(1)
-
-
-# ===========================================================================
-# CAPEX/OPEX/TAC 集計
-# ===========================================================================
-
-def collect_capex_opex(R):
-    capex = {}
-    capex['Comp1']       = R['comp1'].equipment.CAPEX
-    capex['Dist1']       = R['r1'].equipment.CAPEX
-    capex['Reactor']     = R['r_rx'].equipment.Reactor_CAPEX
-    capex['Cooler']      = R['cooled'].equipment.CAPEX
-    capex['Comp2']       = R['comp2'].equipment.CAPEX
-    capex['Dist2']       = R['r2'].equipment.CAPEX
-    capex['PSA容器']     = R['r_psa'].equipment.CAPEX_vessels
-    capex['PSA活性炭']   = R['r_psa'].equipment.CAPEX_adsorbent
-    capex['MemPrecool']  = R['mem_precool'].equipment.CAPEX
-    capex['Mem気化器']   = R['r_mem'].equipment.CAPEX_vap
-    capex['Mem F圧縮機'] = R['r_mem'].equipment.CAPEX_comp_feed
-    capex['Mem P圧縮機'] = R['r_mem'].equipment.CAPEX_comp_prod
-    capex['Mem冷却器']   = R['r_mem'].equipment.CAPEX_cond
-    capex['Mem膜本体']   = R['r_mem'].equipment.CAPEX_mem
-    capex['Dist3']       = R['r3'].equipment.CAPEX
-
-    # OPEX 換算ヘルパー
-    def ele(W_kW):
-        return W_kW * ELECTRICITY_JPY_PER_KWH * OPERATING_HOURS_PER_YEAR / 1.0e8
-    def heat(Q_kW, jpy_per_GJ):
-        # 1 kW × 1 h = 3.6 MJ = 3.6e-3 GJ
-        return Q_kW * 3.6e-3 * OPERATING_HOURS_PER_YEAR * jpy_per_GJ / 1.0e8
-
-    opex = {}
-    opex['Comp1電力']        = ele(R['comp1'].equipment.W_kW)
-    opex['Comp2電力']        = ele(R['comp2'].equipment.W_kW)
-    opex['MemF圧縮機電力']   = ele(R['r_mem'].equipment.W_feed_kW)
-    opex['MemP圧縮機電力']   = ele(R['r_mem'].equipment.W_prod_kW)
-    opex['Dist1リボイラ蒸気']= heat(R['r1'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ)
-    opex['Dist2リボイラ蒸気']= heat(R['r2'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ)
-    opex['Dist3リボイラ蒸気']= heat(R['r3'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ)
-    opex['Mem気化器蒸気']    = heat(R['r_mem'].equipment.Q_vap_kW, LP_STEAM_JPY_PER_GJ)
-
-    # 反応器プリヒーター（GJ/h → kW 換算してから heat()）
-    Q_preheat_kW = R['r_rx'].effluent.Q_preheat * 1.0e9 / 3600.0 / 1000.0
-    opex['Reactor予熱燃料']  = heat(Q_preheat_kW, FUEL_JPY_PER_GJ)
-
-    opex['Cooler冷水']       = heat(abs(R['cooled'].equipment.Q_duty_kW), COOLING_WATER_JPY_PER_GJ)
-    opex['Dist1コンデンサ冷水']= heat(R['r1'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['Dist2コンデンサ冷水']= heat(R['r2'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['Dist3コンデンサ冷水']= heat(R['r3'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['MemPrecool冷水']   = heat(abs(R['mem_precool'].equipment.Q_duty_kW), COOLING_WATER_JPY_PER_GJ)
-    opex['Mem冷却器冷水']    = heat(R['r_mem'].equipment.Q_cond_kW, COOLING_WATER_JPY_PER_GJ)
-
-    opex['Reactor触媒交換']  = (R['r_rx'].equipment.Catalyst_Weight_Total
-                                * CATALYST_PTSN_JPY_PER_KG
-                                / CATALYST_PTSN_LIFE_YEARS / 1.0e8)
-    opex['PSA活性炭交換']    = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
-
-    return capex, opex
-
-
-capex, opex = collect_capex_opex(results)
 
 
 # ===========================================================================
 # 結果サマリ表示
 # ===========================================================================
 
+R            = result.solver.one_pass
+F_C3H8_feed  = result.solver.fresh_C3H8
+F_C4H10_feed = result.solver.fresh_C4H10
+
 hdr("収束時のフロー一覧")
 fresh = ProcessStream(
-    F_in={'A': F_C3H8_FEED, 'Z': F_C4H10_FEED},
-    T_in=298.15, P_in=101325.,
+    F_in={'A': F_C3H8_feed, 'Z': F_C4H10_feed},
+    T_in=config.feed.T_K, P_in=config.feed.P_Pa,
 )
 show_stream("Fresh LPG", fresh)
-show_stream("Dist1 塔頂 (1atm 膨張後)", results['dist1_top_1atm'])
-recycle_total_F = (results['tear_dist3_new']['A'] + results['tear_dist3_new']['B']
-                  + results['tear_mem_new']['A']  + results['tear_mem_new']['B'])
-print(f"  Recycle 合計 : Mem(A={results['tear_mem_new']['A']:.2f},B={results['tear_mem_new']['B']:.2f})"
-      f" + Dist3(A={results['tear_dist3_new']['A']:.2f},B={results['tear_dist3_new']['B']:.2f})"
+show_stream("Dist1 塔頂 (1atm 膨張後)", R['dist1_top_1atm'])
+
+tear_d3  = R['tear_dist3_new']
+tear_mem = R['tear_mem_new']
+recycle_total_F = tear_d3['A'] + tear_d3['B'] + tear_mem['A'] + tear_mem['B']
+print(f"  Recycle 合計 : Mem(A={tear_mem['A']:.2f},B={tear_mem['B']:.2f})"
+      f" + Dist3(A={tear_d3['A']:.2f},B={tear_d3['B']:.2f})"
       f"  = {recycle_total_F:.2f} kmol/h")
-show_stream("Reactor 入口 (Fresh + Recycle)", results['reactor_inlet'])
-show_stream("Reactor 出口", results['rx_out'])
-show_stream("Dist2 塔頂 (→ PSA)",      results['r2'].top)
-show_stream("Dist2 塔底 (→ Mem)",      results['r2'].bottom)
+
+show_stream("Reactor 入口 (Fresh + Recycle)", R['reactor_inlet'])
+show_stream("Reactor 出口", R['rx_out'])
+show_stream("Dist2 塔頂 (→ PSA)",      R['r2'].top)
+show_stream("Dist2 塔底 (→ Mem)",      R['r2'].bottom)
 show_stream("Membrane 透過 (→ Dist3)", ProcessStream(
-    F_in={'A': results['r_mem'].product.F_C3H8, 'B': results['r_mem'].product.F_C3H6,
+    F_in={'A': R['r_mem'].product.F_C3H8, 'B': R['r_mem'].product.F_C3H6,
           'C':0.,'D':0.,'E':0.,'F':0.},
-    T_in=results['r_mem'].product.T_out, P_in=results['r_mem'].product.P_out))
-show_stream("Dist3 塔頂 (C3H6 製品)",   results['r3'].top)
+    T_in=R['r_mem'].product.T_out, P_in=R['r_mem'].product.P_out))
+show_stream("Dist3 塔頂 (C3H6 製品)", R['r3'].top)
 
 
-hdr("生産・収率（収束時）")
-C3H6_product = results['r3'].top.F_in.get('B', 0.0)
-H2_product   = results['r_psa'].product.get('C', 0.0)
-yield_pct    = C3H6_product / F_C3H8_FEED * 100.0
-recycle_C3H8 = results['tear_dist3_new']['A'] + results['tear_mem_new']['A']
-recycle_C3H6 = results['tear_dist3_new']['B'] + results['tear_mem_new']['B']
+hdr("生産・収率(収束時)")
+target_kmol_h = (config.product.target_mta * 1000.0
+                 / config.product.mw_kg_per_kmol / OPERATING_HOURS_PER_YEAR)
+C3H6_product  = R['r3'].top.F_in.get('B', 0.0)
+H2_product    = R['r_psa'].product.get('C', 0.0)
+yield_pct     = C3H6_product / F_C3H8_feed * 100.0
+recycle_C3H8  = tear_d3['A'] + tear_mem['A']
+recycle_C3H6  = tear_d3['B'] + tear_mem['B']
 
-print(f"  Fresh C3H8     : {F_C3H8_FEED:7.2f} kmol/h")
-print(f"  Fresh C4H10    : {F_C4H10_FEED:7.2f} kmol/h")
-print(f"  C3H6 製品      : {C3H6_product:7.2f} kmol/h   (収率 {yield_pct:5.1f}%)")
+print(f"  C3H6 目標      : {target_kmol_h:7.2f} kmol/h"
+      f"  ({config.product.target_mta:.0f} t/年 @ {OPERATING_HOURS_PER_YEAR:.0f} h/年)")
+print(f"  Fresh C3H8     : {F_C3H8_feed:7.2f} kmol/h   (外側ループで決定)")
+print(f"  Fresh C4H10    : {F_C4H10_feed:7.2f} kmol/h"
+      f"   (LPG 組成 C3H8={config.feed.lpg_c3h8_mol_fraction} より)")
+print(f"  C3H6 製品      : {C3H6_product:7.2f} kmol/h"
+      f"   (実収率 {yield_pct:5.2f}%, 仮定 {config.feed.yield_assumed*100:.1f}%)")
+print(f"  目標との差     : {C3H6_product - target_kmol_h:+7.3f} kmol/h")
 print(f"  H2 副産物      : {H2_product:7.2f} kmol/h")
-print(f"  Recycle C3H8   : {recycle_C3H8:7.2f} kmol/h   (Fresh比 {recycle_C3H8/F_C3H8_FEED*100:.0f}%)")
+print(f"  Recycle C3H8   : {recycle_C3H8:7.2f} kmol/h"
+      f"   (Fresh比 {recycle_C3H8/F_C3H8_feed*100:.0f}%)")
 print(f"  Recycle C3H6   : {recycle_C3H6:7.2f} kmol/h")
-print(f"  Reactor 入口   : {sum(results['reactor_inlet'].F_in.values()):7.2f} kmol/h"
-      f"  (Fresh の {sum(results['reactor_inlet'].F_in.values())/F_C3H8_FEED:.2f} 倍)")
-print(f"  Reactor 転化率 : {results['r_rx'].performance.Conversion:5.1f}%")
-print(f"  Reactor 選択率 : {results['r_rx'].performance.Selectivity:5.1f}%")
+print(f"  Reactor 入口   : {sum(R['reactor_inlet'].F_in.values()):7.2f} kmol/h"
+      f"  (Fresh の {sum(R['reactor_inlet'].F_in.values())/F_C3H8_feed:.2f} 倍)")
+print(f"  Reactor 転化率 : {R['r_rx'].performance.Conversion:5.1f}%")
+print(f"  Reactor 選択率 : {R['r_rx'].performance.Selectivity:5.1f}%")
 
 
 hdr("CAPEX 内訳 [億円]")
-for n, v in capex.items():
+for n, v in result.economics.capex.items():
     if v < 1e6:
         print(f"  {n:<14}: {v:8.4f}")
     else:
         print(f"  {n:<14}:   ペナルティ")
-total_capex = sum(v for v in capex.values() if v < 1e6)
 print(f"  {'-'*26}")
-print(f"  {'合計':<14}: {total_capex:8.4f}")
+print(f"  {'合計':<14}: {result.economics.total_capex:8.4f}")
 
 
 hdr("OPEX 内訳 [億円/年]")
-for n, v in opex.items():
+for n, v in result.economics.opex.items():
     print(f"  {n:<24}: {v:8.4f}")
-total_opex = sum(opex.values())
 print(f"  {'-'*36}")
-print(f"  {'合計':<24}: {total_opex:8.4f}")
+print(f"  {'合計':<24}: {result.economics.total_opex:8.4f}")
 
 
-hdr("TAC（年間総費用）")
-TAC = total_capex / DEPRECIATION_YEARS + total_opex
-print(f"  CAPEX/{DEPRECIATION_YEARS}年(償却) : {total_capex/DEPRECIATION_YEARS:8.4f}  億円/年")
-print(f"  OPEX 合計          : {total_opex:8.4f}  億円/年")
+hdr("製品仕様 compliance")
+specs = result.specs
+print(f"  C3H6 純度 (Dist3 塔頂) : {specs.c3h6_purity_wtfrac*100:6.3f} wt%"
+      f"   {'✓' if specs.c3h6_pass else '✗'}"
+      f" (spec ≥ {99.5:.1f} wt%)")
+print(f"  H2 純度 (PSA 製品)     : {specs.h2_purity_molfrac*100:6.3f} mol%"
+      f"   {'✓' if specs.h2_pass else '✗'}"
+      f" (spec ≥ {99.9:.1f} mol%)")
+print(f"  生産量                 : {specs.production_kmol_h:7.2f} kmol/h"
+      f" {'✓' if specs.production_pass else '✗'}"
+      f" (片側 spec ≥ {specs.target_kmol_h * 0.99:.2f})")
+if not specs.all_pass:
+    print(f"  違反内訳 : {result.failure_reason}")
+
+
+hdr("TAC(年間総費用)")
+TAC = result.economics.TAC
+print(f"  CAPEX/{DEPRECIATION_YEARS}年(償却) : {result.economics.total_capex/DEPRECIATION_YEARS:8.4f}  億円/年")
+print(f"  OPEX 合計          : {result.economics.total_opex:8.4f}  億円/年")
 print(f"  ──────────────────────────────")
-print(f"  TAC                : {TAC:8.4f}  億円/年")
+print(f"  TAC (実コスト)     : {TAC:8.4f}  億円/年")
+# 設計判断: 最適化器は effective_TAC を最小化対象にする。
+# spec 違反時はソフトペナルティが上乗せされ、違反 0 のときは TAC と一致する。
+penalty_amount = result.effective_TAC - TAC
+if penalty_amount > 0:
+    print(f"  + spec違反ペナルティ : {penalty_amount:8.4f}  億円/年")
+print(f"  ──────────────────────────────")
+print(f"  effective_TAC      : {result.effective_TAC:8.4f}  億円/年  (← 最適化器の目的関数)")
 print()
 if C3H6_product > 0:
-    # C3H6 分子量 42.08 g/mol = 0.04208 kg/mol = 42.08 kg/kmol
-    annual_kg = C3H6_product * OPERATING_HOURS_PER_YEAR * 42.08
-    unit_jpy_per_t = TAC * 1.0e8 / (annual_kg / 1000.0)
-    print(f"  C3H6 年間生産量    : {annual_kg/1000.0:.0f}  ton/年")
-    print(f"  C3H6 製品単価      : {unit_jpy_per_t:.0f}  円/ton  ({unit_jpy_per_t/1000:.1f} 円/kg)")
+    print(f"  C3H6 年間生産量    : {result.economics.annual_kg_C3H6/1000.0:.0f}  ton/年")
+    print(f"  C3H6 製品単価      : {result.economics.unit_jpy_per_t:.0f}  円/ton"
+          f"  ({result.economics.unit_jpy_per_t/1000:.1f} 円/kg)")
 print()
 print(f"  仮ユーティリティ単価:")
 print(f"    電力 {ELECTRICITY_JPY_PER_KWH}円/kWh  /  LP蒸気 {LP_STEAM_JPY_PER_GJ}円/GJ")

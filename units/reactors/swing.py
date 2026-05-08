@@ -268,14 +268,19 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
     F0 = np.array([feed.F_in.get(c, 0.0) * 1000.0 / 3600.0 for c in _COMPS])
     y0 = np.concatenate([F0, [design.T_in]])
 
+    # 設計判断 (2026-05-08, profile 結果反映):
+    # 元値 rtol=1e-5, atol=1e-8 は scipy デフォルト (1e-3, 1e-6) の 100倍厳しく、
+    # profile で全体時間の 72% を占めていた。製品純度スペック 99.5wt% に対して
+    # ODE 精度 0.01% (rtol=1e-4) で十分余裕があるため緩和して 2-3倍速を狙う。
+    # 緩めすぎ (1e-3) は転化率推定がノイズっぽくなるため中庸を選択。
     try:
         sol = solve_ivp(
             fun=lambda z, y: _ode_axial(z, y, a, A_cross, fixed.eps, feed.P_in),
             t_span=(0.0, design.z_cat),
             y0=y0,
             method='Radau',
-            rtol=1e-5,
-            atol=1e-8,
+            rtol=1e-4,
+            atol=1e-7,
         )
     except Exception:
         return None, None

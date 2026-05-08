@@ -20,7 +20,7 @@ if _ROOT not in sys.path:
 from src.distillation_core import (
     DistDesignVars, DistFixedParams, DistResult, simulate_distillation_column,
 )
-from units.utils.process_stream import ProcessStream
+from stream.stream import ProcessStream
 
 _DEFAULT_DESIGN = DistDesignVars(
     P_col        = 17.0e5,

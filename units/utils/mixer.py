@@ -15,7 +15,7 @@ _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from units.utils.process_stream import ProcessStream
+from stream.stream import ProcessStream
 
 
 def mix_streams(streams: List[ProcessStream]) -> ProcessStream:
