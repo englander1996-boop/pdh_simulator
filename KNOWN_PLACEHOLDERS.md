@@ -5,7 +5,7 @@
 
 実値に置き換える際は、本ファイルの該当行と、コード中のマーカーコメントの両方を更新すること。
 
-最終更新: 2026-05-09
+最終更新: 2026-05-09 (Phase A/B コンテスト仕様採用、化工便覧 citation 追記後)
 
 ---
 
@@ -54,6 +54,23 @@
 | **PR EOS 二成分相互作用係数 k_ij** | 0 | `src/eos.py` | 文献で 0.01 程度と小さく無視可。要再評価 |
 | **PtSn 触媒充填密度 ρ_p** | **700 kg/m³** (2026-05-09 400→700) | `units/reactors/swing.py` `FixedParams.rho_p` | 実触媒 PtSn/Al2O3 ペレットの粒子密度寄り。空隙の二重控除になっている可能性は別途要確認 |
 
+## 🟡 優先度中 — 2026-05-09 監査で新規抽出 (隠れ仮置き)
+
+コードベース全体監査 (2026-05-09) で発見、本ファイル未収録だった項目:
+
+| 項目 | 現値 | ファイル | 想定出典 |
+|---|---|---|---|
+| **ΔT_min (HI 最小接近温度)** | 10.0 K | `src/utility_selector.py` L60、`exp/exp1.py` `HI_DT_MIN_K` | 教科書慣行値 (Smith/Sinnott/Linnhoff)。textbook citation 追記 |
+| **凝縮器最低温度** | 313.15 K (40°C) | `src/distillation_core.py` L83 `_T_COND_MIN` | 冷却水 supply 30°C + ΔT_min=10K の合成。citation 追記必要 |
+| **dT_lm デフォルト (cooler)** | 30 K | `units/utils/cooler.py` L69 | LMTD 代替値。Perry's HE 設計章の典型値などで citation 追記 |
+| **PSA 空塔速度上限** | 1.0 m/s | `units/separators/psa/psa_system.py` L164 | 化工便覧 §13-31 引用ありだが「除湿用」値。PDH オフガス分離での適用妥当性要確認 |
+| **PSA グリッド分割数** | 20 | 同上 L150 | 数値拡散 vs 計算速度のトレードオフ、感度解析未実施 |
+| **PSA 最小吸着時間** | 60 s | 同上 L165 | CSS 近似の物理下限ガード、出典未明示 |
+| **触媒再生時間** | 30 min | `units/reactors/swing.py` L105 `t_regen` | スイング設計の典型値、工業データ citation 欠落 |
+| **反応器最大触媒容積/基** | 200 m³ | 同上 L106 `V_cat_max` | 設計判断 (大型固定床上限) の citation 欠落 |
+| **スイング操作ペナルティ係数** | 1.2 | `src/cost_parameters.py` L69 | スイング切替弁・マニホールド追加 20% 増の見積もり根拠 |
+| **HE 材質係数 FM/FM_HE/FP_HE** | 1.0 | `src/cost_parameters.py` L55, L120, L125 | 「炭素鋼・圧損補正なし」前提。本フロー (高圧 C3/H2 系) での材質選定根拠欠落 |
+
 ## 🟢 優先度低 (構造的に変わる時に再検討)
 
 | 項目 | 現値 | ファイル | 想定出典 |
@@ -61,9 +78,14 @@
 | **CEPCI 基準年** | 2001 (BASE) / 2016 (CURRENT) | `src/cost_parameters.py` `CEPCI_BASE`, `CEPCI_CURRENT` | 最新の CEPCI 値で更新 (現在 2024 年で ~800) |
 | **USD/JPY レート** | 157.08 | 同上 `USD_TO_JPY` | 設計確定時点の為替で固定 |
 | **減価償却年数** | 8 年 | 同上 `DEPRECIATION_YEARS` | 国税庁基準で固定済み (要確認) |
-| **PUMP 効率** | 0.70 | `units/utils/pump.py` `eta_pump` | 汎用遠心ポンプ典型値 |
-| **COMPRESSOR ポリトロピック効率** | 0.75 | `units/utils/compressor.py` `eta_poly` | 化工便覧 改訂六版 p.333 (0.7〜0.8 中央値) |
 | **Q_reb = 1.05 × Q_cond (蒸留塔)** | 5% 損失仮定 | `src/distillation_core.py:554` | 文献根拠未確定 |
+
+> **出典確定済み (本ファイルから卒業した項目)**:
+> - PUMP 効率 0.70 — 化工便覧 改訂六版 5·6·4 項【例題 5·8】(2026-05-09)
+> - COMPRESSOR ポリトロピック効率 0.75 — 化工便覧 改訂六版 p.333 (2026-05-09 確認)
+> - FURNACE 熱効率 0.85 — 化工便覧 改訂六版 18·4·3 項 表 18·11 (2026-05-09)
+> - HE U 値 — 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 表 (2026-05-09)
+> - 蒸留塔 G* / 段間隔 0.6m / 段効率 80% / 塔頂2m+塔底4m — contest Ver.2.0 §4-2 (2026-05-09)
 
 ---
 
@@ -94,6 +116,19 @@ grep -rn "!仮置き" --include="*.py" --include="*.md" .
 
 ## 履歴
 
+- **2026-05-09 (午後)**:
+  - **コンテスト Ver.2.0 §4 仕様の citable 採用** (Phase A/B 完了)
+    - §4-2 蒸留塔: G*=SF·K·√(ρ_v(ρ_l-ρ_v)) / 段間隔 0.6m / 段効率 80% / 塔頂2m+塔底4m
+    - §4-4 熱交換器: U 値 9 ペア表 (cooler/distillation/HEN すべて lookup_U で参照)
+  - **化工便覧 改訂六版から citation 追記**
+    - PUMP 効率 0.70 → 5·6·4 項【例題 5·8】
+    - FURNACE 熱効率 0.85 (新規導入) → 18·4·3 項 表 18·11
+    - COMPRESSOR η_poly 0.75 → p.333 (再確認)
+  - **コードベース全体監査で 10 件の隠れ仮置きを新規抽出** (本ファイル「優先度中 — 監査で新規抽出」表)
+    - ΔT_min, 凝縮器最低温度, dT_lm cooler, PSA 空塔速度/グリッド/最小吸着時間, 触媒再生時間, 反応器最大容積, スイングペナルティ, HE 材質係数
+  - **citation コメント追記** (citation 文献必要なし、universally agreed):
+    - PR EOS Ω_a/Ω_b → Peng-Robinson (1976) Ind. Eng. Chem. Fundam. 15(1), 59-64
+    - `_T_BUBBLE_MIN/MAX` → 物性値ではなく数値ガードである旨を明示
 - **2026-05-09**:
   - PtSn 触媒単価 50,000 → **30,000** 円/kg
   - PtSn 触媒寿命 3 → **4** 年
