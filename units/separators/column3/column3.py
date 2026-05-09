@@ -68,6 +68,7 @@ def simulate_column3(
         recovery_HK_bot = 0.99,
         K_method        = 'pr',
         q               = 1.0,
+        solver_method   = t.solver_method,
     )
     return simulate_distillation_column(
         design, feed,

@@ -93,6 +93,31 @@ reflux_dist3   = 12.0      # -       還流比 (R_min ≈ 10、下限 11 まで)
 
 
 # ===========================================================================
+#  蒸留塔ソルバ選択 (塔ごと個別指定)
+# ===========================================================================
+#  'fug'      : Fenske-Underwood-Gilliland shortcut (高速、BO 用、デフォルト)
+#               recovery spec を強制達成するため出口流量が確定的。
+#               narrow-margin 設計 (Dist1: N_min=12 vs N=20) では楽観的になる。
+#  'rigorous' : VLE tray-by-tray (Wang-Henke、CMO 仮定、厳密)
+#               recovery が物理的に決まるため narrow-margin で実態が露呈する。
+#               計算重め (Dist3 N=200 narrow-α は 1 回 ~10 分かかる)。
+#
+# 速度コスト分析:
+#   Dist1 (N=20): rigorous でも数秒
+#   Dist2 (N=20): rigorous でも数秒
+#   Dist3 (N=200, α=1.07): rigorous で塔単独 ~9-10 分 (narrow-α × 大量段数)
+#
+# 推奨運用:
+#   - BO ループ: 全塔 'fug' (高速)
+#   - 物理検証: Dist1/Dist2 を 'rigorous'、Dist3 は 'fug' (margin 豊富で FUG で十分、
+#     実機相当 N で recovery spec も達成される)
+#   - 完全厳密: 全塔 'rigorous' (~12 分/評価、デバッグ用)
+SOLVER_DIST1 = 'rigorous'    # 脱ブタン塔 (narrow-margin、rigorous で現実が見える)
+SOLVER_DIST2 = 'rigorous'    # 脱エタン塔 (partial cond、rigorous で物理が正しい)
+SOLVER_DIST3 = 'rigorous'         # C3 スプリッタ (margin 豊富、FUG で十分、Dist3 rigorous は重すぎ)
+
+
+# ===========================================================================
 #  フローシート設計変数の組み立て (通常ここは触らない)
 # ===========================================================================
 design = FlowsheetDesignVars(
@@ -110,14 +135,17 @@ design = FlowsheetDesignVars(
     dist1=ColumnTunables(
         P_col=P_dist1_Pa, N_stages=N_dist1,
         N_feed=N_feed_dist1, reflux_ratio=reflux_dist1,
+        solver_method=SOLVER_DIST1,
     ),
     dist2=ColumnTunables(
         P_col=P_dist2_Pa, N_stages=N_dist2,
         N_feed=N_feed_dist2, reflux_ratio=reflux_dist2,
+        solver_method=SOLVER_DIST2,
     ),
     dist3=ColumnTunables(
         P_col=P_dist3_Pa, N_stages=N_dist3,
         N_feed=N_feed_dist3, reflux_ratio=reflux_dist3,
+        solver_method=SOLVER_DIST3,
     ),
 )
 
