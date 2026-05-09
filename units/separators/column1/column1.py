@@ -71,6 +71,7 @@ def simulate_column1(
         # bubble-point ベースに改修したため単相 root 病理は解消済み。
         K_method        = 'pr',
         q               = 1.0,       # 飽和液 (Pump1 後の Fresh)
+        solver_method   = t.solver_method,
     )
     return simulate_distillation_column(
         design, feed,

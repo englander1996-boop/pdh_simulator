@@ -49,6 +49,7 @@
 | **PSA 活性炭嵩密度 ρ_b** | 600 kg/m³ | `units/separators/psa/psa_system.py` `PSAFixedParams.rho_b` | 工業用活性炭 (典型 400〜700) のデータシート |
 | **PSA CSS 近似** | True (保守過大推算) | 同上 `use_css_approximation` | 厳密 CSS の数値検証で評価 |
 | **PSA 脱着安全係数** | 1.2 | 同上 `desorption_time_safety_factor` | KFa 確定後に再評価 |
+| **PSA cycle scheduling 未実装** | 2塔最小スイング (吸着/脱着のみ) | `psa_system.py:644` `N_abs_parallel=1` | 均圧・再加圧ステップ未モデル。実機 4-9 塔 Polybed は H2 回収率 80-90% だが、本実装は 57.8% (均圧ロス未削減のため低め)。塔数を BO 変数化しても自明解 (=最小)。フルサイクル ODE 化が必要 |
 | **膜モジュール A_per_module** | 500 m² | `units/separators/membrane/membrane_system.py` `MemFixedParams.A_per_module` | Evonik SEPURAN 等のデータシートから中空糸寸法計算 |
 | **膜パラメータ (Q_A=40 GPU, α=90)** | 文献値 | 同上 `MemFixedParams` | Hua et al. (2024) 実測値、室温・大気圧 |
 | **PR EOS 二成分相互作用係数 k_ij** | 0 | `src/eos.py` | 文献で 0.01 程度と小さく無視可。要再評価 |
@@ -86,6 +87,9 @@
 > - FURNACE 熱効率 0.85 — 化工便覧 改訂六版 18·4·3 項 表 18·11 (2026-05-09)
 > - HE U 値 — 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 表 (2026-05-09)
 > - 蒸留塔 G* / 段間隔 0.6m / 段効率 80% / 塔頂2m+塔底4m — contest Ver.2.0 §4-2 (2026-05-09)
+> - PR EOS Ω_a=0.45724 / Ω_b=0.07780 — Peng & Robinson (1976) Ind. Eng. Chem. Fundam. 15(1), 59-64 (2026-05-09)
+> - 蒸留塔 rigorous solver アルゴリズム — Seader, Henley & Roper "Separation Process Principles" 3rd ed., Ch.10.4 (Wang-Henke bubble-point method) (2026-05-09 実装)
+> - 蒸留塔 rigorous K 値検証 — CalebBell/thermo (https://github.com/CalebBell/thermo, MIT License v0.6.0) と src/eos.py の PR EOS が 0.02% 一致を確認 (2026-05-09)。core 計算は src/eos.py 流用、thermo は将来 PT/PH flash 用に install 済
 
 ---
 
@@ -129,6 +133,32 @@ grep -rn "!仮置き" --include="*.py" --include="*.md" .
   - **citation コメント追記** (citation 文献必要なし、universally agreed):
     - PR EOS Ω_a/Ω_b → Peng-Robinson (1976) Ind. Eng. Chem. Fundam. 15(1), 59-64
     - `_T_BUBBLE_MIN/MAX` → 物性値ではなく数値ガードである旨を明示
+  - **VLE rigorous solver 実装** (Wang-Henke、`src/distillation_rigorous.py` 新規)
+    - アルゴリズム出典: Seader, Henley & Roper (2010) Ch.10.4
+    - K 値検証用: CalebBell/thermo (MIT) と src/eos.py の PR EOS で 0.02% 一致確認
+    - `ColumnTunables.solver_method='rigorous'` で切替可能、デフォルト 'fug'
+- **2026-05-10**:
+  - Wang-Henke の重大 bug 連続発見・修正:
+    - **B_bottoms 取り違え**: リボイラ方程式で `L[N_stages]` (= L_bot) を
+      bottoms 産物流量 `B = F − D` と取り違え。Dist1 で 20× 過大、結果として
+      C3H8 ↔ C4H10 が 102 kmol/h 入れ替わる成分マスバランス破綻。
+    - **V[N_feed] off-by-one**: フィード段の上向き気流量 `V[N_feed]` を
+      `V_bot` と設定していた (本来 `V_top = V_bot + (1-q)F`)。修正前は Dist2
+      の C2H6 recovery が 12.8% に崩壊、修正後 99% へ。
+  - **Newton 1 ステップ + Wegstein 加速** で 6.5× 高速化 (701s → 107s 全塔 rigorous)。
+    Clausius-Clapeyron 微分と secant 法 q ∈ [-5,0] の 2 つで反復削減。
+  - **always-on validation** を `RigorousResult` に組込:
+    `mesh_residual_max`, `mesh_residual_mean`, `component_balance_max` を
+    収束時に毎回計算。`_simulate_rigorous` で MESH 残差>0.01 or
+    成分バランス>1% なら例外で FUG にフォールバック (warning 経由)。
+  - **`tests/validate_wang_henke.py` を regression suite 化**:
+    Dist1/Dist2/Dist3 の各塔について 16 項目検証 (T プロファイル、MESH、
+    マスバランス、成分保存、recovery spec、熱量妥当性、内蔵 validation)。
+    全 48 検査 PASS で baseline 確立。
+  - **既知の数値限界** (修正困難、文書化のみ):
+    - Dist2 partial_condenser stage 1 の T が brentq から 19K ズレ。
+      原因: 単相領域で K=1 自明解の罠。実用上の影響は LK recovery が
+      99% → 97% に下がるレベル (Profit 0.1 億円/年差)。
 - **2026-05-09**:
   - PtSn 触媒単価 50,000 → **30,000** 円/kg
   - PtSn 触媒寿命 3 → **4** 年

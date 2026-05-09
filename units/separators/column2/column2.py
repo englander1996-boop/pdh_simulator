@@ -90,6 +90,7 @@ def simulate_column2(
         # なる病理がある。実機どおり H2/CH4 はそのまま vapor distillate で抜き、
         # 残りの C2 だけを propylene 冷媒で凝縮して reflux する分流モデル。
         partial_condenser = True,
+        solver_method   = t.solver_method,
     )
     return simulate_distillation_column(
         design, feed,
