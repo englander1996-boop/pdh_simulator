@@ -43,7 +43,7 @@ if _ROOT not in sys.path:
 
 from stream.stream import ProcessStream
 from src.cost_calculator import (
-    calc_cp0, calc_fp, calc_tray_capex_okuyen,
+    calc_cp0, calc_fp, calc_tray_capex_okuyen, calc_he_capex_okuyen,
 )
 from src.cost_parameters import (
     B1, B2, FM, CEPCI_BASE, CEPCI_CURRENT,
@@ -55,6 +55,10 @@ from src.eos import (
     z_factor, fugacity_coeff, residual_enthalpy,
     bubble_point_T, dew_point_T,
 )
+from src.utility_selector import (
+    select_cooling_utility, select_heating_utility,
+)
+from flowsheet.heat_integration import StreamPhase, lookup_U, utility_phase
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +109,14 @@ class ColumnTunables:
     reflux_ratio: float    # 還流比 R = L/D
 
 
+# 分流 (partial condenser) で凝縮させない成分セット
+# 設計判断 (2026-05-09): H2 (Tc=33K) と CH4 (Tc=190K) は工業的に到達可能な
+# 冷媒温度 (-100°C エチレン = 173K) でも凝縮できないため、partial condenser では
+# 凝縮させず vapor distillate でそのまま下流へパススルーする。
+# C2H4 (Tc=282K) 以上は propylene/ethylene 冷媒で凝縮可能なので reflux 寄与あり。
+NON_CONDENSABLE_COMPS = frozenset(['C', 'E'])  # H2, CH4
+
+
 @dataclass(frozen=True)
 class DistDesignVars:
     """蒸留塔設計変数 (BO 探索対象 + 仕様)。
@@ -128,14 +140,29 @@ class DistDesignVars:
     # ---- 物性計算オプション ----
     K_method:         str   = 'pr'     # 'pr' (PR EOS) または 'cc' (Clausius-Clapeyron)
     q:                float = 1.0      # フィード状態 (1=飽和液, 0=飽和気)
+    # 設計判断 (2026-05-09): partial condenser フラグ。
+    # True のとき塔頂は分流型で、軽質ガス (NON_CONDENSABLE_COMPS = H2/CH4) は
+    # 凝縮させず vapor distillate でパススルー、reflux 用に重質分のみ凝縮する。
+    # Dist2 (脱エタン塔) のように H2/CH4 主体の塔頂で必須。Dist1/Dist3 (C3 主体) は False。
+    partial_condenser: bool = False
 
 
 @dataclass(frozen=True)
 class DistFixedParams:
-    """蒸留塔固定パラメータ (寸法・流体力学)。"""
-    tray_spacing_m: float = 0.6   # トレイ間隔 [m] (Sieve tray 標準値)
-    sump_height_m:  float = 3.0   # 缶部・塔頂部付加長さ [m]
-    u_vapor_ms:     float = 0.3   # 代表蒸気線速度 [m/s] (塔径推算用)
+    """蒸留塔固定パラメータ (寸法・流体力学、contest §4-2 準拠)。
+
+    出典: 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-2 蒸留塔
+      段塔仮定、塔径はフラッディングを起こさない許容蒸気質量速度 G* で決定:
+        G* = SF · K · √(ρ_v · (ρ_l - ρ_v))   [kg/(m²·s)]
+      シーブトレー仮定で SF=0.8、K=0.05 m/s、段間隔 0.6m を採用。
+      段効率 80% で実段数を算出、塔頂 2m + 塔底 4m を加算。
+    """
+    tray_spacing_m:  float = 0.6   # トレイ間隔 [m]、contest §4-2
+    top_section_m:   float = 2.0   # 塔頂付加長さ [m] (還流供給・気液分離)、contest §4-2
+    bot_section_m:   float = 4.0   # 塔底付加長さ [m] (液ホールドアップ)、contest §4-2
+    tray_efficiency: float = 0.8   # 段効率 [-]、contest §4-2 (実段数 = 理論段数 / η)
+    SF:              float = 0.8   # G* の系補正係数 [-]、contest §4-2
+    K_factor:        float = 0.05  # G* の許容蒸気速度係数 [m/s]、contest §4-2
 
 
 @dataclass
@@ -148,7 +175,7 @@ class DistEquipment:
     # ---- CAPEX 内訳 ----
     CAPEX_vessel:        float          # 塔本体 [億円]
     CAPEX_trays:         float          # トレイ [億円]
-    CAPEX:               float          # 合計 [億円] (= (vessel+trays) × CEPCI × 1.18 × 為替)
+    CAPEX:               float          # 合計 [億円] (vessel + trays + cond + reb)
     # ---- 熱量 ----
     Q_cond:              float          # コンデンサ熱量 [kW] (放出、正値)
     Q_reb:               float          # リボイラ熱量 [kW]   (吸熱、正値)
@@ -159,6 +186,17 @@ class DistEquipment:
     N_feed_kirkbride:    int   = 0      # Kirkbride 推奨フィード段
     feasible:            bool  = True   # N >= N_min かつ R >= R_min
     message:             str   = ""
+    # ---- Condenser / Reboiler 装置 (2026-05-09 追加) ----
+    A_cond_m2:               float = 0.0    # コンデンサ伝熱面積 [m²]
+    A_reb_m2:                float = 0.0    # リボイラ伝熱面積 [m²]
+    CAPEX_cond:              float = 0.0    # コンデンサ HE CAPEX [億円]
+    CAPEX_reb:               float = 0.0    # リボイラ HE CAPEX [億円]
+    cond_utility_name:       str   = ""     # 例 "冷却水≒", "プロピレン冷媒-25C≒"
+    cond_utility_jpy_per_GJ: float = 0.0
+    reb_utility_name:        str   = ""     # 例 "LP Steam≒", "MP Steam≒"
+    reb_utility_jpy_per_GJ:  float = 0.0
+    T_top:                   float = 0.0    # 塔頂温度 [K] (clamp なし)
+    T_bot:                   float = 0.0    # 塔底温度 [K]
 
 
 @dataclass
@@ -585,7 +623,10 @@ def simulate_distillation_column(
     T_bot = _boil_cc(_T_BOIL_ATM.get(design.HK, _T_BOIL_DEFAULT),
                      _LAMBDA_KJ.get(design.HK, _LAMBDA_DEFAULT),
                      design.P_col)
-    T_top = max(T_top, _T_COND_MIN)
+    # 設計判断 (2026-05-09): T_top の _T_COND_MIN clamp を解除。
+    # 旧版は「冷却水到達下限 40°C」で上書きしていたが、これだと Dist2 の x_top
+    # (H2/CH4 主体) で実際は cryogenic な凝縮器が必要なケースを隠蔽していた。
+    # 本版は実温度を保持し、utility_selector で適切な冷媒を選ぶ。
 
     # CC で初期 α・初期 split を 1 回作る (PR 反復の出発点)。
     K_init = _K_dict(comps, [z[c] for c in comps],
@@ -621,7 +662,8 @@ def simulate_distillation_column(
         T_bot_new, K_bot_list = _bubble_T_K(
             x_bot_list, comps, design.P_col, design.K_method,
         )
-        T_top_new = max(T_top_new, _T_COND_MIN)
+        # 設計判断 (2026-05-09): _T_COND_MIN clamp 解除。実温度を保持して下流で
+        # utility_selector に適切な冷媒を選ばせる。
 
         HK_idx = comps.index(design.HK)
         K_top_HK = max(K_top_list[HK_idx], 1e-30)
@@ -691,12 +733,54 @@ def simulate_distillation_column(
     )
 
     # ---- Step 8: 熱量計算 ----
-    # コンデンサ熱量: 還流 + 製品 = (R+1) × D × λ_top
-    lam_top   = _weighted_lambda(F_top)            # [kJ/mol]
-    Q_cond_kW = (F_top_total * (design.reflux_ratio + 1.0)
-                 * lam_top * 1000.0 / 3600.0)      # kmol/h × kJ/mol × 1000/3600 → kW
-    # リボイラ: コンデンサ + 5% 損失 (既存仮定踏襲、文献根拠は将来課題)
-    Q_reb_kW  = Q_cond_kW * 1.05
+    # 設計判断 (2026-05-09): partial condenser 分岐。
+    # Total condenser: V = (R+1)D を全量凝縮 → Q = (R+1) × D × λ_avg、T_cond = bubble of x_top
+    # Partial condenser: 軽質ガス (NON_CONDENSABLE) は気相パススルー。
+    #                   reflux に使う condensable 成分のみ凝縮 → Q = R × D_C × λ_C、
+    #                   T_cond = bubble of x_top_condensable (実機では暖かい温度で済む)
+    if design.partial_condenser:
+        F_top_C = {c: v for c, v in F_top.items()
+                   if c not in NON_CONDENSABLE_COMPS and v > 0.0}
+        F_C_total = sum(F_top_C.values())
+        if F_C_total <= 0:
+            return _penalty_result(
+                design,
+                "partial condenser: 凝縮可能成分が無い (全成分が H2/CH4)",
+                N_min=N_min, R_min=R_min,
+            )
+        x_C_list = [F_top_C.get(c, 0.0) / F_C_total for c in comps]
+        T_cond, _ = _bubble_T_K(x_C_list, comps, design.P_col, design.K_method)
+        lam_top = _weighted_lambda(F_top_C)        # 凝縮分の λ
+        # reflux liquid のみ凝縮 (vapor distillate は凝縮せず): Q = R × D_C × λ_C
+        Q_cond_kW = (design.reflux_ratio * F_C_total
+                     * lam_top * 1000.0 / 3600.0)
+    else:
+        # Total condenser (Dist1/Dist3): V = (R+1)D を全量凝縮
+        T_cond  = T_top
+        lam_top = _weighted_lambda(F_top)
+        Q_cond_kW = (F_top_total * (design.reflux_ratio + 1.0)
+                     * lam_top * 1000.0 / 3600.0)
+
+    # リボイラ熱量 Q_reb = V' × λ_bot
+    # 設計判断 (2026-05-09): 旧版 Q_reb = 1.05 × Q_cond は q=1 (飽和液フィード)
+    # 専用の経験則で、q=0 (気相フィード) の Dist2 では物理的に不正確だった。
+    # 標準 MESH 式 V' = (R+1)D - (1-q)F (q=0 で V' は (R+1)D - F に減る) に置換。
+    # q=1 (Dist1, Dist3): V' = (R+1)D となり旧式とほぼ同等。
+    # q=0 (Dist2): V' = (R+1)D - F、partial condenser 後の Q_cond と独立に決まる。
+    F_feed_total  = sum(max(F, 0.0) for F in feed.F_in.values())
+    V_prime_kmolh = (F_top_total * (design.reflux_ratio + 1.0)
+                    - (1.0 - design.q) * F_feed_total)
+    if V_prime_kmolh > 0:
+        lam_bot = _weighted_lambda(F_bot)
+        Q_reb_kW = V_prime_kmolh * lam_bot * 1000.0 / 3600.0
+    else:
+        # V' ≤ 0 は通常 q=0 で feed が大きすぎるとき。塔として動作不能なので
+        # 物理的には infeasible だが、ここでは保守的に Q_cond と同等値で埋める。
+        Q_reb_kW = Q_cond_kW
+
+    # ProcessStream の T_top には実際の condenser 出口温度を入れる
+    # (partial の場合は T_cond > T_top_bubble、total の場合は T_cond = T_top_bubble)
+    T_top = T_cond
 
     # フィード予熱 (顕熱、feed.T_in → T_bot、簡易液仮定)
     Q_feed_preheat_kW = 0.0
@@ -708,22 +792,106 @@ def simulate_distillation_column(
             F_mol_s = F_kmol_h * 1000.0 / 3600.0
             Q_feed_preheat_kW += F_mol_s * cp * (T_bot - feed.T_in) / 1000.0
 
-    # ---- Step 9: 塔径・塔高 ----
-    T_avg = (T_top + T_bot) / 2.0
-    F_vap_mol_s = F_top_total * (design.reflux_ratio + 1.0) * 1000.0 / 3600.0
-    V_vap_m3_s  = F_vap_mol_s * _R_GAS * T_avg / design.P_col
-    D_col = math.sqrt(4.0 * V_vap_m3_s / (math.pi * fixed.u_vapor_ms))
+    # ---- Step 9: 塔径・塔高 (contest §4-2) ----
+    # 設計判断 (2026-05-09): 旧版は u_vapor=0.3 m/s 単一固定で塔径を出していたが、
+    # contest §4-2 仕様 (G* = SF·K·√(ρ_v(ρ_l-ρ_v))) に置換して物理ベースに。
+    # 段塔・シーブトレー仮定。塔径は塔頂条件で評価 (蒸気量最大、最も flooding しやすい)。
+    from src.component_data import MW, liquid_density_mix
+    MW_top_avg = sum(F_top.get(c, 0) * MW.get(c, 50.0) for c in F_top) / max(F_top_total, 1e-9)
+    # 蒸気密度: 理想気体近似 ρ_v = P·MW/(R·T) [kg/m³]
+    rho_v = design.P_col * (MW_top_avg * 1e-3) / (_R_GAS * T_top)
+    # 液密度: 既存 liquid_density_mix (kg/m³)、x_top を流量代用
+    rho_l = liquid_density_mix(F_top)
+    if rho_l <= rho_v + 1.0:
+        # 物性異常 (蒸気と液の密度差が小さすぎる) → 保守側で D を大きめに
+        rho_l = rho_v + 100.0
+    # G* = SF · K · √(ρ_v · (ρ_l - ρ_v))   [kg/(m²·s)]
+    G_star = fixed.SF * fixed.K_factor * math.sqrt(rho_v * (rho_l - rho_v))
+    if G_star <= 1e-6:
+        return _penalty_result(design, f"G*={G_star:.3e} <= 0 (塔径計算不能)",
+                               N_min=N_min, R_min=R_min)
+    # 蒸気の質量流量 [kg/s] = (R+1)·D·MW_v / 3600
+    mass_flow_vap = F_top_total * (design.reflux_ratio + 1.0) * MW_top_avg / 3600.0
+    A_cross = mass_flow_vap / G_star            # [m²]
+    D_col = math.sqrt(4.0 * A_cross / math.pi)
     D_col = max(D_col, 0.3)
-    H_col = design.N_stages * fixed.tray_spacing_m + fixed.sump_height_m
+
+    # 塔高: 実段数 = 理論段 / 段効率、塔頂・塔底 section を加算
+    N_real = math.ceil(design.N_stages / fixed.tray_efficiency)
+    H_col = (N_real * fixed.tray_spacing_m
+             + fixed.top_section_m + fixed.bot_section_m)
     H_col = max(H_col, 5.0)
     V_col = math.pi / 4.0 * D_col ** 2 * H_col
 
-    # ---- Step 10: CAPEX (Vessel + Trays) ----
+    # ---- Step 10a: Condenser / Reboiler の utility 選択と装置サイジング ----
+    # 設計判断 (2026-05-09): 旧版は塔本体 (vessel + trays) しか CAPEX に含めず、
+    # コンデンサも一律 COOLING_WATER 単価で OPEX 計上していた。実機では condenser・
+    # reboiler は独立 HE で大きな CAPEX を持ち、温度依存で utility が変わる
+    # (Dist2 のように T_top 氷点下ならエチレン冷媒が必要)。
+    # ここで utility_selector に T_top/T_bot を渡して適切な tier を自動選択する。
+    #
+    # T_top が冷媒到達下限を下回るケース (Dist2 で x_top に H2/CH4 主体の場合) は、
+    # 実機では partial condenser で対応するが本シミュレータは total condenser モデル。
+    # 最低冷媒 (-100°C エチレン) で押し切るコストを保守見積もりとして採用する。
+    _T_COOLING_FLOOR = 173.15 + 10.0 + 1.0   # -89.0°C: -100°C 冷媒 + 10K approach + 1K 余裕
+    T_top_for_util = max(T_top, _T_COOLING_FLOOR)
+    try:
+        cond_utility = select_cooling_utility(T_top_for_util, mode='continuous')
+    except ValueError:
+        return _penalty_result(
+            design,
+            f"condenser T_top={T_top-273.15:.1f}°C は冷媒で到達不能 (要再設計)",
+            N_min=N_min, R_min=R_min,
+        )
+    try:
+        reb_utility = select_heating_utility(T_bot, mode='continuous')
+    except ValueError:
+        return _penalty_result(
+            design,
+            f"reboiler T_bot={T_bot-273.15:.1f}°C は熱媒の上限超過 (要再設計)",
+            N_min=N_min, R_min=R_min,
+        )
+
+    # 伝熱面積: contest §4-4 (lookup_U) で (hot_phase, cold_phase) ペアから U 索引。
+    # condenser: 蒸気凝縮 (CONDENSING、constant T_top_for_util) ⇄ 冷媒 (utility_phase)
+    cond_T_in  = cond_utility.supply_T_K
+    cond_T_out = cond_utility.supply_T_K + 10.0
+    dT1 = T_top_for_util - cond_T_in
+    dT2 = T_top_for_util - cond_T_out
+    if dT1 <= 0.0 or dT2 <= 0.0:
+        return _penalty_result(
+            design,
+            f"condenser ΔT 不成立 (T_top={T_top-273.15:.1f}°C, "
+            f"supply={cond_utility.supply_T_K-273.15:.1f}°C)",
+            N_min=N_min, R_min=R_min,
+        )
+    if abs(dT1 - dT2) < 1e-3:
+        dT_lm_cond = 0.5 * (dT1 + dT2)
+    else:
+        dT_lm_cond = (dT1 - dT2) / math.log(dT1 / dT2)
+    U_cond  = lookup_U(StreamPhase.CONDENSING, utility_phase(cond_utility.name))
+    A_cond  = max(Q_cond_kW * 1000.0 / (U_cond * dT_lm_cond), 10.0)
+
+    # reboiler: 熱媒 (utility_phase、通常 CONDENSING の蒸気か GAS の燃料炉) ⇄ 液沸騰 (EVAPORATING)
+    dT_lm_reb = reb_utility.supply_T_K - T_bot
+    if dT_lm_reb <= 0.0:
+        return _penalty_result(
+            design,
+            f"reboiler ΔT 不成立 (T_bot={T_bot-273.15:.1f}°C, "
+            f"supply={reb_utility.supply_T_K-273.15:.1f}°C)",
+            N_min=N_min, R_min=R_min,
+        )
+    U_reb  = lookup_U(utility_phase(reb_utility.name), StreamPhase.EVAPORATING)
+    A_reb  = max(Q_reb_kW * 1000.0 / (U_reb * dT_lm_reb), 10.0)
+
+    # ---- Step 10b: CAPEX (Vessel + Trays + Condenser + Reboiler) ----
     capex_vessel = _vessel_capex_okuyen(V_col, design.P_col, D_col)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         capex_trays = calc_tray_capex_okuyen(D_col, design.N_stages)
-    capex_total = capex_vessel + capex_trays
+        capex_cond  = calc_he_capex_okuyen(A_cond)
+        capex_reb   = calc_he_capex_okuyen(A_reb)
+    capex_total = capex_vessel + capex_trays + capex_cond + capex_reb
 
     # ---- Step 11: 結果 ----
     top_stream = ProcessStream(
@@ -742,6 +910,13 @@ def simulate_distillation_column(
         N_min=N_min, R_min=R_min,
         N_feed_kirkbride=N_feed_kirkbride,
         feasible=True, message="",
+        A_cond_m2=A_cond, A_reb_m2=A_reb,
+        CAPEX_cond=capex_cond, CAPEX_reb=capex_reb,
+        cond_utility_name=cond_utility.name,
+        cond_utility_jpy_per_GJ=cond_utility.jpy_per_GJ,
+        reb_utility_name=reb_utility.name,
+        reb_utility_jpy_per_GJ=reb_utility.jpy_per_GJ,
+        T_top=T_top, T_bot=T_bot,
     )
     return DistResult(top=top_stream, bottom=bottom_stream, equipment=equipment)
 

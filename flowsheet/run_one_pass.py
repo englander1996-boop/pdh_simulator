@@ -19,6 +19,7 @@ import warnings
 from stream.stream import ProcessStream
 from units.utils.mixer import mix_streams
 from units.utils.cooler import simulate_cooler
+from flowsheet.heat_integration import StreamPhase
 from units.utils.compressor import simulate_compressor
 from units.utils.pump import simulate_pump
 from units.utils.expansion_valve import simulate_jt_expansion
@@ -145,17 +146,29 @@ def run_one_pass(
     # に分割し、段間で T_intercool まで冷却して動力と機械的負荷を低減する。
     # 設計判断 (2026-05-09): Comp2 最終出口圧力は design.dist2.P_col に同期する
     # (operating.toml の comp2_out_Pa は backward compat のため残置だが未使用)。
-    cooled = simulate_cooler(rx_out, T_out_target=config.temperature.cooler_after_reactor_K)
+    cooled = simulate_cooler(
+        rx_out,
+        T_out_target=config.temperature.cooler_after_reactor_K,
+        process_phase=StreamPhase.GAS,
+    )
     P_in_comp2  = cooled.outlet.P_in
     P_out_final = design.dist2.P_col
     P_mid       = math.sqrt(P_in_comp2 * P_out_final)
     T_intercool = config.temperature.cooler_after_reactor_K
+    # 設計判断 (2026-05-09): Comp2b 出口 (~151°C) は Dist2 dew point (~50°C @ 8.5 bar)
+    # を遥かに上回る超加熱蒸気。Dist2 partial condenser に直接入れると顕熱を冷凍冷媒で
+    # 処理することになるため、工業実機の desuperheater (冷却水 HE) で dew 直上まで冷却。
+    # Q ~12 MW を冷却水 (60 円/GJ) で除去 → 冷凍冷媒 (~1820 円/GJ) より遥かに安い。
+    T_dist2_feed_K = 323.15   # 50°C: 8.5bar dew (~40-50°C) より少し上、5K margin
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         comp2a    = simulate_compressor(cooled.outlet, P_out_target=P_mid)
-        intercool = simulate_cooler(comp2a.outlet, T_out_target=T_intercool)
+        intercool = simulate_cooler(comp2a.outlet, T_out_target=T_intercool,
+                                    process_phase=StreamPhase.GAS)
         comp2b    = simulate_compressor(intercool.outlet, P_out_target=P_out_final)
-        r2        = simulate_column2(comp2b.outlet, tunables=design.dist2)
+        desuper   = simulate_cooler(comp2b.outlet, T_out_target=T_dist2_feed_K,
+                                    process_phase=StreamPhase.GAS)
+        r2        = simulate_column2(desuper.outlet, tunables=design.dist2)
 
     # ---- Step 4: PSA ----
     psa_feed = PSAFeedStream(
@@ -175,6 +188,7 @@ def run_one_pass(
         r2.bottom,
         T_out_target=config.temperature.mem_feed_K,
         phase_change=True,
+        process_phase=StreamPhase.LIQUID,    # 顕熱区間: 液相加熱、潜熱区間は EVAPORATING に自動切替
     )
     mem_feed = MemFeedStream(
         F_C3H6=mem_precool.outlet.F_in.get('B', 0.),
@@ -214,6 +228,7 @@ def run_one_pass(
         r_rx=r_rx, rx_out=rx_out,
         cooled=cooled,
         comp2a=comp2a, intercool=intercool, comp2b=comp2b,
+        desuper=desuper,
         r2=r2,
         r_psa=r_psa, mem_precool=mem_precool, r_mem=r_mem, r3=r3,
         tear_dist3_new=tear_dist3_new, tear_mem_new=tear_mem_new,

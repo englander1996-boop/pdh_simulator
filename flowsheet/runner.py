@@ -38,12 +38,22 @@ class FlowsheetResult:
 
     最適化器は effective_TAC を目的関数として最小化する。
     is_feasible / failure_reason / specs は診断用。
+
+    HI (Heat Integration) を apply_hi=True で評価したときのみ、
+    economics_hi と hi_result が設定される。BO で apply_hi=False のときは
+    両方 None。
     """
     solver:         SolverResult
     economics:      Optional[Economics]            # solver 失敗時は None
     specs:          Optional[SpecComplianceResult] # solver 失敗時は None
     effective_TAC:  float                          # 最適化器が見る目的関数 [億円/年]
     failure_reason: str                            # "" のとき feasible
+    # ---- HI (apply_hi=True のときのみ) ----
+    economics_hi:   Optional[Economics] = None     # HI 適用後の Economics
+    hi_result:      Optional[object]    = None     # pinch_analysis の HIResult
+    # ---- Stage 2 = HEN Synthesis (apply_stage2=True のときのみ、top-k 用) ----
+    economics_synth: Optional[Economics] = None    # 実 HEN 構成適用後の Economics
+    hen_result:      Optional[object]    = None    # synthesize_hen の HENResult
 
     @property
     def is_feasible(self) -> bool:
@@ -51,11 +61,31 @@ class FlowsheetResult:
 
 
 def evaluate(
-    design:  FlowsheetDesignVars,
-    config:  OperatingConfig,
-    verbose: bool = False,
+    design:       FlowsheetDesignVars,
+    config:       OperatingConfig,
+    verbose:      bool  = False,
+    apply_hi:     bool  = True,
+    hi_dT_min_K:  float = 10.0,
+    apply_stage2: bool  = False,
 ) -> FlowsheetResult:
-    """設計変数を入力してフローシートを評価し、effective_TAC と状態を返す。"""
+    """設計変数を入力してフローシートを評価し、effective_TAC と状態を返す。
+
+    Parameters
+    ----------
+    design, config, verbose : 通常評価用
+    apply_hi : bool
+        True (デフォルト) のとき pinch targeting を実行し、HI 後 OPEX/TAC/Profit
+        を計算する。BO ループでも有効にする想定 (pinch は ms オーダーで重くない)。
+        False のときは HI なしで raw OPEX を使用 (デバッグ・比較用)。
+    hi_dT_min_K : float
+        HI の最小接近温度差 [K]。デフォルト 10K (textbook 標準)。BO の設計変数に
+        含めず固定が一般的。
+    apply_stage2 : bool
+        True のとき、Stage 2 (HEN synthesis: 実マッチング・追加 HE CAPEX 計算)
+        を実行する。**top-k 候補の re-evaluation 用**で、BO ループには通常含めない
+        (greedy アルゴリズムは smooth でなく、計算もやや重め)。
+        apply_hi=True のときのみ意味を持つ (apply_hi=False では何もしない)。
+    """
     solver_result = solve_flowsheet(design, config, verbose=verbose)
 
     pen = config.penalty
@@ -129,11 +159,73 @@ def evaluate(
 
     soft_penalty = (n_violations * pen.spec_base_okuyen
                     + total_violation_pp * pen.spec_coef_okuyen)
-    # 設計判断 (2026-05-09): 最適化器は (TAC − Revenue) を最小化することで
-    # 利益最大化と等価。TAC = CAPEX/年 + OPEX (utility + 触媒 + 原料費) は
-    # 既に原料費を含み、Revenue は C3H6/H2 売上 + オフガス燃料クレジット。
-    # effective_TAC が小さいほど Profit が大きい。
-    effective_TAC = economics.TAC - economics.total_revenue + soft_penalty
+
+    # ---- HI (post-processing) ----
+    # 設計判断 (2026-05-09): apply_hi=True のときのみ pinch targeting を実行し、
+    # HI 後の OPEX/TAC/Profit を別 Economics として保持する。BO ループでは
+    # apply_hi=False (高速)、top-k 候補に対してのみ apply_hi=True で再評価する。
+    economics_hi = None
+    hi_result    = None
+    if apply_hi:
+        from flowsheet.heat_integration import (
+            extract_streams, pinch_analysis,
+            get_default_utility_tiers, apply_hi_to_economics,
+        )
+        from src.cost_parameters import OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS
+
+        streams = extract_streams(solver_result.one_pass, design.swing.T_in)
+        heating_tiers, cooling_tiers = get_default_utility_tiers()
+        hi_result = pinch_analysis(
+            streams, dT_min_K=hi_dT_min_K,
+            heating_tiers=heating_tiers, cooling_tiers=cooling_tiers,
+        )
+        economics_hi = apply_hi_to_economics(
+            economics, hi_result, heating_tiers, cooling_tiers,
+            operating_hours_per_year=OPERATING_HOURS_PER_YEAR,
+            depreciation_years=DEPRECIATION_YEARS,
+        )
+
+    # ---- Stage 2: HEN Synthesis (apply_stage2=True、top-k 用) ----
+    # 設計判断 (2026-05-09): apply_hi=True のときのみ意味を持つ (Stage 1 結果を流用)。
+    # greedy + tick-off で実 HEN 構成を合成、追加 HE CAPEX を加える。
+    # 通常 Stage 2 後の TAC は Stage 1 後より大きい (CAPEX 増 + OPEX 微増)。
+    economics_synth = None
+    hen_result      = None
+    if apply_stage2 and economics_hi is not None:
+        from optimization.hen_synthesis import (
+            synthesize_hen, apply_synthesis_to_economics,
+        )
+        # streams は Stage 1 で抽出済みのものを再利用 (apply_hi=True 時に取得)
+        from flowsheet.heat_integration import (
+            extract_streams as _extract_streams,
+            get_default_utility_tiers as _get_tiers,
+        )
+        from src.cost_parameters import (
+            OPERATING_HOURS_PER_YEAR as _OP_HRS,
+            DEPRECIATION_YEARS as _DEPR,
+        )
+        _streams = _extract_streams(solver_result.one_pass, design.swing.T_in)
+        _heat_t, _cool_t = _get_tiers()
+        hen_result = synthesize_hen(
+            _streams, hi_result, dT_min_K=hi_dT_min_K,
+            heating_tiers=_heat_t, cooling_tiers=_cool_t,
+            operating_hours=_OP_HRS,
+        )
+        economics_synth = apply_synthesis_to_economics(
+            economics, hen_result,
+            operating_hours=_OP_HRS,
+            depreciation_years=_DEPR,
+        )
+
+    # ---- effective_TAC の選択 ----
+    # 優先度: economics_synth (Stage 2) > economics_hi (Stage 1) > economics (raw)
+    if economics_synth is not None:
+        eff_econ = economics_synth
+    elif economics_hi is not None:
+        eff_econ = economics_hi
+    else:
+        eff_econ = economics
+    effective_TAC = eff_econ.TAC - eff_econ.total_revenue + soft_penalty
 
     return FlowsheetResult(
         solver=solver_result,
@@ -141,4 +233,8 @@ def evaluate(
         specs=specs,
         effective_TAC=effective_TAC,
         failure_reason=" | ".join(failures),
+        economics_hi=economics_hi,
+        hi_result=hi_result,
+        economics_synth=economics_synth,
+        hen_result=hen_result,
     )

@@ -12,8 +12,8 @@
 注意事項:
   - VLE を持たない簡略モデル。phase_change の有無は呼び出し側で判定する必要あり
     (例: 液フィードを露点超まで加熱する場合は True)。
-  - U 値は phase 組み合わせで本来変わるが (contest §4-4 表)、現状は単一値
-    (U_Wm2K=200) を仮置き。サロゲート蒸留塔の本実装と同時に再検討。
+  - U 値は contest §4-4 表 (流速によらず固定) を lookup_U で索引する。
+    相変化を伴う場合 (phase_change=True) は顕熱区間と潜熱区間で分けて A を合算。
   - 出口ストリームの相 (気/液) はモデル化しない。CAPEX 計算は伝熱面積ベース。
 
 CAPEX: Bare Module Cost 法（固定管板式熱交換器）。
@@ -33,6 +33,7 @@ from stream.stream import ProcessStream
 from src.cost_calculator import calc_he_capex_okuyen
 from src.component_data import cp_of, CP_DEFAULT, LATENT_HEAT_KJ_PER_KMOL
 from src.utility_selector import select_utility, UtilityTier
+from flowsheet.heat_integration import StreamPhase, lookup_U, utility_phase
 
 
 @dataclass
@@ -65,9 +66,9 @@ def simulate_cooler(
     stream:        ProcessStream,
     T_out_target:  float,
     P_out:         float | None = None,
-    U_Wm2K:        float = 200.0,
     dT_lm:         float = 30.0,
     phase_change:  bool  = False,
+    process_phase: str   = StreamPhase.GAS,
 ) -> CoolerResult:
     """冷却器/加熱器をシミュレーション。
 
@@ -79,13 +80,17 @@ def simulate_cooler(
         出口目標温度
     P_out : float [Pa] | None
         出口圧力 (None で入口と同じ、圧損なし)
-    U_Wm2K : float [W/(m²·K)]
-        総括熱伝達係数 (デフォルト 200; phase 組み合わせで本来変わる)
     dT_lm : float [K]
         対数平均温度差の代替値 (デフォルト 30)
     phase_change : bool
         True のとき、入口/出口で相変化が起こると見なし、全成分の潜熱を Q に加算する。
-        (VLE を持たないため呼び出し側で判定が必要。例: mem_precool の液→気)
+        加熱方向 (T_out > T_in) なら蒸発、冷却方向なら凝縮として扱う。
+    process_phase : str
+        プロセス側の顕熱区間の相 (StreamPhase.GAS / LIQUID)。
+        contest §4-4 表索引用。デフォルト GAS (圧縮ガス冷却が大半)。
+
+    総括 U は contest §4-4 (lookup_U) で (hot_phase, cold_phase) ペアから引く。
+    Ref: 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 (流速によらず固定 U)。
 
     Returns
     -------
@@ -115,18 +120,36 @@ def simulate_cooler(
 
     Q_kW = Q_sensible_kW + Q_latent_kW
 
-    # ---- 伝熱面積推算 [m²] ----
-    A_m2 = max(abs(Q_kW) * 1000.0 / (U_Wm2K * max(dT_lm, 1.0)), 10.0)
-
-    with warnings.catch_warnings(record=True):
-        warnings.simplefilter("always")
-        capex = calc_he_capex_okuyen(A_m2)
-
     # ---- ユーティリティ自動選択 ----
     # 設計判断: target が inlet より低ければ冷却、高ければ加熱として
     # 適切な tier を選ぶ。equipment に名前と単価を埋め込み、economics.py が
     # それを直接読み出して OPEX を計算する。
     utility = select_utility(target_T_K=T_out_target, inlet_T_K=stream.T_in)
+
+    # ---- 伝熱面積推算 [m²] (contest §4-4 表で U を決定) ----
+    # 相変化を伴う場合は顕熱区間と潜熱区間で U を分けて A を合算 (§4-4 規定)。
+    is_heating  = T_out_target > stream.T_in
+    util_phase  = utility_phase(utility.name)
+    sens_proc_phase = process_phase
+    # 潜熱区間: 加熱なら EVAPORATING、冷却なら CONDENSING (プロセス側)
+    lat_proc_phase  = StreamPhase.EVAPORATING if is_heating else StreamPhase.CONDENSING
+    if is_heating:
+        # プロセス=cold, utility=hot
+        U_sens = lookup_U(util_phase, sens_proc_phase)
+        U_lat  = lookup_U(util_phase, lat_proc_phase)
+    else:
+        # プロセス=hot, utility=cold
+        U_sens = lookup_U(sens_proc_phase, util_phase)
+        U_lat  = lookup_U(lat_proc_phase,  util_phase)
+
+    dT_eff = max(dT_lm, 1.0)
+    A_sens = abs(Q_sensible_kW) * 1000.0 / (U_sens * dT_eff)
+    A_lat  = abs(Q_latent_kW)   * 1000.0 / (U_lat  * dT_eff) if Q_latent_kW > 0 else 0.0
+    A_m2   = max(A_sens + A_lat, 10.0)
+
+    with warnings.catch_warnings(record=True):
+        warnings.simplefilter("always")
+        capex = calc_he_capex_okuyen(A_m2)
 
     outlet = ProcessStream(F_in=dict(stream.F_in), T_in=T_out_target, P_in=P_out)
     equip  = CoolerEquipment(

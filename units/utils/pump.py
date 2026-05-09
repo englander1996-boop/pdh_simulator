@@ -51,7 +51,8 @@ def simulate_pump(
     ----------
     stream       : 入口ストリーム (液相想定)
     P_out_target : 出口圧力 [Pa] (入口より大きいこと)
-    eta_pump     : ポンプ効率 [-] (デフォルト 0.70、汎用遠心ポンプの典型値)
+    eta_pump     : ポンプ効率 [-] (デフォルト 0.70)
+                   Ref: 化工便覧 改訂六版 5·6·4 項【例題 5·8】(η=0.7 で軸馬力算出)
     """
     if P_out_target <= stream.P_in:
         raise ValueError(

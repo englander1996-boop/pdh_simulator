@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 from src.cost_parameters import (
     ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
-    COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ,
+    COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ, FURNACE_EFFICIENCY,
     CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
     LPG_FEED_JPY_PER_KG, C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
@@ -85,6 +85,7 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         'Comp2a':      R['comp2a'].equipment.CAPEX,
         'Intercool':   R['intercool'].equipment.CAPEX,
         'Comp2b':      R['comp2b'].equipment.CAPEX,
+        'Desuper':     R['desuper'].equipment.CAPEX,    # Comp2b → Dist2 desuperheater
         'Dist2':       R['r2'].equipment.CAPEX,
         'PSA容器':     R['r_psa'].equipment.CAPEX_vessels,
         'PSA活性炭':   R['r_psa'].equipment.CAPEX_adsorbent,
@@ -97,46 +98,69 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         'Dist3':       R['r3'].equipment.CAPEX,
     }
 
+    # 設計判断 (2026-05-09): 蒸留塔のリボイラ熱媒は equipment.reb_utility_name/単価
+    # から動的に選択 (utility_selector 経由)。固定 LP Steam 前提を撤廃。
+    r1_eq, r2_eq, r3_eq = R['r1'].equipment, R['r2'].equipment, R['r3'].equipment
     opex = {
         'Pump1電力':         _ele(R['pump1'].equipment.W_kW),
         'Comp2a電力':        _ele(R['comp2a'].equipment.W_kW),
         'Comp2b電力':        _ele(R['comp2b'].equipment.W_kW),
         'MemF圧縮機電力':    _ele(R['r_mem'].equipment.W_feed_kW),
         'MemP圧縮機電力':    _ele(R['r_mem'].equipment.W_prod_kW),
-        'Dist1リボイラ蒸気': _heat(R['r1'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
-        'Dist2リボイラ蒸気': _heat(R['r2'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
-        'Dist3リボイラ蒸気': _heat(R['r3'].equipment.Q_reb, LP_STEAM_JPY_PER_GJ),
+        f'Dist1リボイラ ({r1_eq.reb_utility_name})':
+            _heat(r1_eq.Q_reb, r1_eq.reb_utility_jpy_per_GJ),
+        f'Dist2リボイラ ({r2_eq.reb_utility_name})':
+            _heat(r2_eq.Q_reb, r2_eq.reb_utility_jpy_per_GJ),
+        f'Dist3リボイラ ({r3_eq.reb_utility_name})':
+            _heat(r3_eq.Q_reb, r3_eq.reb_utility_jpy_per_GJ),
         'Mem気化器蒸気':     _heat(R['r_mem'].equipment.Q_vap_kW, LP_STEAM_JPY_PER_GJ),
         # 設計判断 (2026-05-08): 蒸留塔フィード予熱を独立計上 (旧版は抜けていた)。
-        # distillation_core.py の DistEquipment.Q_feed_preheat_kW から読み取る。
-        'Dist1フィード予熱蒸気': _heat(R['r1'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
-        'Dist2フィード予熱蒸気': _heat(R['r2'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
-        'Dist3フィード予熱蒸気': _heat(R['r3'].equipment.Q_feed_preheat_kW, LP_STEAM_JPY_PER_GJ),
+        # 単価は塔のリボイラと同じ utility を流用 (フィード予熱は塔体内ではなく
+        # 専用 HE 想定だが熱源は同レンジで近似)。
+        f'Dist1フィード予熱 ({r1_eq.reb_utility_name})':
+            _heat(r1_eq.Q_feed_preheat_kW, r1_eq.reb_utility_jpy_per_GJ),
+        f'Dist2フィード予熱 ({r2_eq.reb_utility_name})':
+            _heat(r2_eq.Q_feed_preheat_kW, r2_eq.reb_utility_jpy_per_GJ),
+        f'Dist3フィード予熱 ({r3_eq.reb_utility_name})':
+            _heat(r3_eq.Q_feed_preheat_kW, r3_eq.reb_utility_jpy_per_GJ),
     }
 
     # 反応器プリヒーター (GJ/h → kW 換算)
+    # 燃料消費 = Q_preheat / η_furnace (LHV ベース、化工便覧 18·4·3 表 18·11)
     Q_preheat_kW = R['r_rx'].effluent.Q_preheat * 1.0e9 / 3600.0 / 1000.0
-    opex['Reactor予熱燃料'] = _heat(Q_preheat_kW, FUEL_JPY_PER_GJ)
+    Q_fuel_kW    = Q_preheat_kW / FURNACE_EFFICIENCY
+    opex['Reactor予熱燃料'] = _heat(Q_fuel_kW, FUEL_JPY_PER_GJ)
 
     # 設計判断 (2026-05-08): cooler.py が utility_selector で選んだユーティリティ名・
     # 単価を equipment に格納するようになったため、それを直接使う。
     # ハードコードの COOLING_WATER_JPY_PER_GJ はここでは使わない。
     cooled_eq      = R['cooled'].equipment
     intercool_eq   = R['intercool'].equipment
+    desuper_eq     = R['desuper'].equipment
     mem_precool_eq = R['mem_precool'].equipment
     opex[f"Cooler({cooled_eq.utility_name})"] = _heat(
         abs(cooled_eq.Q_duty_kW), cooled_eq.utility_jpy_per_GJ)
     opex[f"Intercool({intercool_eq.utility_name})"] = _heat(
         abs(intercool_eq.Q_duty_kW), intercool_eq.utility_jpy_per_GJ)
+    opex[f"Desuper({desuper_eq.utility_name})"] = _heat(
+        abs(desuper_eq.Q_duty_kW), desuper_eq.utility_jpy_per_GJ)
     opex[f"MemPrecool({mem_precool_eq.utility_name})"] = _heat(
         abs(mem_precool_eq.Q_duty_kW), mem_precool_eq.utility_jpy_per_GJ)
 
-    # 設計判断: 蒸留塔のコンデンサと膜の冷却器は内部実装が COOLING_WATER 前提のまま
-    # (fake_columnX, membrane_system.py)。本実装フェーズで utility_selector に
-    # 統合する予定だが、現状は冷却水単独で計上 (旧版踏襲)。
-    opex['Dist1コンデンサ冷水'] = _heat(R['r1'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['Dist2コンデンサ冷水'] = _heat(R['r2'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
-    opex['Dist3コンデンサ冷水'] = _heat(R['r3'].equipment.Q_cond, COOLING_WATER_JPY_PER_GJ)
+    # 設計判断 (2026-05-09): 蒸留塔のコンデンサ単価を equipment.cond_utility_*
+    # から動的選択 (utility_selector 経由) に切替。Dist2 のように T_top が
+    # 氷点下なら自動的にエチレン冷媒 (~9000 円/GJ) が選ばれる。
+    opex[f'Dist1コンデンサ ({r1_eq.cond_utility_name})'] = _heat(
+        r1_eq.Q_cond, r1_eq.cond_utility_jpy_per_GJ,
+    )
+    opex[f'Dist2コンデンサ ({r2_eq.cond_utility_name})'] = _heat(
+        r2_eq.Q_cond, r2_eq.cond_utility_jpy_per_GJ,
+    )
+    opex[f'Dist3コンデンサ ({r3_eq.cond_utility_name})'] = _heat(
+        r3_eq.Q_cond, r3_eq.cond_utility_jpy_per_GJ,
+    )
+    # 設計判断: 膜の冷却器は内部実装が COOLING_WATER 前提のまま (旧版踏襲)。
+    # membrane_system.py 側を utility_selector 統合する次フェーズで更新予定。
     opex['Mem冷却器冷水']      = _heat(R['r_mem'].equipment.Q_cond_kW,
                                         COOLING_WATER_JPY_PER_GJ)
 
@@ -144,6 +168,15 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
                                 * CATALYST_PTSN_JPY_PER_KG
                                 / CATALYST_PTSN_LIFE_YEARS / 1.0e8)
     opex['PSA活性炭交換']   = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
+
+    # 設計判断 (2026-05-09): PSA 予熱を OPEX に計上 (旧版は抜けていた)。
+    # T_in (Dist2 塔頂、partial cond で ~-20°C) → T_abs (25°C) へ温度調整。
+    # 加熱方向: LP Steam、冷却方向: 冷却水 (実機ではほぼ加熱方向)。
+    Q_psa_preheat = R['r_psa'].equipment.Q_preheat_kW
+    if Q_psa_preheat > 0:
+        opex['PSA予熱 (LP Steam)']   = _heat(Q_psa_preheat,      LP_STEAM_JPY_PER_GJ)
+    elif Q_psa_preheat < 0:
+        opex['PSA予熱冷却 (冷却水)'] = _heat(abs(Q_psa_preheat), COOLING_WATER_JPY_PER_GJ)
 
     # ---- 原料費を OPEX に追加 (TAC に含める標準的な定義) ----
     # 設計判断 (2026-05-09): TAC には化工標準で原料費を含める (Sinnott §6.5,

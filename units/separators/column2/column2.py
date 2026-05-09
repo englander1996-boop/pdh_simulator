@@ -1,24 +1,33 @@
 """
-Dist2: 脱エタン塔 (FUG ベース)
+Dist2: 脱エタン塔 (FUG ベース、真正 deethanizer 構成)
 
-設計判断 (2026-05-08):
-  反応器出口の冷却・圧縮ガス (8.5 bar, 47°C ガス相) から軽質ガスを分離。
-  塔頂: H2 + CH4 + C2H4 → PSA 原料
-  塔底: C3H8 + C3H6 + C2H6 → Membrane 系へ
+設計判断 (2026-05-09):
+  反応器出口の冷却・圧縮ガス (8.5 bar, 47°C ガス相) から軽質成分を分離。
+  塔頂: H2 + CH4 + C2H4 + C2H6  → PSA 原料 (含むオフガス → 燃料)
+  塔底: C3H8 + C3H6 (clean C3 のみ) → Membrane 系へ
 
-key 成分:
-  LK = 'D' (C2H4): 塔頂回収率 95%
-  HK = 'A' (C3H8): 塔底回収率 98%
-  設計判断: C2H6 は微量 (~0.1 mol%) で key にすると Underwood の R_min が
-  過大評価される。一方 C2H4 は塔頂主要成分でフィード組成も多く、
-  「軽質 vs C3」境界の代表として LK にすると R_min が現実的な値 (1〜2) になる。
-  α (8.5 bar): C2H4/C3H8 ≈ 15-16 (大、分離容易)
-  軽質ガス (H2, CH4) は K 値がさらに大 → 自動的に塔頂へ
-  C2H6 は α=10.5 で C2H4 より塔底寄り → 仕様的には fake_column2 と同じ挙動
+key 成分 (2026-05-09 改訂、真正 deethanizer 構成):
+  LK = 'F' (C2H6): 塔頂回収率 99%  ← 「最も重い軽キー」 (= 塔頂に行ってほしい中で最も重い)
+  HK = 'A' (C3H8): 塔底回収率 99%
+  α (8.5 bar): C2H6/C3H8 ≈ 3.9 (CC ~3.5、PR ~4)
 
-q = 0 (気フィード、Comp2b 出口の高圧ガス)
-  → 水素含む軽質ガスが多いため、塔頂部分はガスのまま下降せず処理される
-K_method = 'pr' (PR EOS、軽質ガスの K 値計算が大事)
+  旧版 (2026-05-08) は LK='D' (C2H4) としていたが、これだと C2H6 が非キー扱いで
+  Fenske split が α^N_min × ratio_HK の経験式に依存し、N_min ≈ 2 の Dist2 では
+  C2H6 が塔底に 20% 漏洩 (= 85 kmol/h) → Mem 入口に C2 が混入し質量保存が破綻。
+  実機の deethanizer は LK = 最も重い軽質成分 (C2H6) を取るのが標準で、
+  recovery_LK_top=0.99 で C2H6 が 99% 塔頂に固定される。C2H4・CH4・H2 は α 大で
+  自動的に塔頂、C3H6 は HK=A の隣で α≈1.13 のため非キーながら 98% 塔底へ。
+
+非キー成分の自動分配 (Fenske 後):
+  C2H4 (D): α/α_LK ≈ 1.6 → 塔頂 99.9% (lighter than LK)
+  CH4  (E): α/α_LK ≈ 6   → 塔頂 100%
+  H2   (C): α/α_LK ≈ ∞   → 塔頂 100%
+  C3H6 (B): α/α_LK ≈ 0.29 → 塔底 98% (heavier than HK=A の隣)
+  C4H10(Z): α/α_LK ≈ 0    → 塔底 100% (Dist1 で除去済みで Dist2 入口にはほぼ無)
+
+q = 0 (気フィード、Desuperheater で 50°C まで冷やした飽和蒸気)
+K_method = 'pr' (PR EOS、α 計算精度重視)
+partial_condenser = True (H2/CH4 凝縮不能のため分流型)
 """
 
 import os
@@ -36,17 +45,15 @@ from stream.stream import ProcessStream
 
 
 # 既定 tunables: BO/exp で上書きされない場合に使う。
-# 設計判断 (2026-05-09):
-#   PR で α(C2H4/C3H8 @8.5bar) は CC より大きく出るが、Dist2 入口組成は
-#   フローシート上の運転状態 (single pass か recycle ありか) で z_LK=C2H4 の
-#   比率が 0.26〜数% まで変動する。z_LK が小さいフィードでは Underwood の
-#   R_min が大きくなり、運転状態をまたいで feasible にするには余裕が必要。
-#   R = 6.0 は single-pass (R_min ~4.8) で margin 1.25、recycle 想定で margin 大。
+# 設計判断 (2026-05-09 改訂、真正 deethanizer 化):
+#   PR で α(C2H6/C3H8 @8.5bar) ≈ 3.9。recovery 99/99 で N_min ≈ 7 (Fenske)。
+#   R_min は Underwood で feed 組成依存だが、概ね 5 程度 (推算)。
+#   margin 1.4× で R = 7.0 を採用。N=20 段で margin 約 3× (N_min=7 に対し)。
 _DEFAULT_TUNABLES = ColumnTunables(
     P_col        = 8.5e5,
     N_stages     = 20,
     N_feed       = 10,
-    reflux_ratio = 6.0,
+    reflux_ratio = 7.0,
 )
 _DEFAULT_FIXED = DistFixedParams()
 
@@ -58,10 +65,13 @@ def simulate_column2(
 ) -> DistResult:
     """Dist2 (脱エタン塔) をシミュレーションする。
 
-    LK/HK/回収率/K_method/q は本ラッパで固定:
-      LK='D' (C2H4), HK='A' (C3H8), recovery 0.95/0.98, K_method='pr', q=0.0
-    x_top に H2/CH4 が混じる場合、PR 泡点フラッシュが cryogenic に張り付く
-    ため distillation_core._bubble_T_K が CC へ自動フォールバックする。
+    LK/HK/回収率/K_method/q/partial_condenser は本ラッパで固定:
+      LK='F' (C2H6), HK='A' (C3H8), recovery 0.99/0.99,
+      K_method='pr', q=0.0, partial_condenser=True
+
+    塔頂は H2/CH4/C2H4/C2H6 主体 → PSA へ。
+    塔底は C3H8/C3H6 のみ (clean C3) → Membrane へ。
+    質量保存が塔内で自然に閉じるよう、LK = 最も重い軽質成分 (C2H6) を選定。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
     design = DistDesignVars(
@@ -69,12 +79,17 @@ def simulate_column2(
         N_stages        = t.N_stages,
         N_feed          = t.N_feed,
         reflux_ratio    = t.reflux_ratio,
-        LK              = 'D',       # C2H4
+        LK              = 'F',       # C2H6 (最も重い軽質成分)
         HK              = 'A',       # C3H8
-        recovery_LK_top = 0.95,
-        recovery_HK_bot = 0.98,
+        recovery_LK_top = 0.99,      # C2H6 99% 塔頂 → 残り 1% (~4 kmol/h) は塔底に微量残
+        recovery_HK_bot = 0.99,
         K_method        = 'pr',
-        q               = 0.0,       # 気フィード (Comp2b 出口)
+        q               = 0.0,       # 気フィード (Desuper 後 50°C 飽和蒸気)
+        # 設計判断 (2026-05-09): Dist2 は partial condenser (分流型)。塔頂に
+        # H2/CH4 が大量に来るため total condenser だと T_cond が cryogenic に
+        # なる病理がある。実機どおり H2/CH4 はそのまま vapor distillate で抜き、
+        # 残りの C2 だけを propylene 冷媒で凝縮して reflux する分流モデル。
+        partial_condenser = True,
     )
     return simulate_distillation_column(
         design, feed,
