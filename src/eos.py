@@ -30,6 +30,9 @@ from scipy.optimize import brentq
 from .config import THERMO_DATA, R
 
 _SQRT2: float = math.sqrt(2.0)
+# Ref: Peng D.-Y. & Robinson D.B. (1976) "A New Two-Constant Equation of State",
+#      Ind. Eng. Chem. Fundam. 15(1), 59-64. Eq. (5)-(6) で Ω_a/Ω_b が臨界点条件
+#      (∂P/∂V)_Tc = (∂²P/∂V²)_Tc = 0 の閉形式解として導出される標準値。
 _OA:    float = 0.45724   # PR Ω_a
 _OB:    float = 0.07780   # PR Ω_b
 
