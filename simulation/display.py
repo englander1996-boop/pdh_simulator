@@ -77,7 +77,8 @@ def show_streams_overview(R: dict, F_C3H8_feed: float,
     show_stream("[Cooler → Comp2a]",     R['cooled'].outlet)
     show_stream("[Comp2a → Intercool]",  R['comp2a'].outlet)
     show_stream("[Intercool → Comp2b]",  R['intercool'].outlet)
-    show_stream("[Comp2b → Dist2]",      R['comp2b'].outlet)
+    show_stream("[Comp2b → Desuper]",    R['comp2b'].outlet)
+    show_stream("[Desuper → Dist2]",     R['desuper'].outlet)
 
     # Dist2 → PSA / Mem
     show_stream("[Dist2 → PSA] 塔頂", R['r2'].top)
@@ -128,10 +129,14 @@ def show_unit_details(R: dict) -> None:
     # ---- Dist1 ----
     eq = R['r1'].equipment
     print(f"  [Dist1]      D={eq.D_col:5.2f}m  H={eq.H_col:5.1f}m  "
-          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  "
-          f"Q_reb={eq.Q_reb:6.0f}kW  Q_cond={eq.Q_cond:6.0f}kW  "
-          f"N_feed_kirkbride={eq.N_feed_kirkbride}  "
-          f"feasible={eq.feasible}")
+          f"T_top={eq.T_top-273.15:+6.1f}°C  T_bot={eq.T_bot-273.15:+6.1f}°C  "
+          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  feasible={eq.feasible}")
+    print(f"               Cond: Q={eq.Q_cond:6.0f}kW  A={eq.A_cond_m2:6.0f}m²  "
+          f"util={eq.cond_utility_name} ({eq.cond_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_cond:.3f}億円")
+    print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
+          f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
 
     # ---- Reactor ----
     eq   = R['r_rx'].equipment
@@ -156,14 +161,21 @@ def show_unit_details(R: dict) -> None:
           f"utility={eq.utility_name} ({eq.utility_jpy_per_GJ:.0f}円/GJ)")
     eq = R['comp2b'].equipment
     print(f"  [Comp2b]     W={eq.W_kW:6.0f}kW  T_out={eq.T_out-273.15:.0f}°C")
+    eq = R['desuper'].equipment
+    print(f"  [Desuper]    Q={eq.Q_duty_kW:+7.0f}kW  A={eq.A_est_m2:6.0f}m²  "
+          f"utility={eq.utility_name} ({eq.utility_jpy_per_GJ:.0f}円/GJ)")
 
     # ---- Dist2 ----
     eq = R['r2'].equipment
     print(f"  [Dist2]      D={eq.D_col:5.2f}m  H={eq.H_col:5.1f}m  "
-          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  "
-          f"Q_reb={eq.Q_reb:6.0f}kW  Q_cond={eq.Q_cond:6.0f}kW  "
-          f"N_feed_kirkbride={eq.N_feed_kirkbride}  "
-          f"feasible={eq.feasible}")
+          f"T_top={eq.T_top-273.15:+6.1f}°C  T_bot={eq.T_bot-273.15:+6.1f}°C  "
+          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  feasible={eq.feasible}")
+    print(f"               Cond: Q={eq.Q_cond:6.0f}kW  A={eq.A_cond_m2:6.0f}m²  "
+          f"util={eq.cond_utility_name} ({eq.cond_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_cond:.3f}億円")
+    print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
+          f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
 
     # ---- PSA ----
     eq = R['r_psa'].equipment
@@ -196,10 +208,14 @@ def show_unit_details(R: dict) -> None:
     # ---- Dist3 ----
     eq = R['r3'].equipment
     print(f"  [Dist3]      D={eq.D_col:5.2f}m  H={eq.H_col:5.1f}m  "
-          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  "
-          f"Q_reb={eq.Q_reb:6.0f}kW  Q_cond={eq.Q_cond:6.0f}kW  "
-          f"N_feed_kirkbride={eq.N_feed_kirkbride}  "
-          f"feasible={eq.feasible}")
+          f"T_top={eq.T_top-273.15:+6.1f}°C  T_bot={eq.T_bot-273.15:+6.1f}°C  "
+          f"N_min={eq.N_min:5.1f}  R_min={eq.R_min:5.2f}  feasible={eq.feasible}")
+    print(f"               Cond: Q={eq.Q_cond:6.0f}kW  A={eq.A_cond_m2:6.0f}m²  "
+          f"util={eq.cond_utility_name} ({eq.cond_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_cond:.3f}億円")
+    print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
+          f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
 
 
 def show_production(R: dict, F_C3H8_feed: float,
@@ -276,6 +292,157 @@ def show_specs(specs, failure_reason: str) -> None:
         print(f"  違反内訳 : {failure_reason}")
 
 
+def show_hi_summary(result) -> None:
+    """Heat Integration (pinch targeting) 結果と HI 前後の TAC/Profit 比較を表示。
+
+    HI 未適用 (result.hi_result is None) なら何もしない。
+    """
+    if result.hi_result is None or result.economics_hi is None:
+        return
+
+    hr      = result.hi_result
+    econ    = result.economics
+    econ_hi = result.economics_hi
+
+    hdr("Heat Integration (Pinch Targeting)")
+    print(f"  ΔT_min        : {(hr.T_pinch_hot_K - hr.T_pinch_cold_K):.0f} K")
+    print(f"  Q_H_min       : {hr.Q_H_min_kW:8.0f} kW = "
+          f"{hr.Q_H_min_kW/1000:6.2f} MW (HI 後の必要加熱量)")
+    print(f"  Q_C_min       : {hr.Q_C_min_kW:8.0f} kW = "
+          f"{hr.Q_C_min_kW/1000:6.2f} MW (HI 後の必要冷却量)")
+    print(f"  ピンチ温度    : hot {hr.T_pinch_hot_K-273.15:6.1f}°C "
+          f"/ cold {hr.T_pinch_cold_K-273.15:6.1f}°C")
+    print(f"  最少 HE 数    : {hr.N_HE_min} (Linnhoff 簡易式)")
+    print(f"  総伝熱面積    : {hr.A_total_m2:7.0f} m² (Bath 式 targeting)")
+    print(f"  feasible      : {hr.feasible}"
+          + (f"   ({hr.message})" if hr.message else ""))
+
+    # HI 適用後の utility tier 別 OPEX 内訳
+    hi_breakdown = {k: v for k, v in econ_hi.opex.items() if k.startswith('HI:')}
+    if hi_breakdown:
+        print(f"\n  HI 後 utility 内訳 [億円/年]:")
+        for k, v in sorted(hi_breakdown.items(), key=lambda kv: -abs(kv[1])):
+            print(f"    {k:<32}: {v:9.4f}")
+        print(f"    {'-'*36}")
+        print(f"    {'(HI utility 合計)':<32}: {sum(hi_breakdown.values()):9.4f}")
+
+
+def show_hi_comparison(result) -> None:
+    """HI 前後の TAC/Profit 比較表を表示。"""
+    if result.economics_hi is None:
+        return
+    econ    = result.economics
+    econ_hi = result.economics_hi
+    hdr("HI 前 vs HI 後 比較 [億円/年]")
+
+    # 熱関連 OPEX を集計 (元 economics 側で classify)
+    from flowsheet.heat_integration import classify_heat_opex_key
+    heat_opex_before = sum(
+        v for k, v in econ.opex.items()
+        if classify_heat_opex_key(k) is not None
+    )
+    nonheat_opex = sum(
+        v for k, v in econ.opex.items()
+        if classify_heat_opex_key(k) is None
+    )
+    heat_opex_after = sum(
+        v for k, v in econ_hi.opex.items() if k.startswith('HI:')
+    )
+
+    print(f"  {'項目':<28} | {'HI なし':>10} | {'HI 後':>10} | {'差':>10}")
+    print(f"  {'-'*28} | {'-'*10} | {'-'*10} | {'-'*10}")
+    rows = [
+        ("CAPEX/年 (償却)",      econ.total_capex/8,  econ_hi.total_capex/8),
+        ("OPEX 熱系 (utility)",  heat_opex_before,    heat_opex_after),
+        ("OPEX 非熱系 (触媒+原料等)", nonheat_opex,    nonheat_opex),
+        ("OPEX 合計",            econ.total_opex,     econ_hi.total_opex),
+        ("TAC",                  econ.TAC,            econ_hi.TAC),
+        ("Revenue",              econ.total_revenue,  econ_hi.total_revenue),
+        ("Profit",               econ.profit,         econ_hi.profit),
+    ]
+    for name, before, after in rows:
+        diff = after - before
+        sign = '+' if diff >= 0 else ''
+        print(f"  {name:<28} | {before:>10.3f} | {after:>10.3f} "
+              f"| {sign}{diff:>9.3f}")
+    print()
+    print(f"  C3H6 製造原単価:")
+    print(f"    HI なし: {econ.unit_jpy_per_t:8.0f} 円/ton  ({econ.unit_jpy_per_t/1000:5.1f} 円/kg)")
+    print(f"    HI 後  : {econ_hi.unit_jpy_per_t:8.0f} 円/ton  ({econ_hi.unit_jpy_per_t/1000:5.1f} 円/kg)")
+
+
+def show_stage2_synthesis(result) -> None:
+    """Stage 2 (HEN synthesis) の結果を表示。
+
+    apply_stage2=True で評価したときのみ動作。HE matching 内訳と追加 CAPEX、
+    Stage 1 vs Stage 2 の TAC/Profit 比較。
+    """
+    if result.hen_result is None or result.economics_synth is None:
+        return
+
+    hr = result.hen_result
+
+    hdr("Stage 2: HEN Synthesis (Pinch Design Method, greedy + tick-off)")
+    print(f"  feasible          : {hr.feasible}"
+          + (f"   ({hr.message})" if hr.message else ""))
+    print(f"  process-process HE: {hr.n_process_HE} 機 (= 追加 recovery exchanger)")
+    print(f"  Q_recovered       : {hr.Q_recovered_kW:8.0f} kW = "
+          f"{hr.Q_recovered_kW/1000:6.2f} MW (内部熱回収量)")
+    print(f"  Q_hot_utility 残  : {hr.Q_hot_utility_kW:8.0f} kW "
+          f"(synthesis 後の hot utility 必要量)")
+    print(f"  Q_cold_utility 残 : {hr.Q_cold_utility_kW:8.0f} kW")
+    print(f"  追加 HE CAPEX     : {hr.CAPEX_added_okuyen:.4f} 億円")
+
+    if hr.matches:
+        print(f"\n  HE matching 内訳:")
+        print(f"    {'name':<24} {'side':<7} {'hot ↔ cold':<60} "
+              f"{'Q[kW]':>8} {'A[m²]':>8} {'CAPEX':>8}")
+        print(f"    {'-'*24} {'-'*7} {'-'*60} {'-'*8} {'-'*8} {'-'*8}")
+        for m in hr.matches:
+            pair = f"{m.hot_label[:28]:<28} ↔ {m.cold_label[:28]:<28}"
+            print(f"    {m.name:<24} {m.side:<7} {pair[:60]} "
+                  f"{m.Q_kW:>8.0f} {m.A_m2:>8.0f} {m.CAPEX_okuyen:>8.3f}")
+
+
+def show_stage2_comparison(result) -> None:
+    """Stage 1 (HI targeting) vs Stage 2 (synthesis) の比較。"""
+    if result.economics_synth is None or result.economics_hi is None:
+        return
+
+    econ_hi    = result.economics_hi
+    econ_syn   = result.economics_synth
+    hr         = result.hen_result
+
+    hdr("Stage 1 (targeting) vs Stage 2 (synthesis) 比較 [億円/年]")
+    print(f"  {'項目':<28} | {'Stage 1':>10} | {'Stage 2':>10} | {'差':>10}")
+    print(f"  {'-'*28} | {'-'*10} | {'-'*10} | {'-'*10}")
+
+    rows = [
+        ("CAPEX/年 (償却)",      econ_hi.total_capex/8,  econ_syn.total_capex/8),
+        ("OPEX 合計",            econ_hi.total_opex,      econ_syn.total_opex),
+        ("TAC",                  econ_hi.TAC,             econ_syn.TAC),
+        ("Revenue",              econ_hi.total_revenue,   econ_syn.total_revenue),
+        ("Profit",               econ_hi.profit,          econ_syn.profit),
+    ]
+    for name, before, after in rows:
+        diff = after - before
+        sign = '+' if diff >= 0 else ''
+        print(f"  {name:<28} | {before:>10.3f} | {after:>10.3f} "
+              f"| {sign}{diff:>9.3f}")
+
+    print()
+    print(f"  C3H6 製造原単価:")
+    print(f"    Stage 1: {econ_hi.unit_jpy_per_t:8.0f} 円/ton  ({econ_hi.unit_jpy_per_t/1000:5.1f} 円/kg)")
+    print(f"    Stage 2: {econ_syn.unit_jpy_per_t:8.0f} 円/ton  ({econ_syn.unit_jpy_per_t/1000:5.1f} 円/kg)")
+
+    print(f"\n  ★ 解釈:")
+    print(f"    Stage 1 (BO): 理論限界 OPEX、既存 HE CAPEX のみ → 楽観的 lower bound")
+    print(f"    Stage 2 (top-k): 実 HEN 構成、追加 HE CAPEX 加算、実 OPEX → realistic")
+    if econ_syn.profit < econ_hi.profit:
+        diff = econ_hi.profit - econ_syn.profit
+        print(f"    → Stage 2 で Profit が {diff:.2f} 億円/年 悪化 (top-k 評価で現実化)")
+
+
 def show_tac_summary(result, C3H6_product: float) -> None:
     hdr("TAC・Revenue・Profit")
     econ = result.economics
@@ -345,3 +512,9 @@ def display_full_results(result, design, config) -> None:
     show_revenue(result.economics)
     show_specs(result.specs, result.failure_reason)
     show_tac_summary(result, C3H6_product)
+    # HI を適用した場合のみ表示 (apply_hi=False では何も出ない)
+    show_hi_summary(result)
+    show_hi_comparison(result)
+    # Stage 2 (HEN synthesis、apply_stage2=True) の結果も同様に optional 表示
+    show_stage2_synthesis(result)
+    show_stage2_comparison(result)

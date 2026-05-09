@@ -49,7 +49,7 @@ T_out = T_in                            (非圧縮性、粘性発熱無視)
 ### 仮定 / 仮置き
 | 項目 | 値 | 備考 |
 |---|---|---|
-| `eta_pump` | 0.70 | 汎用遠心ポンプ典型値 |
+| `eta_pump` | 0.70 | 化工便覧 改訂六版 5·6·4 項【例題 5·8】(η=0.7 で軸馬力算出例) |
 | 液密度 | C3H8/C4H10 のみ精緻化 | 他成分はフォールバック値 |
 | 粘性発熱 | 無視 | LPG 系で ΔP=7bar 程度なら数 K 以内 |
 
@@ -113,9 +113,9 @@ utility 名・単価を埋め込む (economics.py が直接読む)。
 | `stream: ProcessStream` | 入口 |
 | `T_out_target: float [K]` | 出口目標温度 |
 | `P_out: float [Pa] \| None` | None で圧損なし |
-| `U_Wm2K: float = 200` | 総括熱伝達係数 |
 | `dT_lm: float = 30` | 対数平均温度差 |
 | `phase_change: bool = False` | True で潜熱を Q に加算 |
+| `process_phase: str = GAS` | プロセス側顕熱区間の相 (StreamPhase.GAS/LIQUID)、§4-4 U 表索引用 |
 | 出力 `equipment.Q_duty_kW` | 顕熱+潜熱合計 (符号: 負=冷却, 正=加熱) |
 | 出力 `equipment.Q_sensible_kW`/`Q_latent_kW` | 内訳 |
 | 出力 `equipment.A_est_m2`, `CAPEX` | 伝熱面積、設備費 |
@@ -138,7 +138,7 @@ VLE を持たないため、相変化の有無は呼び出し側で `phase_chang
 ### 仮定 / 仮置き
 | 項目 | 値 | 備考 |
 |---|---|---|
-| `U_Wm2K` | 200 | 単一値仮置き。本来は phase 組み合わせで変わる (contest §4-4 表参照) |
+| U 値 | contest §4-4 表 (lookup_U) で (hot_phase, cold_phase) 別に決定。相変化区間は分割 | 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 |
 | `dT_lm` | 30 K | 代表値。寒冷側で温度クロスする条件は呼び出し側で確認 |
 | `A_min` | 10 m² | CAPEX 下限保護 (HE 適用範囲は 10〜1000 m²) |
 | 凝縮潜熱 | 加熱側のみ計上 | T_out<T_in (凝縮) は現状無視 (Mem 内部で別途計算済み) |

@@ -51,6 +51,7 @@ from src.cost_parameters import (
     MP_STEAM_JPY_PER_GJ,
     HP_STEAM_JPY_PER_GJ,
     FUEL_JPY_PER_GJ,
+    FURNACE_EFFICIENCY,
 )
 
 
@@ -101,7 +102,8 @@ _HEATING_TIERS: List[UtilityTier] = [
     UtilityTier('LP Steam',  433.15, LP_STEAM_JPY_PER_GJ, True),     # 160°C
     UtilityTier('MP Steam',  459.15, MP_STEAM_JPY_PER_GJ, True),     # 186°C
     UtilityTier('HP Steam',  503.15, HP_STEAM_JPY_PER_GJ, True),     # 230°C
-    UtilityTier('燃料燃焼', 1273.15, FUEL_JPY_PER_GJ,     True),     # ~1000°C 上限
+    # 燃料単価は η_furnace=0.85 (化工便覧 18·4·3 表 18·11) で実効単価に補正
+    UtilityTier('燃料燃焼', 1273.15, FUEL_JPY_PER_GJ / FURNACE_EFFICIENCY, True),     # ~1000°C 上限
 ]
 
 
@@ -132,14 +134,35 @@ def _interp_linear(x: float, points: List[Tuple[float, float]]) -> Tuple[float, 
 
 
 def _closest_tier(target_T_K: float, tiers: List[UtilityTier]) -> UtilityTier:
-    """target_T_K に最も近い effective_T (supply_T + approach 補正) を持つ tier。
-    連続モードで「どの tier 帯に居るか」を表示するための名前付け用。"""
-    return min(
-        tiers,
-        key=lambda t: abs(target_T_K - (t.supply_T_K + (-_MIN_APPROACH_TEMP_K
-                                                        if t.is_heating
-                                                        else _MIN_APPROACH_TEMP_K)))
-    )
+    """target_T_K に対応する tier を返す (連続モードでの supply_T 提供用)。
+
+    設計判断 (2026-05-09): 「最近傍 tier」だと target が tier 境界を僅かに下回る
+    場合に approach 不足で ΔT_lm 不成立になる。下流で ΔT を計算する用途では、
+    target を物理的に到達可能な「最も安い (=最も暖かい) feasible tier」を選ぶべき。
+
+    Cooling: supply_T + approach ≤ target を満たす中で supply_T 最大の tier。
+    Heating: supply_T - approach ≥ target を満たす中で supply_T 最小の tier。
+    feasible なものが無ければ最も冷たい (cooling) / 熱い (heating) tier を返す。
+    """
+    if not tiers:
+        return None  # type: ignore
+    is_heating = tiers[0].is_heating
+
+    if is_heating:
+        feasible = [t for t in tiers
+                    if t.supply_T_K - _MIN_APPROACH_TEMP_K >= target_T_K]
+        if feasible:
+            return min(feasible, key=lambda t: t.supply_T_K)
+        # 最も熱い tier (= 燃料燃焼) を返す
+        return max(tiers, key=lambda t: t.supply_T_K)
+
+    # cooling
+    feasible = [t for t in tiers
+                if t.supply_T_K + _MIN_APPROACH_TEMP_K <= target_T_K]
+    if feasible:
+        return max(feasible, key=lambda t: t.supply_T_K)
+    # 最も冷たい tier (= エチレン冷媒-100°C) を返す
+    return min(tiers, key=lambda t: t.supply_T_K)
 
 
 # ===========================================================================

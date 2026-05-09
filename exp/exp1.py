@@ -123,12 +123,31 @@ design = FlowsheetDesignVars(
 
 
 # ===========================================================================
+#  Heat Integration (HI) オプション
+# ===========================================================================
+#  Stage 1 (Pinch Targeting) は BO/exp1 共通でデフォルト適用 (ms オーダーで軽量)。
+#    Q_H_min/Q_C_min/A_total/N_HE_min を targeting で計算し、tier 配分で OPEX 算出。
+#
+#  Stage 2 (Network Synthesis = top-k 用) は離散・組合せで重め。
+#    APPLY_STAGE2=True で実 HEN 構成 (greedy + tick-off) を合成し、追加 HE CAPEX
+#    と実 utility OPEX を計算。top-k re-evaluation の挙動を exp1 で擬似再現する。
+#    通常 BO ループには含めず、top-k 候補に対してのみ実行する想定。
+#
+#  False にすると該当 stage を無効化する (HI 効果・synthesis 効果のデバッグ用)。
+APPLY_HI     = True
+APPLY_STAGE2 = True       # top-k 候補の re-evaluation を擬似再現
+HI_DT_MIN_K  = 10.0       # ピンチ最小接近温度差 (textbook 標準、BO 変数にせず固定)
+
+
+# ===========================================================================
 #  実行 + 結果表示 (ここも通常触らない)
 # ===========================================================================
 config = load_operating_config()
 
 hdr("外側ループ: 製品流量厳密化 (Fresh を調整)")
-result = evaluate(design, config, verbose=True)
+result = evaluate(design, config, verbose=True,
+                  apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
+                  apply_stage2=APPLY_STAGE2)
 
 display_full_results(result, design, config)
 

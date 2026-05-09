@@ -53,7 +53,6 @@
 | **膜パラメータ (Q_A=40 GPU, α=90)** | 文献値 | 同上 `MemFixedParams` | Hua et al. (2024) 実測値、室温・大気圧 |
 | **PR EOS 二成分相互作用係数 k_ij** | 0 | `src/eos.py` | 文献で 0.01 程度と小さく無視可。要再評価 |
 | **PtSn 触媒充填密度 ρ_p** | **700 kg/m³** (2026-05-09 400→700) | `units/reactors/swing.py` `FixedParams.rho_p` | 実触媒 PtSn/Al2O3 ペレットの粒子密度寄り。空隙の二重控除になっている可能性は別途要確認 |
-| **U_Wm2K (cooler の U 値)** | 200 W/(m²·K) | `units/utils/cooler.py` | phase 組み合わせで本来変わる (contest §4-4 表) |
 
 ## 🟢 優先度低 (構造的に変わる時に再検討)
 

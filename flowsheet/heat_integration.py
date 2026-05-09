@@ -44,36 +44,84 @@ import math
 
 
 # ===========================================================================
-# 総括熱伝達係数 h [W/(m²·K)] の代表値
+# 総括熱伝達係数 U [W/(m²·K)]: contest §4-4 表
 # ===========================================================================
-# Bath 式による総伝熱面積 A_total 推算で使用する膜伝達係数のデフォルト値。
+# 出典: 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 熱交換器
+#   Q = U · A · ΔT_ln、流速によらず固定 U を使用、9 区分の表で参照。
+#   沸点・露点を通過する場合は前後で分割計算。
 #
-# 出典: 化学工学便覧 改訂六版 (化学工学会編, 丸善, 1999)
-#       基礎編 第6章「伝熱・蒸発」 6.6「熱交換器」
-#       表 6.14 多管式熱交換器の総括熱伝達係数 (p.387〜389)
-#       表 6.15 石油精製装置における総括熱伝達係数
-#       表 6.19 冷却水の汚れ係数 / 表 6.21 石油精製装置における汚れ係数 (p.389〜391)
-#
-# 設計判断 (2026-05-08):
-#   各レンジの保守側 (低い側) を選び、便覧の表 6.14 が既に汚れ係数
-#   (冷却水側 ~0.0002-0.0004 m²·K/W、軽質炭化水素側 ~0.0004 m²·K/W) を
-#   加味した値として提示されているため、長期運転を想定した安全側 U 値として採用。
+# 設計判断 (2026-05-09): 本プロジェクト用にコンテスト値を採用 (引用)。
+#   旧版は化工便覧の per-stream h ベースだったが、contest 仕様の方が
+#   各 HE の「相のペア」で直接 U を引ける明確な体系のため切替え。
 # ---------------------------------------------------------------------------
 
-# 液-液系 (有機溶剤-水 280-850, ガソリン-水 340-570 のレンジ内、保守側)
-H_LIQUID_LIQUID_W_M2K   = 400.0
+class StreamPhase:
+    """HE stream の相分類 (contest §4-4 表索引キー)。"""
+    GAS         = 'gas'         # 顕熱、ガス相
+    LIQUID      = 'liquid'      # 顕熱、液相
+    CONDENSING  = 'condensing'  # 潜熱、ガス凝縮
+    EVAPORATING = 'evaporating' # 潜熱、液蒸発
 
-# 高圧プロセスガス-水/液 (圧縮ガス-水/ブライン 230-450 のレンジ、保守側)
-# 大気圧ガスでは 57-280 まで下がるが、本プロジェクトの高温ガスは 0.5-17 bar
-H_HIGH_TEMP_GAS_W_M2K   = 200.0
 
-# 顕熱+潜熱の中間 (気化器: プロパン-水蒸気の蒸発器 1100-1700 のうち、
-# 顕熱+潜熱混在のため平均的レンジを採用)
-H_VAPORIZER_W_M2K       = 600.0
+# Contest §4-4 表 [W/(m²·K)]、indexed by (hot_phase, cold_phase)
+U_TABLE_CONTEST: Dict[Tuple[str, str], float] = {
+    (StreamPhase.GAS,         StreamPhase.GAS):           150.0,  # ガス-ガス
+    (StreamPhase.LIQUID,      StreamPhase.GAS):           200.0,  # 液-ガス
+    (StreamPhase.LIQUID,      StreamPhase.LIQUID):        300.0,  # 液-液
+    (StreamPhase.CONDENSING,  StreamPhase.EVAPORATING): 1500.0,   # ガス凝縮-液蒸発
+    (StreamPhase.GAS,         StreamPhase.LIQUID):        200.0,  # ガス-液
+    (StreamPhase.CONDENSING,  StreamPhase.GAS):           500.0,  # ガス凝縮-ガス
+    (StreamPhase.CONDENSING,  StreamPhase.LIQUID):       1000.0,  # ガス凝縮-液
+    (StreamPhase.GAS,         StreamPhase.EVAPORATING):  500.0,   # ガス-液蒸発
+    (StreamPhase.LIQUID,      StreamPhase.EVAPORATING): 1000.0,   # 液-液蒸発
+}
 
-# 凝縮潜熱 (低沸点炭化水素 大気圧 - 水 450-1100 / プロパン凝縮器 480 のレンジ、
-# 凝縮側 h は大きいので上限近を採用)
-H_CONDENSER_W_M2K       = 1000.0
+# Contest 表外組合せ用フォールバック (保守側 = U 小さめで A 大きめに)
+_U_FALLBACK_W_M2K = 150.0
+
+
+def lookup_U(hot_phase: str, cold_phase: str) -> float:
+    """Contest §4-4 U 表から hot/cold の組合せに対応する U を引く。
+
+    表外 (例: 両方凝縮、両方蒸発、cold 側凝縮 等) はフォールバック値。
+    """
+    return U_TABLE_CONTEST.get((hot_phase, cold_phase), _U_FALLBACK_W_M2K)
+
+
+def utility_phase(utility_name: str) -> str:
+    """utility tier 名から相分類を推定する。
+
+    - LP/MP/HP Steam: 凝縮潜熱 → CONDENSING
+    - 燃料燃焼: 高温燃焼ガス → GAS
+    - 空冷: 大気ガス → GAS
+    - 冷却水・プロピレン+5C/+15C: 加熱される液 → LIQUID
+    - プロピレン-25C/-40C・エチレン-60C/-75C/-100C: 蒸発冷媒 → EVAPORATING
+    """
+    name = utility_name.lower()
+    if 'steam' in name:
+        return StreamPhase.CONDENSING
+    if '燃料' in utility_name or 'fuel' in name:
+        return StreamPhase.GAS
+    if '空冷' in utility_name or 'air' in name:
+        return StreamPhase.GAS
+    if '冷却水' in utility_name or 'cooling water' in name:
+        return StreamPhase.LIQUID
+    # 冷凍冷媒: 高温側 (+5°C, +15°C) は液想定、低温側 (-25°C 以下) は蒸発潜熱
+    if '冷媒' in utility_name:
+        if '+' in utility_name:
+            return StreamPhase.LIQUID
+        return StreamPhase.EVAPORATING
+    # フォールバック: 液
+    return StreamPhase.LIQUID
+
+
+# 後方互換性のため h_W_m2K 用の代表値も残置 (Bath 式 _calc_A_total で使用)
+# 設計判断 (2026-05-09): h は U 表とは別概念だが、簡略化のため U/2 を仮置き
+# (1/U = 1/h_h + 1/h_c、両側等価仮定で h ≈ 2U)。targeting 推算の精度範囲。
+H_LIQUID_LIQUID_W_M2K   = 600.0    # ≈ 2 × 300 (液-液)
+H_HIGH_TEMP_GAS_W_M2K   = 300.0    # ≈ 2 × 150 (ガス-ガス)
+H_VAPORIZER_W_M2K       = 1000.0   # ≈ 2 × 500 (蒸発、保守側)
+H_CONDENSER_W_M2K       = 1000.0   # ≈ 2 × 500 (凝縮、保守側)
 
 
 # ===========================================================================
@@ -110,6 +158,8 @@ class HIStream:
     Q_latent_kW:    float = 0.0
     T_phase_K:      Optional[float] = None
     h_W_m2K:        float = H_LIQUID_LIQUID_W_M2K
+    # contest §4-4 U 表索引用の相分類 (2026-05-09 追加)
+    phase:          str   = StreamPhase.LIQUID
 
     @property
     def is_hot(self) -> bool:
@@ -854,16 +904,12 @@ def plot_TQ(result: HIResult, ax=None, T_in_celsius: bool = True):
 def _make_sensible_stream(
     name: str, T_in_K: float, T_out_K: float, Q_kW: float,
     h_W_m2K: float = H_LIQUID_LIQUID_W_M2K,
+    phase:   str   = StreamPhase.LIQUID,
 ) -> Optional[HIStream]:
     """温度差を持つ顕熱ストリームを HIStream に変換する。
 
-    Q_kW が小さい (< 1e-6) または T_in == T_out の場合は None を返す
-    (HI には影響しない)。
-
-    F_Cp = |Q| / |T_in - T_out| として逆算する。
-    is_hot は T_in_K > T_out_K で自動判定されるため、Q の符号は使わない。
-    呼び出し側で T_in/T_out の順序を物理に合わせて指定する責任あり
-    (例: 冷却なら T_in > T_out)。
+    Q_kW が小さい (< 1e-6) または T_in == T_out の場合は None を返す。
+    phase は contest §4-4 U 表索引用 (StreamPhase.GAS or LIQUID)。
     """
     if abs(Q_kW) < 1e-6:
         return None
@@ -874,6 +920,7 @@ def _make_sensible_stream(
         name=name, T_in_K=T_in_K, T_out_K=T_out_K,
         F_Cp_kW_per_K=abs(Q_kW) / dT,
         h_W_m2K=h_W_m2K,
+        phase=phase,
     )
 
 
@@ -883,23 +930,25 @@ def _make_latent_stream(
 ) -> Optional[HIStream]:
     """潜熱のみのストリーム (T_in == T_out) を構築。
 
-    is_hot=True なら冷却される側 (例: 蒸留塔コンデンサ)、False なら加熱される側 (リボイラ)。
-    HIStream 規約: T_in > T_out で hot 自動判定。
-    潜熱のみは温度同一なので、is_hot に応じて微小温度差 (1e-3 K) を付ける。
+    is_hot=True (= 冷却される hot) は CONDENSING (ガス凝縮)、
+    is_hot=False (= 加熱される cold) は EVAPORATING (液蒸発)。
     """
     if Q_kW < 1e-6:
         return None
     eps = 1e-3
     if is_hot:
         T_in_K, T_out_K = T_K + eps, T_K - eps
+        phase = StreamPhase.CONDENSING
     else:
         T_in_K, T_out_K = T_K - eps, T_K + eps
+        phase = StreamPhase.EVAPORATING
     return HIStream(
         name=name, T_in_K=T_in_K, T_out_K=T_out_K,
         F_Cp_kW_per_K=0.0,
         Q_latent_kW=Q_kW,
         T_phase_K=T_K,
         h_W_m2K=h_W_m2K,
+        phase=phase,
     )
 
 
@@ -908,10 +957,14 @@ def _make_sens_plus_latent_stream(
     Q_sensible_kW: float, Q_latent_kW: float,
     T_phase_K: Optional[float] = None,
     h_W_m2K: float = H_VAPORIZER_W_M2K,
+    phase:   Optional[str] = None,
 ) -> Optional[HIStream]:
     """顕熱+潜熱を持つストリーム (例: 液→気の気化器) を構築。
 
-    F_Cp = |Q_sensible| / |dT| で正値化。is_hot は T_in/T_out で判定。
+    phase: 顕熱区間の相分類 (None なら自動: hot=GAS, cold=LIQUID)。
+    潜熱区間は別途 _make_latent_stream で出すべきだが、簡略化のため
+    本関数は「顕熱+潜熱合算」した HIStream として返す。
+    targeting Bath 式では潜熱と顕熱が分けて扱われるが、phase は顕熱側に当てる。
     """
     Q_sens_abs = abs(Q_sensible_kW)
     Q_lat_abs  = abs(Q_latent_kW)
@@ -919,12 +972,16 @@ def _make_sens_plus_latent_stream(
         return None
     dT = abs(T_in_K - T_out_K)
     F_Cp = Q_sens_abs / dT if dT > 1e-6 and Q_sens_abs > 1e-6 else 0.0
+    if phase is None:
+        is_hot = T_in_K > T_out_K
+        phase  = StreamPhase.GAS if is_hot else StreamPhase.LIQUID
     return HIStream(
         name=name, T_in_K=T_in_K, T_out_K=T_out_K,
         F_Cp_kW_per_K=F_Cp,
         Q_latent_kW=Q_lat_abs,
         T_phase_K=T_phase_K,
         h_W_m2K=h_W_m2K,
+        phase=phase,
     )
 
 
@@ -954,14 +1011,15 @@ def extract_streams(
     R = one_pass
     streams: List[HIStream] = []
 
-    # ---- H1: Cooler (反応器出口冷却) ----
+    # ---- H1: Cooler (反応器出口冷却、ガス顕熱) ----
     cooled_eq  = R['cooled'].equipment
     s = _make_sensible_stream(
         'H1_rx_cooler',
         T_in_K=R['rx_out'].T_in,
         T_out_K=R['cooled'].outlet.T_in,
         Q_kW=cooled_eq.Q_sensible_kW,
-        h_W_m2K=H_LIQUID_LIQUID_W_M2K,
+        h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+        phase=StreamPhase.GAS,
     )
     if s: streams.append(s)
     # 潜熱がある場合 (現状の cooler は phase_change=False で 0)
@@ -973,31 +1031,51 @@ def extract_streams(
         )
         if s: streams.append(s)
 
-    # ---- H2: Intercool ----
+    # ---- H2: Intercool (圧縮ガス顕熱) ----
     ic_eq = R['intercool'].equipment
     s = _make_sensible_stream(
         'H2_intercool',
         T_in_K=R['comp2a'].outlet.T_in,
         T_out_K=R['intercool'].outlet.T_in,
-        Q_kW=ic_eq.Q_sensible_kW, h_W_m2K=H_LIQUID_LIQUID_W_M2K,
+        Q_kW=ic_eq.Q_sensible_kW, h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+        phase=StreamPhase.GAS,
+    )
+    if s: streams.append(s)
+
+    # ---- H3: Desuper (Comp2b → Dist2、ガス顕熱) ----
+    ds_eq = R['desuper'].equipment
+    s = _make_sensible_stream(
+        'H3_desuper',
+        T_in_K=R['comp2b'].outlet.T_in,
+        T_out_K=R['desuper'].outlet.T_in,
+        Q_kW=ds_eq.Q_sensible_kW, h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+        phase=StreamPhase.GAS,
     )
     if s: streams.append(s)
 
     # ---- C1: mem_precool (液→気、顕熱+潜熱) ----
+    # 設計判断 (2026-05-09): 顕熱区間は LIQUID、潜熱区間は EVAPORATING で別 stream に分離。
     mp_eq = R['mem_precool'].equipment
-    # 設計判断: 潜熱は出口側 (気化温度) で起こると仮定
-    s = _make_sens_plus_latent_stream(
-        'C1_mem_precool',
-        T_in_K=R['r2'].bottom.T_in,
-        T_out_K=R['mem_precool'].outlet.T_in,
-        Q_sensible_kW=mp_eq.Q_sensible_kW,
-        Q_latent_kW=mp_eq.Q_latent_kW,
-        T_phase_K=R['mem_precool'].outlet.T_in,
-        h_W_m2K=H_VAPORIZER_W_M2K,
-    )
-    if s: streams.append(s)
+    if mp_eq.Q_sensible_kW > 1e-6:
+        s = _make_sensible_stream(
+            'C1_mem_precool_sens',
+            T_in_K=R['r2'].bottom.T_in,
+            T_out_K=R['mem_precool'].outlet.T_in,
+            Q_kW=mp_eq.Q_sensible_kW,
+            h_W_m2K=H_LIQUID_LIQUID_W_M2K,
+            phase=StreamPhase.LIQUID,
+        )
+        if s: streams.append(s)
+    if mp_eq.Q_latent_kW > 1e-6:
+        s = _make_latent_stream(
+            'C1_mem_precool_lat',
+            T_K=R['mem_precool'].outlet.T_in,
+            Q_kW=mp_eq.Q_latent_kW, is_hot=False,    # → EVAPORATING
+            h_W_m2K=H_VAPORIZER_W_M2K,
+        )
+        if s: streams.append(s)
 
-    # ---- C2: Reactor preheat (混合温度 → swing.T_in、顕熱) ----
+    # ---- C2: Reactor preheat (ガス顕熱、38°C → 950K の最大 cold) ----
     Q_preheat_GJh = R['r_rx'].effluent.Q_preheat
     Q_preheat_kW  = Q_preheat_GJh * 1e9 / 3600.0 / 1000.0
     T_feed = R['reactor_inlet'].T_in
@@ -1005,6 +1083,7 @@ def extract_streams(
         'C2_rx_preheat',
         T_in_K=T_feed, T_out_K=swing_T_in, Q_kW=Q_preheat_kW,
         h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+        phase=StreamPhase.GAS,
     )
     if s: streams.append(s)
 
@@ -1020,17 +1099,27 @@ def extract_streams(
         s = _make_latent_stream(f'C_{label}_reb', T_K=T_bot, Q_kW=eq.Q_reb, is_hot=False)
         if s: streams.append(s)
         # feed preheat (受熱、顕熱: feed→T_bot)
-        # フィード入口温度は塔ごとに異なる
+        # フィード入口温度・相は塔ごとに異なる:
+        #   Dist1: pump1 outlet → 液 (高圧液)
+        #   Dist2: desuper outlet (50°C) → ガス (圧縮蒸気)
+        #   Dist3: r_mem product → 液 (膜保留側、加圧液)
         if label == 'Dist1':
-            T_feed_in = R['pump1'].outlet.T_in
+            T_feed_in    = R['pump1'].outlet.T_in
+            feed_phase   = StreamPhase.LIQUID
+            feed_h       = H_LIQUID_LIQUID_W_M2K
         elif label == 'Dist2':
-            T_feed_in = R['comp2b'].outlet.T_in
+            T_feed_in    = R['desuper'].outlet.T_in
+            feed_phase   = StreamPhase.GAS
+            feed_h       = H_HIGH_TEMP_GAS_W_M2K
         else:  # Dist3
-            T_feed_in = R['r_mem'].product.T_out
+            T_feed_in    = R['r_mem'].product.T_out
+            feed_phase   = StreamPhase.LIQUID
+            feed_h       = H_LIQUID_LIQUID_W_M2K
         s = _make_sensible_stream(
             f'C_{label}_feed_preheat',
             T_in_K=T_feed_in, T_out_K=T_bot, Q_kW=eq.Q_feed_preheat_kW,
-            h_W_m2K=H_LIQUID_LIQUID_W_M2K,
+            h_W_m2K=feed_h,
+            phase=feed_phase,
         )
         if s: streams.append(s)
 
@@ -1054,7 +1143,8 @@ def extract_streams(
             s = _make_sensible_stream(
                 'H_mem_cooler_gas',
                 T_in_K=meq.T_cond_in_K, T_out_K=meq.T_cond_out_K,
-                Q_kW=meq.Q_cond_sensible_kW, h_W_m2K=H_LIQUID_LIQUID_W_M2K,
+                Q_kW=meq.Q_cond_sensible_kW, h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+                phase=StreamPhase.GAS,
             )
             if s: streams.append(s)
         # 潜熱区間 (T_cond_out での凝縮)
@@ -1078,12 +1168,14 @@ def extract_streams(
             s = _make_sensible_stream(
                 'C_psa_preheat', T_in_K=T_psa_in, T_out_K=T_psa_out,
                 Q_kW=Q_psa, h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+                phase=StreamPhase.GAS,
             )
         else:
             # 冷却 (与熱、hot): T_in > T_out
             s = _make_sensible_stream(
                 'H_psa_precool', T_in_K=T_psa_in, T_out_K=T_psa_out,
                 Q_kW=abs(Q_psa), h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+                phase=StreamPhase.GAS,
             )
         if s: streams.append(s)
 
@@ -1103,39 +1195,51 @@ def _is_nan(x: float) -> bool:
 # ===========================================================================
 
 # economics.py の opex キー → 熱の種別 マッピング
-# 動的キー (utility_selector が tier 名を入れる) は接頭辞で判定する。
-# economics.py の構造変更時はこのテーブルも更新が必要。
+#
+# 設計判断 (2026-05-09): economics.py が utility 名を動的に埋め込むスタイル
+# (例: 'Dist1リボイラ (LP Steam≒)') に変わったので、固定 key 表は使えない。
+# prefix ベースで判定する (より長く・特異な prefix を先に置く)。
+#
+# economics.py の opex キー命名が変わったら本テーブルを更新すること。
+#
+# 規約: 順序が意味を持つ (前から走査して先に match した prefix を採用)。
+# 例: 'PSA予熱冷却 (...)' は 'PSA予熱' より先に書いて cold と判定させる。
+_OPEX_PREFIX_HEAT_KIND_ORDERED: List[Tuple[str, str]] = [
+    # PSA予熱: 熱方向に応じて分岐 (具体度の高い順に並べる)
+    ('PSA予熱冷却',         'cold'),   # T_in > 25°C のとき (現状はほぼ発生しない)
+    ('PSA予熱',             'hot'),    # T_in < 25°C のとき (Dist2 partial cond で発生)
+    # 蒸留塔 リボイラ・フィード予熱・コンデンサ
+    ('Dist1リボイラ',       'hot'),
+    ('Dist2リボイラ',       'hot'),
+    ('Dist3リボイラ',       'hot'),
+    ('Dist1フィード予熱',   'hot'),
+    ('Dist2フィード予熱',   'hot'),
+    ('Dist3フィード予熱',   'hot'),
+    ('Dist1コンデンサ',     'cold'),
+    ('Dist2コンデンサ',     'cold'),
+    ('Dist3コンデンサ',     'cold'),
+    # 個別熱交換器 (utility_selector で tier 名動的)
+    ('Cooler',              'cold'),   # 反応器出口冷却
+    ('Intercool',           'cold'),   # 圧縮段間冷却
+    ('Desuper',             'cold'),   # Comp2b → Dist2 desuperheater
+    ('MemPrecool',          'hot'),    # 液→気化 (加熱)
+]
+
+# 完全一致が必要な fixed key (utility 名を含まない単純 key)
 _OPEX_FIXED_HEAT_KEY_KIND: Dict[str, str] = {
-    # 加熱系 (potential heat consumers, OPEX として加熱用役を購入)
-    'Dist1リボイラ蒸気':       'hot',
-    'Dist2リボイラ蒸気':       'hot',
-    'Dist3リボイラ蒸気':       'hot',
-    'Mem気化器蒸気':            'hot',
-    'Reactor予熱燃料':         'hot',
-    'Dist1フィード予熱蒸気':    'hot',
-    'Dist2フィード予熱蒸気':    'hot',
-    'Dist3フィード予熱蒸気':    'hot',
-    # 冷却系
-    'Dist1コンデンサ冷水':      'cold',
-    'Dist2コンデンサ冷水':      'cold',
-    'Dist3コンデンサ冷水':      'cold',
-    'Mem冷却器冷水':            'cold',
-}
-# 接頭辞ベースの判定 (utility_selector が動的に tier 名を埋める)
-_OPEX_PREFIX_HEAT_KIND: Dict[str, str] = {
-    'Cooler':     'cold',   # 反応器出口冷却
-    'Intercool':  'cold',   # 圧縮段間冷却
-    'MemPrecool': 'hot',    # 液→気化 (加熱)
+    'Mem気化器蒸気':       'hot',
+    'Reactor予熱燃料':     'hot',
+    'Mem冷却器冷水':       'cold',
 }
 
 
 def classify_heat_opex_key(key: str) -> Optional[str]:
     """economics.opex のキーから熱の種別 ('hot'/'cold') を返す。
 
-    熱関連でない (電力・触媒など) は None。
-    economics.py の opex キーが変わったら _OPEX_*_KEY_KIND を更新すること。
+    熱関連でない (電力・触媒・吸着剤・原料費等) は None。
     """
-    for prefix, kind in _OPEX_PREFIX_HEAT_KIND.items():
+    # prefix を順に試す (順序が意味を持つ)
+    for prefix, kind in _OPEX_PREFIX_HEAT_KIND_ORDERED:
         if key.startswith(prefix):
             return kind
     return _OPEX_FIXED_HEAT_KEY_KIND.get(key)
@@ -1234,6 +1338,84 @@ def calc_hi_opex_okuyen(
         'breakdown':  breakdown,
         'unmatched':  unmatched,
     }
+
+
+def apply_hi_to_economics(
+    economics,                                  # flowsheet.economics.Economics
+    hi_result:                  HIResult,
+    heating_tiers:              List[UtilityTier],
+    cooling_tiers:              List[UtilityTier],
+    operating_hours_per_year:   float = 8000.0,
+    depreciation_years:         int   = 8,
+):
+    """既存 Economics に HI (pinch targeting) を適用した新 Economics を返す。
+
+    熱系 OPEX (utility による加熱・冷却) を HI tier 別 OPEX で置換する。
+    非熱系 OPEX (触媒交換、吸着剤交換、原料費、電力) と Revenue・CAPEX は
+    そのまま継承する。
+
+    設計判断 (2026-05-09):
+      Phase 1+2 では「HI targeting only」を実装。物理 HE network は合成せず、
+      理論限界 OPEX (Q_H_min, Q_C_min を tier 配分したもの) を採用する。
+      CAPEX は据え置き (実機の HE はそのまま、HI 適用で安くなった OPEX のみ反映)。
+      Phase 3 で HEN CAPEX 置換を実装予定。
+
+    Parameters
+    ----------
+    economics : Economics
+        HI なし元データ (calculate_economics の戻り値)
+    hi_result : HIResult
+        pinch_analysis の戻り値
+    heating_tiers, cooling_tiers : List[UtilityTier]
+    operating_hours_per_year : float
+    depreciation_years : int
+
+    Returns
+    -------
+    Economics
+        HI 適用後の新インスタンス (元のは破壊しない)
+    """
+    # 循環 import 回避のため遅延 import
+    from copy import deepcopy
+    from flowsheet.economics import Economics
+
+    # ---- HI 後 OPEX を構築 ----
+    new_opex: Dict[str, float] = {}
+
+    # 非熱系のみコピー (例: 電力、触媒、吸着剤、原料費)
+    for k, v in economics.opex.items():
+        if classify_heat_opex_key(k) is None:
+            new_opex[k] = v
+
+    # HI tier 別 OPEX を「HI:」プレフィクス付きで追加
+    hi_opex_calc = calc_hi_opex_okuyen(
+        hi_result, heating_tiers, cooling_tiers,
+        operating_hours_per_year=operating_hours_per_year,
+    )
+    for tier_name, cost in hi_opex_calc['breakdown'].items():
+        new_opex[f'HI: {tier_name}'] = cost
+
+    # ---- 集計値の再計算 ----
+    new_total_opex    = sum(new_opex.values())
+    new_TAC           = economics.total_capex / depreciation_years + new_total_opex
+    new_profit        = economics.total_revenue - new_TAC
+    new_unit_jpy_per_t = (
+        new_TAC * 1.0e8 / (economics.annual_kg_C3H6 / 1000.0)
+        if economics.annual_kg_C3H6 > 0 else float('inf')
+    )
+
+    return Economics(
+        capex          =deepcopy(economics.capex),
+        opex           =new_opex,
+        revenue        =deepcopy(economics.revenue),
+        total_capex    =economics.total_capex,
+        total_opex     =new_total_opex,
+        total_revenue  =economics.total_revenue,
+        TAC            =new_TAC,
+        profit         =new_profit,
+        annual_kg_C3H6 =economics.annual_kg_C3H6,
+        unit_jpy_per_t =new_unit_jpy_per_t,
+    )
 
 
 def get_default_utility_tiers() -> Tuple[List[UtilityTier], List[UtilityTier]]:
