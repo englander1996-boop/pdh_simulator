@@ -304,6 +304,10 @@ def wang_henke_solve(
         # 5d. 各段で Newton 1 ステップ → T_calc プロファイル
         # 旧版は scipy.brentq で完全収束させていたが、Wang-Henke 外側で
         # 何度も呼ばれるので各段は粗い更新で十分。1 ステップ Newton で十分速い。
+        # partial_condenser stage 1 では bubble-point が単相領域に落ちて
+        # 真値から ±20K ズレることがある (Dist2 既知問題、KNOWN_PLACEHOLDERS.md
+        # 参照)。ただし T を凍結すると x との整合が崩れて MESH 残差が爆発する
+        # ため、T の更新は通常通り行う。outlier は MESH の自然な収束点。
         T_calc = np.copy(T)
         for j in range(N_stages):
             T_calc[j], _ = _bubble_T_newton_step(

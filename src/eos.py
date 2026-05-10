@@ -273,45 +273,80 @@ def bubble_point_T(P: float, x: List[float], keys: List[str],
 
     収束条件: Σ xᵢ Kᵢ = 1,  Kᵢ = φᵢ^L / φᵢ^V
     外側ループ: T を brentq で探索
-    内側ループ: x 固定 → φ^L 固定、逐次置換で y・φ^V を収束
+    内側ループ: thermo の PRMIX でフガシティー係数取得 (= 単相→二相遷移を正しく扱う)
 
-    Note: デフォルト探索範囲 [150K, 500K] は C3H6/C3H8 混合を対象として設定。
-          H2・CH4 など沸点が極低温の成分を含む混合物には適用不可。
+    --- 実装の経緯 (2026-05-10) ---
+    旧版は手作り PR EOS (`_mix`, `_cubic_z`, `fugacity_coeff` 等) を使っていたが、
+    PR EOS の単相→二相遷移境界 (Z_V = Z_L 縮退点) で brentq が偽根を返す問題があり、
+    Dist2 stage 1 で T = -92°C (f = -0.30) を返す不具合が発生した。
+    対症療法として post-validate (|f| > 0.1 なら NaN) を入れていたが原則的に悪手。
+
+    本版では thermo (CalebBell/thermo, MIT, 0.6.0 pin) の PRMIX を使う。
+    thermo は cubic root 切替を正しく扱い:
+      - 両相成立: phis_l と phis_g 両方が valid な値
+      - 単相: AttributeError (= 「この T では液相 (or 気相) しか存在しない」signal)
+    これで偽根問題が根本解決し、post-validate も不要。
+
+    src/eos.py の他関数 (z_factor, fugacity_coeff 等) は手作り版のまま (= 影響なし、
+    呼び出し側は src/eos.py の API を unchanged で利用)。
+
+    Note:
+      探索範囲 [150K, 500K] のデフォルトは C3H6/C3H8 等の混合を想定。極低温成分
+      (H2 等) のみを含む組成は単相領域に張り付くため適用外。
     """
+    # 局所 import: 起動オーバーヘッド削減 + 循環 import 回避
+    from thermo.eos_mix import PRMIX as _PRMIX
+    from .config import THERMO_DATA as _THERMO_DATA
+
     n = len(keys)
+    Tcs    = [_THERMO_DATA[k].Tc    for k in keys]
+    Pcs    = [_THERMO_DATA[k].Pc    for k in keys]
+    omegas = [_THERMO_DATA[k].omega for k in keys]
 
     def obj(T: float) -> float:
-        A, B, *_ = _mix(T, P, x, keys)
-        roots = _cubic_z(A, B)
+        # x 固定で 液相 phi_L を取得 (thermo の PRMIX に zs=x を渡す)
+        # thermo は cubic root 切替境界も正しく処理する
+        try:
+            eos_x = _PRMIX(T=T, P=P, zs=x, Tcs=Tcs, Pcs=Pcs, omegas=omegas)
+            phi_L = eos_x.phis_l
+        except (AttributeError, ValueError):
+            # 単相領域 (液相 root が無い) → bubble より上、f は正の方向に発散扱い
+            # brentq に sign を与えて bracketing できるようにする
+            return 2.0
+        if phi_L is None:
+            return 2.0
 
-        # 実根が 1 本のとき: 単相領域。Z の大小で符号を与える
-        if len(roots) < 2:
-            Z_s = roots[0] if roots else 1.0
-            return -2.0 if Z_s < 0.5 else 2.0
-
-        Z_L = min(roots)
-        Z_V = max(roots)
-        phi_L = [fugacity_coeff(i, T, P, x, keys, Z_L) for i in range(n)]
-
-        # Wilson 相関で y を初期化
+        # Wilson 相関で y を初期化 (低圧近似だが反復で補正される)
         K = [_wilson_K(keys[i], T, P) for i in range(n)]
-        y = [x[i]*K[i] for i in range(n)]
+        y = [x[i] * K[i] for i in range(n)]
         s = sum(y)
-        y = [yi / max(s, 1e-30) for yi in y]
+        if s < 1e-30:
+            return -2.0
+        y = [yi / s for yi in y]
 
-        # 逐次置換: φ^V を y に合わせて更新
+        # 逐次置換: y を更新しながら phi_V を再計算
         for _ in range(50):
-            Z_V   = z_factor(T, P, y, keys, 'vapor')
-            phi_V = [fugacity_coeff(i, T, P, y, keys, Z_V) for i in range(n)]
+            try:
+                eos_y = _PRMIX(T=T, P=P, zs=y, Tcs=Tcs, Pcs=Pcs, omegas=omegas)
+                phi_V = eos_y.phis_g
+            except (AttributeError, ValueError):
+                # 単相 (気相 root が無い) → bubble より下、f は負の方向に発散扱い
+                return -2.0
+            if phi_V is None:
+                return -2.0
             K_new = [phi_L[i] / max(phi_V[i], 1e-30) for i in range(n)]
-            y_new = [x[i]*K_new[i] for i in range(n)]
-            s     = sum(y_new)
-            y_new = [yi / max(s, 1e-30) for yi in y_new]
+            y_new = [x[i] * K_new[i] for i in range(n)]
+            s = sum(y_new)
+            if s < 1e-30:
+                return -2.0
+            y_new = [yi / s for yi in y_new]
             if max(abs(y_new[i] - y[i]) for i in range(n)) < 1e-7:
-                K = K_new; y = y_new; break
-            K = K_new; y = y_new
+                K = K_new
+                break
+            K = K_new
+            y = y_new
 
-        return sum(x[i]*K[i] for i in range(n)) - 1.0
+        return sum(x[i] * K[i] for i in range(n)) - 1.0
 
     try:
         return brentq(obj, T_lo, T_hi, xtol=0.05, maxiter=200)

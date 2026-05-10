@@ -1,0 +1,23 @@
+# PDH simulator プロジェクト設定 (2026-05-10 整備)
+# pip / uv / poetry 等のパッケージマネージャが参照する標準形式。
+# requirements.txt と内容が重複するが、より広いツール互換性のため両方置く。
+
+[project]
+name = "pdh-simulator"
+version = "0.1.0"
+description = "Propane Dehydrogenation (PDH) process simulator with FUG/VLE distillation"
+requires-python = "==3.13.*"   # = ".venv は Python 3.13 系で構築する想定"
+
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.13",
+    # 物性パッケージ pin (PR EOS bubble point の偽根問題を回避するため固定)
+    "thermo==0.6.0",
+    "chemicals==1.5.1",
+    "fluids==1.3.0",
+    "tomli>=2.0",
+]
+
+[project.optional-dependencies]
+# pandas は thermo の dependency にも含まれるが明示
+analysis = ["pandas"]
