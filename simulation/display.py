@@ -31,6 +31,66 @@ def hdr(title: str) -> None:
     print('=' * 64)
 
 
+def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
+    """実験条件のスナップショットを出力 (PDF 冒頭・log 先頭に入る)。
+
+    Parameters
+    ----------
+    design : FlowsheetDesignVars
+        全 unit の設計変数。dist1/2/3 の solver_method も含む。
+    config : OperatingConfig, optional
+        現状未使用 (将来 spec 値などを表示する場合に拡張)。
+    eval_kwargs : dict, optional
+        evaluate() に渡された kwargs (apply_hi, apply_stage2, hi_dT_min_K 等)。
+        None なら省略表示。
+    """
+    from datetime import datetime as _dt
+    print("=" * 72)
+    print(f"  実行スナップショット ({_dt.now().strftime('%Y-%m-%d %H:%M:%S')})")
+    print("=" * 72)
+    print()
+    sw = design.swing
+    print("[反応器 (Swing)]")
+    print(f"  T_in = {sw.T_in} K, z_cat = {sw.z_cat} m, t_cyc = {sw.t_cyc} min, D = {sw.D} m")
+    print()
+    psa = design.psa
+    print("[PSA]")
+    print(f"  D_col = {psa.D_col} m, L_bed = {psa.L_bed} m, desorption_target = {psa.desorption_target}")
+    print()
+    mem = design.mem
+    print("[Membrane]")
+    print(f"  P_H = {mem.P_H/1e5:.2f} bar, P_L = {mem.P_L/1e5:.2f} bar, A_mem = {mem.A_mem:.2e} m²")
+    print()
+    for label, col in [('Dist1 (脱ブタン塔)', design.dist1),
+                       ('Dist2 (脱エタン塔, partial cond)', design.dist2),
+                       ('Dist3 (C3 スプリッタ)', design.dist3)]:
+        print(f"[{label}]")
+        print(f"  P = {col.P_col/1e5:.1f} bar, N = {col.N_stages}, "
+              f"N_feed = {col.N_feed}, R = {col.reflux_ratio}")
+        print(f"  solver = {col.solver_method}")
+        print()
+
+    if eval_kwargs:
+        print("[評価オプション (evaluate 引数)]")
+        for k, v in eval_kwargs.items():
+            print(f"  {k:<22} = {v}")
+        print()
+
+    print("[使用モデル・出典]")
+    print(f"  EOS              : Peng-Robinson 1976 (src/eos.py)")
+    print(f"  bubble_point_T   : thermo (CalebBell, MIT v0.6.0) 内部実装、API は src/eos.py")
+    print(f"  蒸留塔 (FUG)      : Fenske-Underwood-Gilliland shortcut")
+    print(f"  蒸留塔 (rigorous) : Wang-Henke MESH + Newton + Wegstein "
+          f"(Seader/Henley/Roper Ch.10.4)")
+    print(f"  HE U 値           : 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 表")
+    print(f"  蒸留塔径 G*       : contest §4-2 (SF=0.8, K=0.05 m/s)")
+    print(f"  Furnace 効率 0.85: 化工便覧 18·4·3 表 18·11")
+    print(f"  Compressor η_poly 0.75 (polytropic): 化工便覧 p.333")
+    print(f"  Pump 効率 0.70   : 化工便覧 5·6·4 例題 5·8")
+    print()
+    print("=" * 72)
+
+
 def show_stream(label: str, stream) -> None:
     parts = [f"{_COMP_NAMES.get(k, k)}:{v:.1f}"
              for k, v in sorted(stream.F_in.items()) if v > 0.01]

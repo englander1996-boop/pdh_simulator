@@ -13,6 +13,7 @@ simulation モジュール — exp 用の定型処理 (結果表示など) を�
 
 from simulation.display import (
     display_full_results, hdr, show_stream,
+    show_input_snapshot,
     show_hi_summary, show_hi_comparison,
     show_stage2_synthesis, show_stage2_comparison,
 )
@@ -21,6 +22,7 @@ __all__ = [
     'display_full_results',
     'hdr',
     'show_stream',
+    'show_input_snapshot',
     'show_hi_summary',
     'show_hi_comparison',
     'show_stage2_synthesis',

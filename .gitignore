@@ -6,3 +6,6 @@ __pycache__/
 data/
 # Claude Code等のAIツールの履歴があれば（任意）
 .claude/
+
+# 実験出力 (各実行毎に生成、版管理対象外)
+outputs/
