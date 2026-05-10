@@ -1,0 +1,22 @@
+# PDH simulator 依存パッケージ (2026-05-10 整備)
+#
+# pin はバージョン互換性のため。upgrade する際は tests/validate_wang_henke.py で
+# 全 48 検査が PASS することを確認すること。
+#
+# Python version: 3.13.0 で動作確認済み (.venv は Python 3.13 で構築)
+#   別 Python で動かす場合は .python-version ファイルか pyenv で固定推奨。
+
+# 主要数値計算
+numpy>=2.0
+scipy>=1.13
+
+# 物性パッケージ (PR EOS bubble point に使用、src/eos.py 内部実装)
+# pin の理由 (2026-05-10): PR EOS の cubic root 切替境界での挙動が安定して
+# 偽根を返さないバージョンとして 0.6.0 を確認済。
+# 上位版で API/挙動変化が起きた場合は src/eos.py の wrapper だけ更新で対応。
+thermo==0.6.0
+chemicals==1.5.1
+fluids==1.3.0
+
+# 設定ファイル
+tomli>=2.0

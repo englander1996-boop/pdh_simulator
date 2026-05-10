@@ -60,13 +60,27 @@ class FlowsheetResult:
         return self.failure_reason == ""
 
 
+#  各塔の (LK, HK, recovery_spec) — column1/2/3.py の wrapper と一致。
+#  strict_recovery_check で参照する。
+_COLUMN_RECOVERY_SPECS = {
+    'r1': {'LK': 'A', 'HK': 'Z', 'rec_LK_top': 0.99, 'rec_HK_bot': 0.99,
+           'partial_cond': False, 'name': 'Dist1'},
+    'r2': {'LK': 'F', 'HK': 'A', 'rec_LK_top': 0.99, 'rec_HK_bot': 0.99,
+           'partial_cond': True,  'name': 'Dist2'},
+    'r3': {'LK': 'B', 'HK': 'A', 'rec_LK_top': 0.99, 'rec_HK_bot': 0.99,
+           'partial_cond': False, 'name': 'Dist3'},
+}
+
+
 def evaluate(
-    design:       FlowsheetDesignVars,
-    config:       OperatingConfig,
-    verbose:      bool  = False,
-    apply_hi:     bool  = True,
-    hi_dT_min_K:  float = 10.0,
-    apply_stage2: bool  = False,
+    design:                 FlowsheetDesignVars,
+    config:                 OperatingConfig,
+    verbose:                bool  = False,
+    apply_hi:               bool  = True,
+    hi_dT_min_K:            float = 10.0,
+    apply_stage2:           bool  = False,
+    strict_recovery_check:  bool  = False,
+    recovery_tolerance:     float = 0.10,
 ) -> FlowsheetResult:
     """設計変数を入力してフローシートを評価し、effective_TAC と状態を返す。
 
@@ -85,10 +99,30 @@ def evaluate(
         を実行する。**top-k 候補の re-evaluation 用**で、BO ループには通常含めない
         (greedy アルゴリズムは smooth でなく、計算もやや重め)。
         apply_hi=True のときのみ意味を持つ (apply_hi=False では何もしない)。
+    strict_recovery_check : bool
+        True のとき、exp1 outer-loop 収束後に各蒸留塔の **実際の recovery が spec
+        ±recovery_tolerance 以内か** を検査し、未達なら failure 扱いにする。
+        BO で rigorous 使用時に「数値収束したが物理的に non-spec」な解を捕捉する用。
+        recycle iter 中の transient state ではなく、全体収束後の最終状態を検査するので
+        過敏発動しない。デフォルト False (= 既存挙動維持、product spec check のみ)。
+    recovery_tolerance : float
+        strict_recovery_check 時の許容偏差 (デフォルト 0.10 = ±10%)。
+        partial_condenser の HK_bot は ≥ spec - tolerance を許容
+        (ALWAYS_CONDENSABLE 補正で 100% になるため)。
     """
-    solver_result = solve_flowsheet(design, config, verbose=verbose)
-
     pen = config.penalty
+
+    # 設計判断 (2026-05-10): solve_flowsheet が ValueError 等の例外を投げる場合
+    # (例: Dist1 N=N_min 完全 infeasible で下流の expansion_valve が流量ゼロ受領)、
+    # BO 用途では penalty 返却が望ましい。catch して solver_failure として扱う。
+    try:
+        solver_result = solve_flowsheet(design, config, verbose=verbose)
+    except Exception as e:
+        return FlowsheetResult(
+            solver=None, economics=None, specs=None,
+            effective_TAC=pen.solver_failure_okuyen,
+            failure_reason=f"solve_flowsheet で未処理例外: {type(e).__name__}: {e}",
+        )
 
     # ---- (a) solver-level 失敗 → ハード打ち切り ----
     # 設計判断: 結果の数値が信頼できない場合 (発散・暴走・未収束) は固定値で打ち切る。
@@ -115,6 +149,43 @@ def evaluate(
                 f"外側{'未' if not solver_result.outer_status.converged else ''}収束"
             ),
         )
+
+    # ---- (a') strict recovery check (BO で rigorous 使用時の追加検査) ----
+    # 設計判断 (2026-05-10): exp1 outer-loop 収束後の最終状態で各塔 recovery を
+    # 確認する。recycle iter の transient state では誤発動するので、ここで
+    # 全体収束後にだけ検査する。non-spec 解 → solver_failure penalty。
+    if strict_recovery_check:
+        for col_key, spec in _COLUMN_RECOVERY_SPECS.items():
+            col_result = solver_result.one_pass.get(col_key)
+            if col_result is None:
+                continue
+            top, bot = col_result.top.F_in, col_result.bottom.F_in
+            # フィードを再構築 (top + bot で復元)
+            feed_LK = top.get(spec['LK'], 0.0) + bot.get(spec['LK'], 0.0)
+            feed_HK = top.get(spec['HK'], 0.0) + bot.get(spec['HK'], 0.0)
+            if feed_LK > 1e-3:
+                lk_rec = top.get(spec['LK'], 0.0) / feed_LK
+                if abs(lk_rec - spec['rec_LK_top']) > recovery_tolerance:
+                    return FlowsheetResult(
+                        solver=solver_result, economics=None, specs=None,
+                        effective_TAC=pen.solver_failure_okuyen,
+                        failure_reason=(
+                            f"strict recovery check: {spec['name']} LK ({spec['LK']}) "
+                            f"recovery={lk_rec:.3f} vs spec {spec['rec_LK_top']:.3f} "
+                            f"(差 > {recovery_tolerance*100:.0f}%)"
+                        ),
+                    )
+            if feed_HK > 1e-3 and not spec['partial_cond']:
+                hk_rec = bot.get(spec['HK'], 0.0) / feed_HK
+                if abs(hk_rec - spec['rec_HK_bot']) > recovery_tolerance:
+                    return FlowsheetResult(
+                        solver=solver_result, economics=None, specs=None,
+                        effective_TAC=pen.solver_failure_okuyen,
+                        failure_reason=(
+                            f"strict recovery check: {spec['name']} HK ({spec['HK']}) "
+                            f"bot recovery={hk_rec:.3f} vs spec {spec['rec_HK_bot']:.3f}"
+                        ),
+                    )
 
     # ---- solver 成功: 経済計算 + spec 判定 ----
     economics = calculate_economics(

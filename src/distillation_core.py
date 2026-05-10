@@ -692,6 +692,20 @@ def _simulate_rigorous(
             f" solver 内部不整合の疑い。"
         )
 
+    # ---- recovery spec 達成度チェックは撤去 (2026-05-10 終夜) ----
+    # 当初 N=N_min ぎりぎりで rigorous が non-spec 解を返すケースの検出を狙ったが、
+    # 実装すると以下の理由で本来 OK な解も fallback してしまう:
+    #   - exp1 の recycle iter 中 transient state で feed 組成が大きく変動
+    #   - その時の rigorous recovery が一時的に spec から外れて誤発動
+    #   - run_one_pass.py:94 の `warnings.simplefilter("ignore")` で warning も
+    #     見えず silent fallback になり、Profit が 1 億円/年 過小評価
+    # 既存の safety net で十分:
+    #   - FUG の N >= N_min, R >= R_min check (極端ケース弾く)
+    #   - Wang-Henke の tridiagonal LinAlg failure (matrix singular catch)
+    #   - MESH 残差 check (B_bottoms 級バグ検出)
+    #   - 成分マスバランス check (同上)
+    # rating mode で recovery が物理的に動くこと自体は正常挙動。
+
     # ---- 3. partial condenser の場合: C3 強制移動補正は不要 (rigorous は物理的に正しい) ----
     # FUG では Step 5b で ALWAYS_CONDENSABLE_COMPS のヒューリスティック補正を
     # 行ったが、rigorous では VLE 物理から自然に C3 が塔底へ振り分けられる。
@@ -740,11 +754,29 @@ def _simulate_rigorous(
         lam_bot = _weighted_lambda(F_bot)
         Q_reb_kW = V_prime_kmolh * lam_bot * 1000.0 / 3600.0
 
-    # ---- 6. utility 選択は FUG 結果を流用 (rigorous で T_top/T_bot 微変動するが tier は変わらないことが多い) ----
-    cond_utility_name      = eq.cond_utility_name
-    cond_utility_jpy_per_GJ = eq.cond_utility_jpy_per_GJ
-    reb_utility_name       = eq.reb_utility_name
-    reb_utility_jpy_per_GJ  = eq.reb_utility_jpy_per_GJ
+    # ---- 6. utility 選択を rigorous T_top/T_bot で再評価 ----
+    # Bug fix (2026-05-10 終夜): 旧版は FUG 結果の utility を流用していたが、
+    # rigorous で T_top が大きく動いた場合 (Dist2 で FUG -38°C → rig -73°C 等)
+    # FUG の冷媒 tier が温度未到達で ΔT 違反 → 例外で FUG fallback してた。
+    # rigorous 結果で再選択して整合させる。
+    _T_COOLING_FLOOR = 173.15 + 10.0 + 1.0    # = -89°C: -100°C 冷媒 + 10K approach
+    T_top_for_util = max(T_top, _T_COOLING_FLOOR)
+    try:
+        cond_utility = select_cooling_utility(T_top_for_util, mode='continuous')
+    except ValueError:
+        raise RuntimeError(
+            f"rigorous T_top={T_top-273.15:.1f}°C で冷媒選択不可"
+        )
+    try:
+        reb_utility = select_heating_utility(T_bot, mode='continuous')
+    except ValueError:
+        raise RuntimeError(
+            f"rigorous T_bot={T_bot-273.15:.1f}°C で熱媒選択不可"
+        )
+    cond_utility_name       = cond_utility.name
+    cond_utility_jpy_per_GJ = cond_utility.jpy_per_GJ
+    reb_utility_name        = reb_utility.name
+    reb_utility_jpy_per_GJ  = reb_utility.jpy_per_GJ
 
     # ---- 7. A_cond, A_reb の再計算 (contest §4-4 表ベース、FUG パスと同じ式) ----
     cond_T_in  = _supply_T_for_utility(cond_utility_name)
