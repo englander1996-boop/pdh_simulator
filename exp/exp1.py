@@ -32,7 +32,7 @@ from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
-from simulation import display_full_results, hdr
+from simulation import display_full_results, hdr, show_input_snapshot
 
 
 # ===========================================================================
@@ -112,9 +112,9 @@ reflux_dist3   = 12.0      # -       還流比 (R_min ≈ 10、下限 11 まで)
 #   - 物理検証: Dist1/Dist2 を 'rigorous'、Dist3 は 'fug' (margin 豊富で FUG で十分、
 #     実機相当 N で recovery spec も達成される)
 #   - 完全厳密: 全塔 'rigorous' (~12 分/評価、デバッグ用)
-SOLVER_DIST1 = 'rigorous'    # 脱ブタン塔 (narrow-margin、rigorous で現実が見える)
-SOLVER_DIST2 = 'rigorous'    # 脱エタン塔 (partial cond、rigorous で物理が正しい)
-SOLVER_DIST3 = 'rigorous'         # C3 スプリッタ (margin 豊富、FUG で十分、Dist3 rigorous は重すぎ)
+SOLVER_DIST1 = 'fug'    # 脱ブタン塔 (narrow-margin、rigorous で現実が見える)
+SOLVER_DIST2 = 'fug'    # 脱エタン塔 (partial cond、rigorous で物理が正しい)
+SOLVER_DIST3 = 'fug'         # C3 スプリッタ (margin 豊富、FUG で十分、Dist3 rigorous は重すぎ)
 
 
 # ===========================================================================
@@ -168,16 +168,87 @@ HI_DT_MIN_K  = 10.0       # ピンチ最小接近温度差 (textbook 標準、BO
 
 
 # ===========================================================================
+#  出力モード
+# ===========================================================================
+#  False: ターミナルに出力 (デフォルト、デバッグ用)
+#  True : outputs/exp1_<YYYYMMDDHHMM>.txt に保存 (実験管理用)
+#         ファイル名のタイムスタンプで複数実行を時系列管理可能。
+#         outputs/ 配下は .gitignore で git 対象外。
+SAVE_OUTPUT = True
+
+
+# ===========================================================================
 #  実行 + 結果表示 (ここも通常触らない)
 # ===========================================================================
+import io
+import contextlib
+from datetime import datetime
+from pathlib import Path
+
 config = load_operating_config()
 
-hdr("外側ループ: 製品流量厳密化 (Fresh を調整)")
-result = evaluate(design, config, verbose=True,
-                  apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
-                  apply_stage2=APPLY_STAGE2)
 
-display_full_results(result, design, config)
+def _run_simulation():
+    """exp1 のメイン処理を関数化 (stdout redirect で PDF 出力対応)。"""
+    eval_kwargs = {
+        'apply_hi':     APPLY_HI,
+        'apply_stage2': APPLY_STAGE2,
+        'hi_dT_min_K':  HI_DT_MIN_K,
+    }
+    show_input_snapshot(design, config, eval_kwargs)
+    hdr("外側ループ: 製品流量厳密化 (Fresh を調整)")
+    res = evaluate(design, config, verbose=True,
+                   apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
+                   apply_stage2=APPLY_STAGE2)
+    display_full_results(res, design, config)
+    return res
+
+
+if SAVE_OUTPUT:
+    # 出力を文字列にキャプチャしてから txt ファイルに保存。
+    # stdout を redirect する間、ターミナルには「動いてる」progress を stderr で表示。
+    import threading
+
+    timestamp = datetime.now().strftime("%Y%m%d%H%M")
+    print(f"[exp1] 計算中... (出力先 outputs/exp1_{timestamp}.txt)", file=sys.stderr, flush=True)
+
+    _stop_progress = threading.Event()
+    # 外側 iter の進行を buf から読み取って % 推定
+    # 通常 5-7 iter で収束するので 6 を分母に。実際の iter 数を超えても 95% で頭打ち。
+    EXPECTED_OUTER_ITERS = 6
+
+    def _progress_ticker():
+        elapsed = 0
+        while not _stop_progress.wait(5.0):    # 5 秒ごと更新
+            elapsed += 5
+            text = buf.getvalue()
+            n_outer = text.count('[外側 iter ')
+            # 外側 iter 数で粗く % を推定 (収束まで 1〜n の進行)
+            pct = min(95, max(5, int(n_outer * 100 / EXPECTED_OUTER_ITERS)))
+            phase = f"外側 iter {n_outer}/~{EXPECTED_OUTER_ITERS}" if n_outer > 0 else "初期化中"
+            print(f"  ... {elapsed}s 経過、{phase} (推定 ~{pct}%)",
+                  file=sys.stderr, flush=True)
+
+    _ticker = threading.Thread(target=_progress_ticker, daemon=True)
+    _ticker.start()
+
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            result = _run_simulation()
+    finally:
+        _stop_progress.set()
+        _ticker.join(timeout=1.0)
+
+    captured = buf.getvalue()
+    out_dir = Path(__file__).resolve().parent.parent / 'outputs'
+    out_dir.mkdir(parents=True, exist_ok=True)
+    txt_path = out_dir / f'exp1_{timestamp}.txt'
+    txt_path.write_text(captured, encoding='utf-8')
+    print(f"[exp1] 完了 → {txt_path}  ({len(captured.splitlines())} 行、"
+          f"{txt_path.stat().st_size / 1024:.1f} KB)", file=sys.stderr, flush=True)
+else:
+    result = _run_simulation()
 
 if result.economics is None:
     sys.exit(1)

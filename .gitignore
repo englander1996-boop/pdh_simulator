@@ -4,3 +4,6 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 data/
+
+# 実験出力 (各実行毎に生成、版管理対象外)
+outputs/
