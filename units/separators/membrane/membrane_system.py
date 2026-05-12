@@ -625,6 +625,8 @@ def simulate_membrane_system(
             T_vap_out, Q_vap_kW, A_vap = _vaporizer(
                 F_feed_mols, z_C3H6_feed, feed.T_in, feed.P_in, fixed
             )
+        except ImportError:
+            raise
         except Exception:
             return _penalty_result()
         # ID-10: Q_vap_kW だけでなく A_vap も nan チェック（LMTD 温度クロス時に nan になる）
@@ -638,6 +640,8 @@ def simulate_membrane_system(
             [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS,
             eta=fixed.eta_comp,
         )
+    except ImportError:
+        raise
     except Exception:
         return _penalty_result()
     W_feed_kW = F_feed_mols * W_feed_per_mol / 1e3   # [kW]
@@ -675,6 +679,8 @@ def simulate_membrane_system(
             [y_C3H6, 1.0 - y_C3H6], _KEYS,
             eta=fixed.eta_comp,
         )
+    except ImportError:
+        raise
     except Exception:
         return _penalty_result()
     W_prod_kW = F_perm_total_mols * W_prod_per_mol / 1e3   # [kW]
@@ -686,6 +692,8 @@ def simulate_membrane_system(
             T_prod_comp_out, design.P_dist,
             fixed,
         )
+    except ImportError:
+        raise
     except Exception:
         return _penalty_result()
     # ID-09/10: Q_cond_kW または A_cond が nan（圧縮機出口が泡点以下・LMTD クロス）
