@@ -29,6 +29,19 @@ from scipy.optimize import brentq
 
 from .config import THERMO_DATA, R
 
+# bubble_point_T は thermo (CalebBell, MIT, v0.6.0 pin) の PRMIX に依存する。
+# 欠落をモジュール load 時に fail-fast させる: かつて関数内 lazy import + 呼び出し側
+# の except Exception で ModuleNotFoundError がサイレントに握り潰され、PSA/Mem の
+# 偽 penalty として現れる事故があった (2026-05-12)。
+try:
+    from thermo.eos_mix import PRMIX as _PRMIX
+except ImportError as _e:
+    raise ImportError(
+        "src.eos: 必須パッケージ 'thermo' が import できません。"
+        " requirements.txt にある thermo==0.6.0 を pip install してください "
+        "(`pip install -r requirements.txt`)。"
+    ) from _e
+
 _SQRT2: float = math.sqrt(2.0)
 # Ref: Peng D.-Y. & Robinson D.B. (1976) "A New Two-Constant Equation of State",
 #      Ind. Eng. Chem. Fundam. 15(1), 59-64. Eq. (5)-(6) で Ω_a/Ω_b が臨界点条件
@@ -294,14 +307,10 @@ def bubble_point_T(P: float, x: List[float], keys: List[str],
       探索範囲 [150K, 500K] のデフォルトは C3H6/C3H8 等の混合を想定。極低温成分
       (H2 等) のみを含む組成は単相領域に張り付くため適用外。
     """
-    # 局所 import: 起動オーバーヘッド削減 + 循環 import 回避
-    from thermo.eos_mix import PRMIX as _PRMIX
-    from .config import THERMO_DATA as _THERMO_DATA
-
     n = len(keys)
-    Tcs    = [_THERMO_DATA[k].Tc    for k in keys]
-    Pcs    = [_THERMO_DATA[k].Pc    for k in keys]
-    omegas = [_THERMO_DATA[k].omega for k in keys]
+    Tcs    = [THERMO_DATA[k].Tc    for k in keys]
+    Pcs    = [THERMO_DATA[k].Pc    for k in keys]
+    omegas = [THERMO_DATA[k].omega for k in keys]
 
     def obj(T: float) -> float:
         # x 固定で 液相 phi_L を取得 (thermo の PRMIX に zs=x を渡す)
