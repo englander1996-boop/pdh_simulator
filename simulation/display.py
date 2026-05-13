@@ -322,11 +322,38 @@ def show_capex(econ) -> None:
 
 
 def show_opex(econ) -> None:
-    hdr("OPEX 内訳 [億円/年]  (utility + 触媒 + 吸着剤 + 原料費 — 全て TAC に含む)")
-    for n, v in econ.opex.items():
-        print(f"  {n:<24}: {v:9.4f}")
-    print(f"  {'-' * 36}")
-    print(f"  {'OPEX 合計':<24}: {econ.total_opex:9.4f}")
+    """OPEX 内訳を二段表示 (装置別 raw + Hasebe 式 (10) 集計項)。
+
+    装置別: 電力・蒸気・冷却水・燃料・原料費・触媒/吸着剤交換 (全て 1.00 倍の生値)
+    Hasebe 集計: 0.180·C_TM, 2.73·C_OL, 0.23·C_UT 上乗せ, 0.23·C_RM 上乗せ 等
+                 (C_WT≈0, 減価償却費は CAPEX/n として TAC 側で別途加算)
+    """
+    from flowsheet.economics import HASEBE_AGGR_PREFIX
+
+    raw_items    = {k: v for k, v in econ.opex.items() if not k.startswith(HASEBE_AGGR_PREFIX)}
+    hasebe_items = {k: v for k, v in econ.opex.items() if k.startswith(HASEBE_AGGR_PREFIX)}
+
+    hdr("OPEX 内訳 [億円/年]  Hasebe §3.4 式(10) ─ 減価償却費は CAPEX/n で別計算")
+
+    print("  ▼ 装置別 (用役・原料・触媒/吸着剤の 1.00 倍生値)")
+    for n, v in raw_items.items():
+        print(f"    {n:<26}: {v:9.4f}")
+    raw_sum = sum(raw_items.values())
+    print(f"    {'-' * 38}")
+    print(f"    {'(装置別 小計)':<26}: {raw_sum:9.4f}")
+
+    if hasebe_items:
+        print()
+        print("  ▼ Hasebe 集計項 (式 (10) の 0.180·C_TM, 2.73·C_OL, 0.23 倍率上乗せ)")
+        for n, v in hasebe_items.items():
+            label = n[len(HASEBE_AGGR_PREFIX):]  # prefix 除去
+            print(f"    {label:<26}: {v:9.4f}")
+        hasebe_sum = sum(hasebe_items.values())
+        print(f"    {'-' * 38}")
+        print(f"    {'(Hasebe 小計)':<26}: {hasebe_sum:9.4f}")
+
+    print(f"  {'=' * 40}")
+    print(f"  {'OPEX 合計':<28}: {econ.total_opex:9.4f}")
 
 
 def show_revenue(econ) -> None:
@@ -395,30 +422,49 @@ def show_hi_comparison(result) -> None:
     econ_hi = result.economics_hi
     hdr("HI 前 vs HI 後 比較 [億円/年]")
 
-    # 熱関連 OPEX を集計 (元 economics 側で classify)
+    # 熱関連 OPEX を集計 (装置別 raw のみ。Hasebe 集計項は別行で内訳表示)
+    # HI 後の 'HI:'/'Stage2:' プレフィクスは熱 utility 置換なので熱系扱い。
     from flowsheet.heat_integration import classify_heat_opex_key
-    heat_opex_before = sum(
-        v for k, v in econ.opex.items()
-        if classify_heat_opex_key(k) is not None
-    )
-    nonheat_opex = sum(
-        v for k, v in econ.opex.items()
-        if classify_heat_opex_key(k) is None
-    )
-    heat_opex_after = sum(
-        v for k, v in econ_hi.opex.items() if k.startswith('HI:')
-    )
+    from flowsheet.economics import HASEBE_AGGR_PREFIX
+
+    def _is_heat_like(k: str) -> bool:
+        if k.startswith('HI:') or k.startswith('Stage2:'):
+            return True
+        return classify_heat_opex_key(k) is not None
+
+    def _heat_raw(opex):
+        return sum(
+            v for k, v in opex.items()
+            if not k.startswith(HASEBE_AGGR_PREFIX) and _is_heat_like(k)
+        )
+
+    def _nonheat_raw(opex):
+        return sum(
+            v for k, v in opex.items()
+            if not k.startswith(HASEBE_AGGR_PREFIX) and not _is_heat_like(k)
+        )
+
+    def _hasebe_aggr(opex):
+        return sum(v for k, v in opex.items() if k.startswith(HASEBE_AGGR_PREFIX))
+
+    heat_opex_before    = _heat_raw(econ.opex)
+    heat_opex_after     = _heat_raw(econ_hi.opex)
+    nonheat_before      = _nonheat_raw(econ.opex)
+    nonheat_after       = _nonheat_raw(econ_hi.opex)
+    hasebe_aggr_before  = _hasebe_aggr(econ.opex)
+    hasebe_aggr_after   = _hasebe_aggr(econ_hi.opex)
 
     print(f"  {'項目':<28} | {'HI なし':>10} | {'HI 後':>10} | {'差':>10}")
     print(f"  {'-'*28} | {'-'*10} | {'-'*10} | {'-'*10}")
     rows = [
-        ("CAPEX/年 (償却)",      econ.total_capex/8,  econ_hi.total_capex/8),
-        ("OPEX 熱系 (utility)",  heat_opex_before,    heat_opex_after),
-        ("OPEX 非熱系 (触媒+原料等)", nonheat_opex,    nonheat_opex),
-        ("OPEX 合計",            econ.total_opex,     econ_hi.total_opex),
-        ("TAC",                  econ.TAC,            econ_hi.TAC),
-        ("Revenue",              econ.total_revenue,  econ_hi.total_revenue),
-        ("Profit",               econ.profit,         econ_hi.profit),
+        ("CAPEX/年 (償却)",       econ.total_capex/8,  econ_hi.total_capex/8),
+        ("OPEX 熱系 (装置別)",    heat_opex_before,    heat_opex_after),
+        ("OPEX 非熱系 (装置別)",  nonheat_before,      nonheat_after),
+        ("Hasebe 集計項",         hasebe_aggr_before,  hasebe_aggr_after),
+        ("OPEX 合計",             econ.total_opex,     econ_hi.total_opex),
+        ("TAC",                   econ.TAC,            econ_hi.TAC),
+        ("Revenue",               econ.total_revenue,  econ_hi.total_revenue),
+        ("Profit",                econ.profit,         econ_hi.profit),
     ]
     for name, before, after in rows:
         diff = after - before
