@@ -3,8 +3,19 @@
 
 CAPEX/OPEX 単価は src/cost_parameters.py に集約されているため、
 最終単価のチューニングはそちら 1 ファイルで完結する。
+
+OPEX 集計は Hasebe (プロセス設計R08-3.pdf) §3.4 式 (10) の経験式に準拠:
+    製造コスト = 0.180·C_TM + 2.73·C_OL + 1.23·(C_UT + C_WT + C_RM) + 減価償却費
+本実装では「減価償却費」を CAPEX/DEPRECIATION_YEARS として TAC 側で別途加算し、
+opex dict には Hasebe 式 (10) のうち減価償却費以外の項を反映する:
+    total_opex = 0.180·C_TM + 2.73·C_OL + 1.23·C_UT + 1.23·C_WT + 1.23·C_RM
+                 + 触媒・吸着剤交換費 (Hasebe 式外、別建て)
+    TAC        = CAPEX / DEPRECIATION_YEARS + total_opex
+opex dict は装置別の生 (1.00 倍) 値に加え、Hasebe 集計項 (`[Hasebe-集計]` プレフィクス)
+を末尾に持つ。これにより `sum(opex.values()) == total_opex` の不変条件が成り立つ。
 """
 
+import math
 from dataclasses import dataclass, field
 
 from src.cost_parameters import (
@@ -14,27 +25,41 @@ from src.cost_parameters import (
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
     LPG_FEED_JPY_PER_KG, C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
     HHV_MJ_PER_KMOL,
+    HASEBE_NOL_COEFF, HASEBE_SHIFT_MULTIPLIER, OPERATOR_ANNUAL_SALARY_JPY,
+    HASEBE_COEFF_C_TM, HASEBE_COEFF_C_OL, HASEBE_COEFF_C_UT_WT_RM,
+    HASEBE_C_WT_OKUYEN_PER_YEAR,
 )
 from src.component_data import MW
+
+# opex dict 内で Hasebe 集計項を識別するためのキー prefix。
+# HI/HEN 等の下流処理はこの prefix を見て「再計算が必要な集計項」だと判断する。
+HASEBE_AGGR_PREFIX = '[Hasebe-集計] '
 
 
 @dataclass
 class Economics:
     """経済計算結果。
 
-    定義 (化工テキスト標準):
-      TAC      = CAPEX/年 + OPEX (= utility + 触媒 + 吸着剤 + 原料費)
+    定義 (Hasebe §3.4 式 (10) 準拠):
+      TAC      = CAPEX/年 + OPEX
+      OPEX     = 0.180·C_TM + 2.73·C_OL + 1.23·(C_UT + C_WT + C_RM)
+                 + 触媒・吸着剤交換 (Hasebe 式外、別建て)
+                 ※ 減価償却費は CAPEX/年 として上で別途加算済
       Revenue  = C3H6 売上 + H2 売上 + オフガス燃料クレジット (全て正)
       Profit   = Revenue - TAC   (正なら黒字)
+
+    opex dict は装置別の生エントリと `[Hasebe-集計]` プレフィクス付きの集計項
+    (0.180·C_TM, 2.73·C_OL, 0.23·C_UT delta, 0.23·C_RM delta) を持つ。
+    `sum(opex.values()) == total_opex` の不変条件が成り立つ。
 
     最適化器は effective_TAC = TAC - Revenue + soft_penalty を最小化する
     (利益最大化と等価)。runner.py 側で計算。
     """
     capex:          dict    # [億円]
-    opex:           dict    # [億円/年]   utility + 触媒 + 吸着剤 + 原料費 (全て正)
+    opex:           dict    # [億円/年]   装置別 + Hasebe 集計項 (全て正)
     revenue:        dict    # [億円/年]   売上 + 燃料クレジット (全て正)
     total_capex:    float   # [億円]
-    total_opex:     float   # [億円/年]
+    total_opex:     float   # [億円/年]   sum(opex.values())
     total_revenue:  float   # [億円/年]
     TAC:            float   # [億円/年]   = total_capex/DEPR + total_opex
     profit:         float   # [億円/年]   = total_revenue - TAC (正=黒字)
@@ -64,6 +89,130 @@ def _offgas_GJ_per_h(offgas: dict) -> float:
         offgas.get(c, 0.0) * HHV_MJ_PER_KMOL.get(c, 0.0) / 1000.0
         for c in offgas
     )
+
+
+# ---------------------------------------------------------------------------
+# Hasebe 式 (9)(10) 関連ヘルパー
+# ---------------------------------------------------------------------------
+
+def _classify_opex_term(key: str) -> str:
+    """opex dict のキーから Hasebe 式 (10) の区分を返す。
+
+    Returns
+    -------
+    'UT'             : 用役費 (Hasebe 式の C_UT, 1.23× 適用対象)
+                       電力・蒸気・冷却水・冷媒・燃料 (Reactor予熱炉燃料含む)・PSA予熱 等
+    'RM'             : 原料費 (Hasebe 式の C_RM, 1.23× 適用対象)
+                       Fresh LPG 等
+    'CATALYST_OUT'   : 触媒・吸着剤交換費。Hasebe 式 (10) の枠外で別建て計上
+                       (1.23× は掛けない)。本プロセス固有の消耗品扱い。
+    'HASEBE_AGGR'    : Hasebe 集計項 (再計算時に剥がして再算出するためマーク)
+    """
+    if key.startswith(HASEBE_AGGR_PREFIX):
+        return 'HASEBE_AGGR'
+    if '触媒' in key or '吸着剤' in key or '活性炭交換' in key:
+        return 'CATALYST_OUT'
+    if '原料費' in key or 'Fresh LPG' in key:
+        return 'RM'
+    return 'UT'   # default: 装置別の用役費 (電力・熱・燃料・HI/Stage2: ... 等)
+
+
+def _count_main_equipment(capex: dict) -> int:
+    """Hasebe 式 (9) 用の主要機器数 N_eq を数える。
+
+    Hasebe §3.3 本文「コンプレッサー、塔、反応器、加熱器、熱交換器など」に従う。
+
+    数え方の判断 (本プロセス固定構成 = 18 単位想定):
+      - 蒸留塔 (Dist1/2/3) は付帯 HE (リボイラ・コンデンサ・フィード予熱)
+        を 1 塔に含めて 1 単位扱い (Hasebe/Turton 慣行)。
+      - Reactor 予熱炉は CAPEX 上は反応器バンドルだが、運転監視は独立した
+        加熱器として N_eq に +1 計上。
+      - PSA は容器 + ローテーション弁系を 1 単位 (吸着剤エントリ 'PSA活性炭'
+        は機器ではなく内容物なので除外)。
+      - 膜モジュールは補機含めて 1 単位 ('Mem気化器' 'Mem F圧縮機' 'Mem P圧縮機'
+        'Mem冷却器' 'Mem膜本体' は別個に計上)。
+      - スイング 2 基反応器は 1 系統運用として 1 単位 (Hasebe 例題に倣う)。
+    """
+    # capex dict から「物理機器 1 単位 = 1 カウント」を抽出
+    # 'PSA活性炭' は機器ではなく内容物なので除外。'PSA容器' を PSA 1 単位として扱う。
+    physical_unit_keys = {
+        k for k in capex
+        if k != 'PSA活性炭' and not k.startswith('[Hasebe')
+    }
+    n = len(physical_unit_keys)
+    # CAPEX 上は反応器バンドルだが運転監視は独立した加熱炉として +1
+    n += 1   # Reactor予熱炉
+    return n
+
+
+def _compute_labor_cost_okuyen(N_eq: int) -> float:
+    """Hasebe 式 (9) で 1 班人数を算出し、4 直で総運転員 → 年間労務費 [億円/年]。
+
+    式: 1 班の人数 = ceil( sqrt(6.29 + HASEBE_NOL_COEFF · N_eq) )
+        総運転員  = 1 班の人数 × HASEBE_SHIFT_MULTIPLIER (=4)
+        C_OL      = 総運転員 × OPERATOR_ANNUAL_SALARY_JPY / 1e8
+    """
+    n_per_shift = math.ceil(math.sqrt(6.29 + HASEBE_NOL_COEFF * N_eq))
+    total_operators = n_per_shift * HASEBE_SHIFT_MULTIPLIER
+    return total_operators * OPERATOR_ANNUAL_SALARY_JPY / 1.0e8
+
+
+def apply_hasebe_aggregation(
+    opex_raw: dict,
+    total_capex: float,
+    N_eq: int,
+) -> dict:
+    """装置別の生 opex dict に Hasebe 式 (10) の集計項を追加した新 dict を返す。
+
+    既存の Hasebe 集計項 (`HASEBE_AGGR_PREFIX` で始まるキー) は事前に剥がして
+    再計算する。これにより HI/HEN 後にこの関数を再呼び出しすると、変更された
+    C_UT を反映した最新の Hasebe 集計が得られる。
+
+    Hasebe 式 (10) のうち本実装が反映する項:
+      - 0.180·C_TM            (保全 + 諸経費 + 税保険) ─ 集計項として追加
+      - 2.73·C_OL             (労務費)                ─ 集計項として追加
+      - 0.23·C_UT             (用役費の 23% 上乗せ)   ─ 集計項として追加
+                              (装置別の生エントリが既に 1.00·C_UT を表すため、
+                               残り 0.23·C_UT を delta として加算)
+      - 0.23·C_RM             (原料費の 23% 上乗せ)   ─ 集計項として追加
+      - 1.23·C_WT             (廃棄物処理費)          ─ PDH では 0 で集計項なし
+      - 触媒・吸着剤交換費      (式外、別建て)          ─ 生エントリのまま残す
+      - 減価償却費             (CAPEX/n)               ─ TAC 側で別途加算
+    """
+    # 既存集計項を除去
+    raw = {
+        k: v for k, v in opex_raw.items()
+        if _classify_opex_term(k) != 'HASEBE_AGGR'
+    }
+
+    C_UT = sum(v for k, v in raw.items() if _classify_opex_term(k) == 'UT')
+    C_RM = sum(v for k, v in raw.items() if _classify_opex_term(k) == 'RM')
+
+    C_TM = total_capex
+    C_OL = _compute_labor_cost_okuyen(N_eq)
+    C_WT = HASEBE_C_WT_OKUYEN_PER_YEAR
+
+    # 用役費・原料費は装置別エントリが 1.00× で計上済みなので、追加分のみを delta 計上
+    multiplier_delta = HASEBE_COEFF_C_UT_WT_RM - 1.0   # = 0.23
+
+    out = dict(raw)
+    out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_TM:.3f}·C_TM (保全+諸経費)'] = (
+        HASEBE_COEFF_C_TM * C_TM
+    )
+    out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_OL:.2f}·C_OL (労務費, N_eq={N_eq})'] = (
+        HASEBE_COEFF_C_OL * C_OL
+    )
+    out[HASEBE_AGGR_PREFIX + f'{multiplier_delta:.2f}·C_UT (用役費 上乗せ分)'] = (
+        multiplier_delta * C_UT
+    )
+    out[HASEBE_AGGR_PREFIX + f'{multiplier_delta:.2f}·C_RM (原料費 上乗せ分)'] = (
+        multiplier_delta * C_RM
+    )
+    if C_WT > 0:
+        out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_UT_WT_RM:.2f}·C_WT (廃棄物処理)'] = (
+            HASEBE_COEFF_C_UT_WT_RM * C_WT
+        )
+    return out
 
 
 def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
@@ -213,11 +362,18 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
 
 
 def calculate_economics(one_pass: dict, mw_C3H6_kg_per_kmol: float) -> Economics:
-    """CAPEX/OPEX/Revenue 集計と TAC・Profit・製品単価を計算。"""
-    capex, opex, revenue = collect_capex_opex(one_pass)
+    """CAPEX/OPEX/Revenue 集計と TAC・Profit・製品単価を計算。
+
+    opex dict は Hasebe 式 (10) の集計項 (HASEBE_AGGR_PREFIX で始まるキー) を
+    含む形で返される。装置別の生エントリと Hasebe 集計エントリの合計が
+    total_opex (= 製造コスト − 減価償却費) に一致する。
+    """
+    capex, opex_raw, revenue = collect_capex_opex(one_pass)
 
     # ペナルティ装置 (CAPEX >= 1e8 億円相当) は集計から除外
     total_capex   = sum(v for v in capex.values() if v < 1e6)
+    N_eq          = _count_main_equipment(capex)
+    opex          = apply_hasebe_aggregation(opex_raw, total_capex, N_eq)
     total_opex    = sum(opex.values())
     total_revenue = sum(revenue.values())
     TAC           = total_capex / DEPRECIATION_YEARS + total_opex

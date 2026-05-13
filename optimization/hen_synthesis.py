@@ -479,7 +479,9 @@ def apply_synthesis_to_economics(
         Stage 2 適用後の新インスタンス
     """
     from copy import deepcopy
-    from flowsheet.economics import Economics
+    from flowsheet.economics import (
+        Economics, apply_hasebe_aggregation, _count_main_equipment,
+    )
 
     # ---- CAPEX: 既存 + HEN 追加 ----
     new_capex = deepcopy(economics.capex)
@@ -487,6 +489,7 @@ def apply_synthesis_to_economics(
         new_capex['HEN追加 (process-process HE)'] = hen_result.CAPEX_added_okuyen
 
     # ---- OPEX: 熱系を synthesis 後 tier 別 OPEX で置換、非熱系は継承 ----
+    # Hasebe 集計項は apply_hasebe_aggregation 内部で剥がして再計算する。
     new_opex: Dict[str, float] = {}
     for k, v in economics.opex.items():
         if classify_heat_opex_key(k) is None:
@@ -496,6 +499,12 @@ def apply_synthesis_to_economics(
 
     # ---- 集計 ----
     new_total_capex = sum(v for v in new_capex.values() if v < 1e6)
+
+    # Hasebe 集計項を再計算 (CAPEX が HEN 追加で増えれば 0.180·C_TM が増、
+    # C_UT も Stage2 置換で変化するため両方追従)
+    N_eq     = _count_main_equipment(new_capex)
+    new_opex = apply_hasebe_aggregation(new_opex, new_total_capex, N_eq)
+
     new_total_opex  = sum(new_opex.values())
     new_TAC         = new_total_capex / depreciation_years + new_total_opex
     new_profit      = economics.total_revenue - new_TAC

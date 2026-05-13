@@ -1377,23 +1377,30 @@ def apply_hi_to_economics(
     """
     # 循環 import 回避のため遅延 import
     from copy import deepcopy
-    from flowsheet.economics import Economics
+    from flowsheet.economics import (
+        Economics, apply_hasebe_aggregation, _count_main_equipment,
+    )
 
     # ---- HI 後 OPEX を構築 ----
     new_opex: Dict[str, float] = {}
 
-    # 非熱系のみコピー (例: 電力、触媒、吸着剤、原料費)
+    # 非熱系かつ Hasebe 集計項でない生エントリのみコピー (例: 電力、触媒、吸着剤、原料費)
+    # Hasebe 集計項は apply_hasebe_aggregation 内部で剥がして再計算する。
     for k, v in economics.opex.items():
         if classify_heat_opex_key(k) is None:
             new_opex[k] = v
 
-    # HI tier 別 OPEX を「HI:」プレフィクス付きで追加
+    # HI tier 別 OPEX を「HI:」プレフィクス付きで追加 (用役費 = Hasebe C_UT に該当)
     hi_opex_calc = calc_hi_opex_okuyen(
         hi_result, heating_tiers, cooling_tiers,
         operating_hours_per_year=operating_hours_per_year,
     )
     for tier_name, cost in hi_opex_calc['breakdown'].items():
         new_opex[f'HI: {tier_name}'] = cost
+
+    # ---- Hasebe 集計項を再計算 (C_UT が HI で変化したため delta が変わる) ----
+    N_eq     = _count_main_equipment(economics.capex)
+    new_opex = apply_hasebe_aggregation(new_opex, economics.total_capex, N_eq)
 
     # ---- 集計値の再計算 ----
     new_total_opex    = sum(new_opex.values())

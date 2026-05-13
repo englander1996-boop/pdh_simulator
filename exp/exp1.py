@@ -112,9 +112,9 @@ reflux_dist3   = 12.0      # -       還流比 (R_min ≈ 10、下限 11 まで)
 #   - 物理検証: Dist1/Dist2 を 'rigorous'、Dist3 は 'fug' (margin 豊富で FUG で十分、
 #     実機相当 N で recovery spec も達成される)
 #   - 完全厳密: 全塔 'rigorous' (~12 分/評価、デバッグ用)
-SOLVER_DIST1 = 'fug'    # 脱ブタン塔 (narrow-margin、rigorous で現実が見える)
-SOLVER_DIST2 = 'fug'    # 脱エタン塔 (partial cond、rigorous で物理が正しい)
-SOLVER_DIST3 = 'fug'         # C3 スプリッタ (margin 豊富、FUG で十分、Dist3 rigorous は重すぎ)
+SOLVER_DIST1 = 'rigorous'    # 脱ブタン塔 (narrow-margin、rigorous で現実が見える)
+SOLVER_DIST2 = 'rigorous'    # 脱エタン塔 (partial cond、rigorous で物理が正しい)
+SOLVER_DIST3 = 'rigorous'         # C3 スプリッタ (margin 豊富、FUG で十分、Dist3 rigorous は重すぎ)
 
 
 # ===========================================================================
