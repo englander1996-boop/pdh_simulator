@@ -92,6 +92,25 @@ N_feed_dist3   = 100       # -       フィード段
 reflux_dist3   = 12.0      # -       還流比 (R_min ≈ 10、下限 11 まで)
 
 
+# === Fresh LPG (BO 直接指定、外側ループ skip) ==================================
+#  None  → 外側ループで自動調整 (従来動作)、target 1188 kmol/h C3H6 に張り付かせる
+#  float → 指定値を使って 1 回内側ループ実行、生産量はそれに応じて変動
+#  baseline exp1 では外側ループ収束で ~1666 kmol/h、最初は None 推奨
+F_C3H8_fresh_kmol_h = None
+
+
+# === 蒸留塔 recovery (None = 0.99 既定値、float = 上書き) ======================
+#  recovery_LK_top: 軽質キーが塔頂で回収される割合 (high = 損失↓ 但し N/R 大に)
+#  recovery_HK_bot: 重質キーが塔底で回収される割合 (high = 純度↑ 但し N/R 大に)
+#  None で 0.99 (旧 hardcode)、float (例 0.95-0.999) で上書き可能
+rec_LK_top_dist1 = None    # Dist1: C3H8 in top
+rec_HK_bot_dist1 = None    # Dist1: C4H10 in bottom
+rec_LK_top_dist2 = None    # Dist2: C2H6 in top
+rec_HK_bot_dist2 = None    # Dist2: C3H8 in bottom (PSA への C3 漏洩抑制)
+rec_LK_top_dist3 = None    # Dist3: C3H6 in top
+rec_HK_bot_dist3 = None    # Dist3: C3H8 in bottom (C3H6 純度に直結)
+
+
 # ===========================================================================
 #  蒸留塔ソルバ選択 (塔ごと個別指定)
 # ===========================================================================
@@ -136,16 +155,22 @@ design = FlowsheetDesignVars(
         P_col=P_dist1_Pa, N_stages=N_dist1,
         N_feed=N_feed_dist1, reflux_ratio=reflux_dist1,
         solver_method=SOLVER_DIST1,
+        recovery_LK_top=rec_LK_top_dist1,
+        recovery_HK_bot=rec_HK_bot_dist1,
     ),
     dist2=ColumnTunables(
         P_col=P_dist2_Pa, N_stages=N_dist2,
         N_feed=N_feed_dist2, reflux_ratio=reflux_dist2,
         solver_method=SOLVER_DIST2,
+        recovery_LK_top=rec_LK_top_dist2,
+        recovery_HK_bot=rec_HK_bot_dist2,
     ),
     dist3=ColumnTunables(
         P_col=P_dist3_Pa, N_stages=N_dist3,
         N_feed=N_feed_dist3, reflux_ratio=reflux_dist3,
         solver_method=SOLVER_DIST3,
+        recovery_LK_top=rec_LK_top_dist3,
+        recovery_HK_bot=rec_HK_bot_dist3,
     ),
 )
 
@@ -199,7 +224,8 @@ def _run_simulation():
     hdr("外側ループ: 製品流量厳密化 (Fresh を調整)")
     res = evaluate(design, config, verbose=True,
                    apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
-                   apply_stage2=APPLY_STAGE2)
+                   apply_stage2=APPLY_STAGE2,
+                   F_C3H8_override=F_C3H8_fresh_kmol_h)
     display_full_results(res, design, config)
     return res
 

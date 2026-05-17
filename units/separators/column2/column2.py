@@ -74,6 +74,8 @@ def simulate_column2(
     質量保存が塔内で自然に閉じるよう、LK = 最も重い軽質成分 (C2H6) を選定。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
+    rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
+    rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99
     design = DistDesignVars(
         P_col           = t.P_col,
         N_stages        = t.N_stages,
@@ -81,8 +83,8 @@ def simulate_column2(
         reflux_ratio    = t.reflux_ratio,
         LK              = 'F',       # C2H6 (最も重い軽質成分)
         HK              = 'A',       # C3H8
-        recovery_LK_top = 0.99,      # C2H6 99% 塔頂 → 残り 1% (~4 kmol/h) は塔底に微量残
-        recovery_HK_bot = 0.99,
+        recovery_LK_top = rec_LK_top,  # C2H6 塔頂回収率 (既定 0.99、BO で振れる)
+        recovery_HK_bot = rec_HK_bot,
         K_method        = 'pr',
         q               = 0.0,       # 気フィード (Desuper 後 50°C 飽和蒸気)
         # 設計判断 (2026-05-09): Dist2 は partial condenser (分流型)。塔頂に
