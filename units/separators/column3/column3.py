@@ -57,6 +57,8 @@ def simulate_column3(
       LK='B' (C3H6), HK='A' (C3H8), recovery 0.99/0.99, K_method='pr', q=1.0
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
+    rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
+    rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99
     design = DistDesignVars(
         P_col           = t.P_col,
         N_stages        = t.N_stages,
@@ -64,8 +66,8 @@ def simulate_column3(
         reflux_ratio    = t.reflux_ratio,
         LK              = 'B',       # C3H6 (製品)
         HK              = 'A',       # C3H8 (リサイクル)
-        recovery_LK_top = 0.99,
-        recovery_HK_bot = 0.99,
+        recovery_LK_top = rec_LK_top,
+        recovery_HK_bot = rec_HK_bot,
         K_method        = 'pr',
         q               = 1.0,
         solver_method   = t.solver_method,

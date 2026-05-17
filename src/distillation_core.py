@@ -113,9 +113,14 @@ class ColumnTunables:
     """
     P_col:         float    # 塔操作圧力 [Pa]
     N_stages:      int      # 理論段数
-    N_feed:        int      # フィード段位置 (現状 Kirkbride 推奨値が優先、本値は記録用)
+    N_feed:        int      # フィード段位置 (rigorous/sm では Kirkbride 推奨を自動採用、本値は無視。FUG では post-hoc 出力のみ)
     reflux_ratio:  float    # 還流比 R = L/D
-    solver_method: str = 'fug'   # 'fug' | 'rigorous'
+    solver_method: str = 'fug'   # 'fug' | 'rigorous' | 'sm'
+    # 設計判断 (2026-05-14): recovery を BO で振れるよう field 化。
+    # None → column1/2/3.py ラッパの既定値 (0.99) を採用 (後方互換)。
+    # float (e.g., 0.95〜0.999) → ラッパ既定値を上書き。
+    recovery_LK_top: Optional[float] = None
+    recovery_HK_bot: Optional[float] = None
 
 
 # 分流 (partial condenser) で凝縮させない成分セット
@@ -655,12 +660,14 @@ def _simulate_rigorous(
     comps   = list(feed.F_in.keys())
     D_total = sum(fug_result.top.F_in.values())
 
+    # フィード段は FUG の Kirkbride 推奨を採用 (design.N_feed は無視)。
+    # ColumnTunables.N_feed の docstring 通り、rigorous では Kirkbride を自動採用する。
     rig = wang_henke_solve(
         feed_F            = feed.F_in,
         comps             = comps,
         P_col             = design.P_col,
         N_stages          = design.N_stages,
-        N_feed            = max(1, min(design.N_feed, design.N_stages)),
+        N_feed            = max(1, min(fug_result.equipment.N_feed_kirkbride, design.N_stages)),
         reflux_ratio      = design.reflux_ratio,
         D_total           = D_total,
         q_feed            = design.q,
@@ -874,6 +881,7 @@ def simulate_distillation_column(
     design.solver_method による dispatch:
       'fug'      : Fenske-Underwood-Gilliland shortcut (本関数本体)
       'rigorous' : VLE tray-by-tray (`_simulate_rigorous` に委譲、未実装ならフォールバック)
+      'sm'       : SM 法 (`_simulate_sm` に委譲、未実装は NotImplementedError → FUG fallback)
 
     FUG 手順:
       1. 動作温度推定 (T_top, T_bot を Clausius-Clapeyron で初期推定)
@@ -906,6 +914,24 @@ def simulate_distillation_column(
                 UserWarning, stacklevel=2,
             )
             # 同上
+
+    if design.solver_method == 'sm':
+        # SM (smith?) 法。実装は別途追加予定。NotImplementedError なら FUG に fallback。
+        try:
+            from src.distillation_sm import simulate_sm as _simulate_sm  # type: ignore
+            return _simulate_sm(design, feed, fixed)
+        except (ImportError, NotImplementedError) as e:
+            warnings.warn(
+                f"simulate_distillation_column: sm solver 未実装 ({e})。"
+                f" FUG にフォールバック。",
+                UserWarning, stacklevel=2,
+            )
+        except Exception as e:
+            warnings.warn(
+                f"simulate_distillation_column: sm solver で例外 ({type(e).__name__}: {e})。"
+                f" FUG にフォールバック。",
+                UserWarning, stacklevel=2,
+            )
 
     if fixed is None:
         fixed = DistFixedParams()
@@ -1032,6 +1058,12 @@ def simulate_distillation_column(
         x_bot = {c: F_bot[c] / F_bot_total for c in comps}
 
     # ---- Step 6: feasibility ----
+    # 設計判断 (2026-05-15): FUG bias 解消のため Gilliland check を追加。
+    # 旧実装は (N >= N_min) かつ (R >= R_min) を「必要条件」としてだけチェックしてた
+    # が、これでは narrow-margin (N ≈ N_min, R ≈ R_min) でも recovery=0.99 達成可能と
+    # 判定されてしまい、rigorous で大幅 spec 違反 (Dist1 HK recovery 20% など) を生む。
+    # Gilliland 相関で「与えられた R で recovery=0.99 達成に必要な N」を計算、
+    # design.N_stages がそれ未満なら infeasible 化する (= 十分条件チェック)。
     feasible = True
     msg = ""
     if N_min == float('inf'):
@@ -1048,6 +1080,25 @@ def simulate_distillation_column(
         feasible = False
         msg = (f"R={design.reflux_ratio:.2f} < R_min={R_min:.2f} "
                f"(LK={design.LK}, HK={design.HK})")
+    else:
+        # Gilliland: 与えられた R での recovery 達成に必要な N
+        # 設計判断 (2026-05-15): Gilliland (Eduljee 形) は constant α 仮定の経験式で、
+        # 実際の PR EOS rigorous より 10-15% 程度 conservative な N を返す傾向がある。
+        # baseline (Dist1: N=20, R=1.5) が strict ratio 91% で baseline が落ちないよう
+        # 0.85 ファクタ (= 15% tolerance) を入れる。一方 narrow-margin (ratio < 0.7) は
+        # 確実に弾かれる (= Dist1 trial 299 級 ratio 60% は INFEASIBLE)。
+        N_needed = _gilliland_eduljee(design.reflux_ratio, R_min, N_min)
+        N_NEEDED_TOLERANCE = 0.85
+        if N_needed == float('inf'):
+            feasible = False
+            msg = (f"Gilliland: R={design.reflux_ratio:.2f} が R_min={R_min:.2f} に"
+                   f" 近すぎ N_needed → ∞ (LK={design.LK}, HK={design.HK})")
+        elif design.N_stages < N_needed * N_NEEDED_TOLERANCE:
+            feasible = False
+            msg = (f"Gilliland: N_stages={design.N_stages} < {N_NEEDED_TOLERANCE:.2f}×N_needed"
+                   f"={N_needed*N_NEEDED_TOLERANCE:.1f} (true N_needed={N_needed:.1f},"
+                   f" R={design.reflux_ratio:.2f}, R_min={R_min:.2f},"
+                   f" N_min={N_min:.1f}) — recovery=0.99 物理的達成不可")
 
     if not feasible:
         return _penalty_result(design, msg, N_min=N_min, R_min=R_min)

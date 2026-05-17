@@ -81,6 +81,7 @@ def evaluate(
     apply_stage2:           bool  = False,
     strict_recovery_check:  bool  = False,
     recovery_tolerance:     float = 0.10,
+    F_C3H8_override:        Optional[float] = None,
 ) -> FlowsheetResult:
     """設計変数を入力してフローシートを評価し、effective_TAC と状態を返す。
 
@@ -116,7 +117,10 @@ def evaluate(
     # (例: Dist1 N=N_min 完全 infeasible で下流の expansion_valve が流量ゼロ受領)、
     # BO 用途では penalty 返却が望ましい。catch して solver_failure として扱う。
     try:
-        solver_result = solve_flowsheet(design, config, verbose=verbose)
+        solver_result = solve_flowsheet(
+            design, config, verbose=verbose,
+            F_C3H8_override=F_C3H8_override,
+        )
     except Exception as e:
         return FlowsheetResult(
             solver=None, economics=None, specs=None,

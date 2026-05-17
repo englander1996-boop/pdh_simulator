@@ -222,8 +222,19 @@ def solve_flowsheet(
     design:  FlowsheetDesignVars,
     config:  OperatingConfig,
     verbose: bool = True,
+    F_C3H8_override: Optional[float] = None,
 ) -> SolverResult:
-    """外側ループ (Fresh調整) + 内側ループ (リサイクル収束) を統合して解く。"""
+    """外側ループ (Fresh調整) + 内側ループ (リサイクル収束) を統合して解く。
+
+    Parameters
+    ----------
+    F_C3H8_override : float | None
+        指定した場合、外側ループを skip して内側のみ実行。
+        Fresh C3H8 = F_C3H8_override [kmol/h] を強制使用。
+        Fresh C4H10 は LPG 組成 (config.feed.lpg_c3h8_mol_fraction) から自動計算。
+        BO で F_fresh を直接最適化変数とする場合に使う。
+        None なら従来通り外側ループで Fresh を調整。
+    """
     so = config.solver.outer
     p  = config.product
     f  = config.feed
@@ -232,7 +243,10 @@ def solve_flowsheet(
     target_kmol_h   = p.target_mta * 1000.0 / p.mw_kg_per_kmol / operating_hours
     c4_over_c3      = (1.0 - f.lpg_c3h8_mol_fraction) / f.lpg_c3h8_mol_fraction
 
-    F_C3H8_feed  = target_kmol_h / f.yield_assumed
+    if F_C3H8_override is not None:
+        F_C3H8_feed = float(F_C3H8_override)
+    else:
+        F_C3H8_feed = target_kmol_h / f.yield_assumed
     F_C4H10_feed = F_C3H8_feed * c4_over_c3
 
     if verbose:
@@ -253,6 +267,39 @@ def solve_flowsheet(
     outer_converged = False
     error           = 0.0
     it              = 0
+
+    # ---- F_fresh override: 外側ループ skip ----
+    # BO で F_fresh を直接最適化変数とした場合。production_min spec の充足は
+    # spec check (flowsheet/specs.py) 側で soft penalty として評価される。
+    if F_C3H8_override is not None:
+        if verbose:
+            print(f"\n[F_fresh override] Fresh C3H8={F_C3H8_feed:.2f}, C4H10={F_C4H10_feed:.2f} "
+                  f"kmol/h (外側ループ skip)")
+        # 設計判断 (2026-05-14): 初期 tear stream は yield_assumed=0.9 ベースの F_fresh
+        # (= target/0.9 ≈ 1320) で計算。実 F_fresh をそのまま scale すると、高い F_fresh
+        # で初期 tear が過大 → iter 1 で Mem A 過大 → PSA/Mem CAPEX ペナルティ発火。
+        # 外側ループ初期化挙動と整合させるため、初期 tear は target ベースで固定 scale。
+        F_C3H8_init_for_tear = target_kmol_h / f.yield_assumed
+        init_tear = _initial_tear(F_C3H8_init_for_tear, config)
+        results, inner_status = run_recycle_convergence(
+            F_C3H8_feed, F_C4H10_feed,
+            design, config,
+            init=init_tear,
+            verbose=verbose,
+        )
+        actual_product = results['r3'].top.F_in.get('B', 0.0) if results is not None else 0.0
+        error = actual_product - target_kmol_h
+        return SolverResult(
+            one_pass     =results,
+            fresh_C3H8   =F_C3H8_feed,
+            fresh_C4H10  =F_C4H10_feed,
+            inner_status =inner_status,
+            outer_status =OuterStatus(
+                # override 経路は「外側 1 iter」扱いで converged 扱い
+                # (実際の spec 充足は spec check 側で評価)
+                converged=True, n_iter=1, final_error=error,
+            ),
+        )
 
     for it in range(1, so.max_iter + 1):
         if verbose:
