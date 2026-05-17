@@ -58,6 +58,7 @@ from optimization.search_space import (
 )
 
 from optimization.objective import make_objective
+from optimization.pipeline import PipelineConfig, run_pipeline
 
 
 __all__ = [
@@ -68,6 +69,8 @@ __all__ = [
     'validate_search_space', 'suggest_params', 'build_design',
     # objective
     'make_objective',
+    # pipeline
+    'PipelineConfig', 'run_pipeline',
 ]
 
 # ---- optuna 必須シンボル (条件付き load) ----
