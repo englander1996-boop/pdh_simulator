@@ -144,6 +144,7 @@ SAVE_TRIALS_CSV   = True              # 全 trial の履歴 CSV
 SAVE_BEST_JSON    = True              # ベスト trial の要約 JSON
 SAVE_TOPK_REPORT  = True              # top-k 比較レポート txt
 SHOW_PROGRESS     = True              # Optuna の tqdm 進捗バー
+DISPLAY_BEST_FULL = True              # top-k ベスト候補について exp1 と同じ詳細レポート出力
 
 # ----- L1: Feasibility 分類解析 (BO 終了後の post-hoc 解析) -----
 RUN_FEASIBILITY_ANALYSIS = True       # False で無効化 (sklearn 未インストール時も自動無効)
@@ -152,204 +153,42 @@ FEASIBILITY_MODEL        = 'rf'       # 'rf' | 'logreg'
 
 
 # ===========================================================================
-# ↑↑↑ 編集領域はここまで。以下はパイプライン本体 (通常触らない) ↑↑↑
+# ↑↑↑ 編集領域はここまで。以下はパイプライン呼び出し (通常触らない) ↑↑↑
 # ===========================================================================
 
-from datetime import datetime
-from pathlib import Path
-
-from config.load import load_operating_config
-from optimization import (
-    validate_search_space,
-    make_objective,
-    create_study,
-    run_optimization,
-    reevaluate_topk,
-    best_entry,
-    save_trials_csv,
-    save_best_json,
-    save_topk_report,
-)
-try:
-    from optimization import analyze_feasibility
-    _HAS_FEASIBILITY = True
-except ImportError:
-    _HAS_FEASIBILITY = False
-
-
-def main():
-    # ---- 入力検査 ----
-    validate_search_space(SEARCH_SPACE)
-    for tag in ('dist1', 'dist2', 'dist3'):
-        if tag not in SOLVER_BO or tag not in SOLVER_TOPK:
-            raise ValueError(f"SOLVER_BO / SOLVER_TOPK に {tag} のキーが必要")
-        for s in (SOLVER_BO[tag], SOLVER_TOPK[tag]):
-            if s not in ('fug', 'rigorous', 'sm'):
-                raise ValueError(f"solver {s!r} は 'fug' | 'rigorous' | 'sm' のみ許容")
-
-    # ---- パス準備 ----
-    timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir    = Path(OUTPUT_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    study_name = f'pdh_{timestamp}'
-    db_path        = out_dir / f'main_{timestamp}.db'
-    trials_csv     = out_dir / f'main_{timestamp}_trials.csv'
-    best_json      = out_dir / f'main_{timestamp}_best.json'
-    topk_report    = out_dir / f'main_{timestamp}_topk.txt'
-    feasibility_prefix = f'main_{timestamp}_feasibility'
-
-    storage_url = f'sqlite:///{db_path.as_posix()}' if SAVE_SQLITE else None
-
-    # ---- 設定スナップショット ----
-    print("=" * 72)
-    print(f"PDH 多変数最適化 — {timestamp}")
-    print("=" * 72)
-    print(f"  N_TRIALS         = {N_TRIALS}")
-    print(f"  N_STARTUP        = {N_STARTUP}")
-    print(f"  N_TOPK           = {N_TOPK}")
-    print(f"  SAMPLER          = {SAMPLER}")
-    print(f"  SEED             = {SEED}")
-    print(f"  SOLVER_BO        = {SOLVER_BO}")
-    print(f"  SOLVER_TOPK      = {SOLVER_TOPK}")
-    print(f"  APPLY_HI         = {APPLY_HI}")
-    print(f"  APPLY_STAGE2_TOPK= {APPLY_STAGE2_TOPK}")
-    print(f"  探索変数数        = {len(SEARCH_SPACE)} / 19")
-    print(f"  storage          = {storage_url or '(in-memory)'}")
-    print("-" * 72)
-
-    # ---- config / objective / study 準備 ----
-    config = load_operating_config()
-    objective = make_objective(
-        search_space          = SEARCH_SPACE,
-        solver_assignment     = SOLVER_BO,
-        config                = config,
-        apply_hi              = APPLY_HI,
-        apply_stage2          = False,                # BO ループでは Stage 2 を回さない
-        hi_dT_min_K           = HI_DT_MIN_K,
-        strict_recovery_check = STRICT_RECOVERY_BO,
-        recovery_tolerance    = RECOVERY_TOLERANCE,
-    )
-    study = create_study(
-        study_name   = study_name,
-        sampler_name = SAMPLER,
-        seed         = SEED,
-        n_startup    = N_STARTUP,
-        storage_url  = storage_url,
-    )
-
-    # ---- BO ループ実行 (KeyboardInterrupt / 致命的例外でも部分結果を保存) ----
-    print(f"[BO] {N_TRIALS} trial を実行中 ...")
-    t_start = datetime.now()
-    bo_interrupted  = False
-    bo_fatal_error  = None
-    try:
-        run_optimization(
-            study, objective,
-            n_trials          = N_TRIALS,
-            show_progress_bar = SHOW_PROGRESS,
-        )
-    except KeyboardInterrupt:
-        bo_interrupted = True
-        print("\n[BO] Ctrl+C で中断。これまでの結果を保存して終了します。")
-    except Exception as e:
-        bo_fatal_error = e
-        print(f"\n[BO] 致命的例外 ({type(e).__name__}: {e})。"
-              f" SQLite に保存された分は再開可能 (study_name='{study_name}')。")
-    t_bo = (datetime.now() - t_start).total_seconds()
-    n_completed = sum(1 for t in study.trials
-                      if t.state.name == 'COMPLETE')
-    print(f"[BO] 経過 {t_bo:.1f} 秒、完了 trial = {n_completed} / 試行 {len(study.trials)}")
-
-    try:
-        best = study.best_trial
-        print(f"[BO] ベスト trial #{best.number}: "
-              f"effective_TAC = {best.value:.4f} 億円/年")
-    except ValueError:
-        print("[BO] 完了 trial がありません (全失敗)")
-
-    # ---- top-k 再評価 (BO が中断/失敗してもこれまでの trial で再評価試行) ----
-    entries = []
-    if N_TOPK > 0 and n_completed > 0 and bo_fatal_error is None:
-        print(f"[top-k] 上位 {min(N_TOPK, n_completed)} 候補を再評価中 "
-              f"(solver={SOLVER_TOPK}, stage2={APPLY_STAGE2_TOPK}) ...")
-        t_start = datetime.now()
-        try:
-            entries = reevaluate_topk(
-                study              = study,
-                k                  = N_TOPK,
-                solver_assignment  = SOLVER_TOPK,
-                config             = config,
-                apply_hi           = APPLY_HI,
-                apply_stage2       = APPLY_STAGE2_TOPK,
-                hi_dT_min_K        = HI_DT_MIN_K,
-                strict_recovery_check = STRICT_RECOVERY_TOPK,
-                recovery_tolerance = RECOVERY_TOLERANCE,
-                verbose            = False,
-            )
-        except KeyboardInterrupt:
-            print("\n[top-k] Ctrl+C で中断。これまでに完了した再評価分のみ保存します。")
-        except Exception as e:
-            print(f"\n[top-k] 再評価で例外 ({type(e).__name__}: {e})。"
-                  f" 部分結果を保存します。")
-        t_topk = (datetime.now() - t_start).total_seconds()
-        print(f"[top-k] 経過 {t_topk:.1f} 秒、完了 {len(entries)} 候補")
-        be = best_entry(entries)
-        if be is not None:
-            tag = "feasible" if be.is_feasible_re else "infeasible"
-            print(f"[top-k] 再評価ベスト: rank {be.rank} (trial #{be.trial_number}), "
-                  f"effective_TAC = {be.effective_TAC_re:.4f} 億円/年 ({tag})")
-    elif N_TOPK > 0 and n_completed == 0:
-        print("[top-k] BO 完了 trial が 0 件、再評価スキップ。")
-    elif bo_fatal_error is not None:
-        print("[top-k] BO で致命的例外発生、再評価スキップ。")
-
-    # ---- 出力 (例外が出ても可能な限り部分結果を残す) ----
-    print("[出力] 保存中 ...")
-    if SAVE_TRIALS_CSV:
-        try:
-            n = save_trials_csv(study, trials_csv)
-            print(f"[出力] trials CSV → {trials_csv} ({n} 行)")
-        except Exception as e:
-            print(f"[出力] trials CSV 失敗: {type(e).__name__}: {e}")
-    if SAVE_BEST_JSON:
-        try:
-            save_best_json(study, best_json)
-            print(f"[出力] best JSON → {best_json}")
-        except Exception as e:
-            print(f"[出力] best JSON 失敗: {type(e).__name__}: {e}")
-    if SAVE_TOPK_REPORT and entries:
-        try:
-            save_topk_report(entries, topk_report)
-            print(f"[出力] top-k 比較 → {topk_report}")
-        except Exception as e:
-            print(f"[出力] top-k report 失敗: {type(e).__name__}: {e}")
-
-    # ---- L1: Feasibility 分類解析 (post-hoc、副作用ゼロ) ----
-    if RUN_FEASIBILITY_ANALYSIS and _HAS_FEASIBILITY and n_completed > 0:
-        try:
-            print("[feasibility] 分類解析を実行中 ...")
-            analyze_feasibility(
-                study       = study,
-                output_dir  = out_dir,
-                prefix      = feasibility_prefix,
-                target_type = FEASIBILITY_TARGET,
-                model       = FEASIBILITY_MODEL,
-            )
-        except Exception as e:
-            print(f"[feasibility] 解析失敗: {type(e).__name__}: {e}")
-    elif RUN_FEASIBILITY_ANALYSIS and not _HAS_FEASIBILITY:
-        print("[feasibility] スキップ: scikit-learn が未インストール")
-
-    print("=" * 72)
-    if bo_interrupted:
-        print(f"中断完了。再開コマンド: 同じ main.py を再実行 (storage URL が同じ)")
-        print(f"  → storage: {storage_url}")
-    elif bo_fatal_error is not None:
-        print(f"異常終了。エラー: {type(bo_fatal_error).__name__}: {bo_fatal_error}")
-        raise bo_fatal_error
-    else:
-        print("完了。")
+from optimization import PipelineConfig, run_pipeline
 
 
 if __name__ == '__main__':
-    main()
+    run_pipeline(PipelineConfig(
+        # § 1
+        n_trials   = N_TRIALS,
+        n_startup  = N_STARTUP,
+        n_topk     = N_TOPK,
+        seed       = SEED,
+        sampler    = SAMPLER,
+        # § 2
+        solver_bo   = SOLVER_BO,
+        solver_topk = SOLVER_TOPK,
+        # § 3
+        apply_hi              = APPLY_HI,
+        apply_stage2_topk     = APPLY_STAGE2_TOPK,
+        hi_dT_min_K           = HI_DT_MIN_K,
+        strict_recovery_bo    = STRICT_RECOVERY_BO,
+        strict_recovery_topk  = STRICT_RECOVERY_TOPK,
+        recovery_tolerance    = RECOVERY_TOLERANCE,
+        # § 4
+        search_space = SEARCH_SPACE,
+        # § 5
+        output_dir       = OUTPUT_DIR,
+        save_sqlite      = SAVE_SQLITE,
+        save_trials_csv  = SAVE_TRIALS_CSV,
+        save_best_json   = SAVE_BEST_JSON,
+        save_topk_report = SAVE_TOPK_REPORT,
+        show_progress    = SHOW_PROGRESS,
+        display_best_full = DISPLAY_BEST_FULL,
+        # L1
+        run_feasibility_analysis = RUN_FEASIBILITY_ANALYSIS,
+        feasibility_target       = FEASIBILITY_TARGET,
+        feasibility_model        = FEASIBILITY_MODEL,
+    ))

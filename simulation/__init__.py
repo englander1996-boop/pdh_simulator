@@ -17,6 +17,9 @@ from simulation.display import (
     show_hi_summary, show_hi_comparison,
     show_stage2_synthesis, show_stage2_comparison,
 )
+from simulation.exp_runner import (
+    run_with_capture, run_exp, outer_iter_progress,
+)
 
 __all__ = [
     'display_full_results',
@@ -27,4 +30,6 @@ __all__ = [
     'show_hi_comparison',
     'show_stage2_synthesis',
     'show_stage2_comparison',
+    # exp_runner
+    'run_with_capture', 'run_exp', 'outer_iter_progress',
 ]
