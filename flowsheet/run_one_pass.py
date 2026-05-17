@@ -43,6 +43,52 @@ from config.load import OperatingConfig
 _ZERO = {'A': 0.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0, 'Z': 0.0}
 
 
+# ---------------------------------------------------------------------------
+# 早期 penalty 終了用ヘルパ (reactor で SV check 等が NG だった場合)
+# ---------------------------------------------------------------------------
+
+class _PenaltyEquipment:
+    """downstream units の equipment.CAPEX_total / CAPEX_total / 等を捏造するスタブ。"""
+    CAPEX_total: float = 1e9   # solver の penalty_hit 検査が拾えるよう sentinel
+    CAPEX:       float = 1e9
+    Reactor_CAPEX: float = 1e9
+
+
+class _PenaltyResult:
+    """downstream units の擬似結果。equipment 属性経由で sentinel CAPEX を返す。"""
+    equipment = _PenaltyEquipment()
+    top    = ProcessStream(F_in=dict(_ZERO), T_in=298.15, P_in=1e5)
+    bottom = ProcessStream(F_in=dict(_ZERO), T_in=298.15, P_in=1e5)
+    outlet = ProcessStream(F_in=dict(_ZERO), T_in=298.15, P_in=1e5)
+
+
+def _build_penalty_one_pass_result(
+    r_rx, reactor_inlet, dist1_top_rx, recycle_dist3, recycle_mem,
+    r1, fresh, pump1,
+):
+    """reactor が penalty 返却したとき、下流装置を全部スタブにして solver に渡す形を構築。
+
+    solver は `results['r_rx'].equipment.Reactor_CAPEX >= 1e8` を penalty_hit と
+    判定するため、本関数を経由しても適切に penalty 化される。下流装置の
+    P_in=0 例外を回避することが主目的。
+    """
+    stub = _PenaltyResult()
+    return dict(
+        pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
+        fresh=fresh,
+        reactor_inlet=reactor_inlet,
+        r_rx=r_rx, rx_out=ProcessStream(F_in=dict(_ZERO), T_in=298.15, P_in=1e5),
+        cooled=stub,
+        comp2a=stub, intercool=stub, comp2b=stub,
+        desuper=stub,
+        r2=stub,
+        r_psa=stub, mem_precool=stub, r_mem=stub, r3=stub,
+        tear_dist3_new={'A': 0.0, 'B': 0.0},
+        tear_mem_new  ={'A': 0.0, 'B': 0.0},
+        T_d3_new=298.15, T_mem_new=298.15,
+    )
+
+
 def run_one_pass(
     tear_dist3:   dict,
     tear_mem:     dict,
@@ -133,6 +179,18 @@ def run_one_pass(
         P_in=reactor_inlet.P_in,
     )
     r_rx = simulate_swing_reactor_system(design.swing, swing_feed, SwingFixed())
+
+    # 設計判断 (2026-05-17): reactor が penalty 返却 (例: SV 範囲外、V_cat 異常等で
+    # _penalty_result()) のとき、effluent は F=0, T=0, P=0。このまま下流の cooler/
+    # compressor に流すと「P_in=0」で ValueError 発生 → solver.py の penalty_hit
+    # 検査まで到達できない。早期に「penalty 状態で zero 流」のダミーを返して下流の
+    # 全装置を penalty 結果でスキップする。solver 側で Reactor_CAPEX >= 1e8 をもって
+    # penalty_hit と判定する。
+    if r_rx.equipment.Reactor_CAPEX >= 1e8:
+        return _build_penalty_one_pass_result(
+            r_rx, reactor_inlet, dist1_top_rx, recycle_dist3, recycle_mem,
+            r1=r1, fresh=fresh, pump1=pump1,
+        )
 
     rx_out = ProcessStream(
         F_in=r_rx.effluent.F_out_avg,

@@ -90,10 +90,19 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
     production_kmol_h = top_F.get('B', 0.0)
     target_kmol_h     = _target_kmol_h(config)
 
-    # ---- 判定 (片側: 規格値以上で pass) ----
+    # ---- 判定 ----
+    # 設計判断 (2026-05-17): production は両側 spec 化が可能。
+    #   下限: production >= target × (1 - production_min_relative)  常時有効
+    #   上限: production <= target × (1 + production_max_relative)  max_relative > 0 で有効
+    # 上限 spec を有効にすると BO は「overshoot で revenue 稼ぐ」戦略を取れなくなり、
+    # 高 yield (= F_fresh 最小化) 方向に誘導される。
     c3h6_pass       = c3h6_wt >= spec.c3h6_min_wtfrac
     h2_pass         = h2_mol  >= spec.h2_min_molfrac
-    production_pass = production_kmol_h >= target_kmol_h * (1.0 - spec.production_min_relative)
+
+    threshold_low  = target_kmol_h * (1.0 - spec.production_min_relative)
+    threshold_high = (target_kmol_h * (1.0 + spec.production_max_relative)
+                      if spec.production_max_relative > 0 else float('inf'))
+    production_pass = threshold_low <= production_kmol_h <= threshold_high
 
     # ---- 違反量を %pt 単位で正規化 ----
     # 設計判断: 異なる種類の制約 (質量分率 / モル分率 / 流量比率) を %pt スケールに
@@ -102,10 +111,10 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
     h2_violation_pp   = max(0.0, (spec.h2_min_molfrac  - h2_mol)  * 100.0)
     if production_pass:
         production_violation_pp = 0.0
-    else:
-        # 不足率 = (target × (1-tol) - actual) / target × 100  → %pt
-        threshold = target_kmol_h * (1.0 - spec.production_min_relative)
-        production_violation_pp = (threshold - production_kmol_h) / target_kmol_h * 100.0
+    elif production_kmol_h < threshold_low:
+        production_violation_pp = (threshold_low - production_kmol_h) / target_kmol_h * 100.0
+    else:  # overshoot
+        production_violation_pp = (production_kmol_h - threshold_high) / target_kmol_h * 100.0
 
     return SpecComplianceResult(
         c3h6_purity_wtfrac     =c3h6_wt,

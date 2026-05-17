@@ -158,9 +158,14 @@ def run_recycle_convergence(
         )
 
         if (results['r_psa'].equipment.CAPEX_total >= 1e8 or
-            results['r_mem'].equipment.CAPEX_total >= 1e8):
+            results['r_mem'].equipment.CAPEX_total >= 1e8 or
+            results['r_rx'].equipment.Reactor_CAPEX >= 1e8):
+            # 設計判断 (2026-05-17): swing reactor の SV check 違反等で
+            # Reactor_CAPEX = 1e9 (_PENALTY_CAPEX) になるケースも penalty_hit と扱う。
+            # 旧版は PSA/Mem のみ check していたため、reactor 起因 penalty が下流の
+            # compressor で「P_in=0」例外を引き起こしてた。
             if verbose:
-                print(f"  {it:4d} | --- PSA/Mem ペナルティ発火 → 設計変数の見直しが必要 ---")
+                print(f"  {it:4d} | --- Reactor/PSA/Mem ペナルティ発火 → 設計変数の見直しが必要 ---")
             penalty_hit = True
             break
 

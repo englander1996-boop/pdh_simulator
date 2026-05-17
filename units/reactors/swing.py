@@ -9,6 +9,37 @@ PDH スイング反応器システム シミュレーター
         DesignVars, FeedStream, FixedParams, simulate_swing_reactor_system
     )
     result = simulate_swing_reactor_system(design, feed, fixed)
+
+========================================================================
+⚠️ モデル限界 (レポート記載必須項目、2026-05-17 文書化)
+========================================================================
+本実装は **「単段断熱 PFR + 並列分割 (V_cat_max=200 m³/基)」** モデルである。
+商用 PDH プラント (UOP Oleflex / Lummus Catofin) は実態として:
+  - 反応器 1 基あたり L = 4〜6 m, D = 3〜5 m
+  - **多段直列構成 (3〜4 段)** で、段間で再加熱 (PDH は強吸熱、ΔH ≈ +124 kJ/mol)
+  - 段間ヒーターの追加 CAPEX + 燃料 OPEX が運転コストの数十億円規模を占める
+
+これに対し本モデルは:
+  - z_cat (例 BO ベスト 21.4 m) を「実質的に多段を 1 段にまとめた等価長さ」とみなす
+  - 段間ヒーター CAPEX/OPEX を計上しない
+  - 反応器内の温度プロファイルは断熱で T_in からどんどん下がる
+  - 並列分割 (V_cat_max 制約) は計算するが、直列分割 (= 多段化) は未実装
+
+結果として本モデルは **CAPEX/OPEX を過小評価** している可能性が高い:
+  1. 反応器本体 CAPEX: 単段大型 < 多段小型 (面積効率の差)
+  2. 段間ヒーター CAPEX: 計上なし
+  3. 段間ヒーター燃料費: 計上なし
+  4. 各段で再加熱 → 各段平均温度上昇 → 平均選択率↓・副反応↑
+
+レポートでは:
+  - 「本研究の TAC / Profit は単段断熱 PFR 仮定下の値であり、
+     実機の多段+段間 reheat 構成では追加 CAPEX/OPEX が見込まれる」旨を明記すること
+  - 改修候補: option C (多段反応器モデル + Ergun 圧損 + 触媒粒径 dp 変数化)
+
+なお本実装には以下の制約は既に組み込み済 (2026-05-17 改修):
+  - **空塔速度 SV = 0.5〜3.0 m/s** (触媒設計慣行値、SV 範囲外で infeasible)
+  - **触媒最大量 V_cat_max = 200 m³/基** (大型固定床の物理上限、超過時並列分割)
+========================================================================
 """
 
 import math
@@ -102,29 +133,60 @@ class FeedStream:
 @dataclass
 class FixedParams:
     """固定定数・制約条件"""
-    t_regen:              float = 30.0    # 触媒再生時間 [min]
-    V_cat_max_per_vessel: float = 200.0   # 1基最大触媒量 [m³]
-    eps:                  float = 0.5     # 空隙率 [-]
-    # 触媒充填密度 [kg/m³]
-    # 設計判断 (2026-05-09): 旧値 400 は実触媒データ (PtSn/Al2O3 ペレット 700-1000)
-    # の半分以下と低すぎ。一方で W_cat = V_cat × ρ_p の V_cat は (1-eps) 込みの
-    # 「固体体積」 (swing.py:368 参照) なので、ρ_p には粒子密度ではなく充填密度を
-    # 入れる現行式の意図に従い、実触媒の「粒子密度の代表値」700 を採用。
-    # (空隙の二重控除になっている可能性は別途要確認だが、形式整合のため形式を保持。)
-    rho_p:                float = 700.0
+    # !仮置き: 触媒再生時間 [min]
+    #   - コンテスト未指定、工業典型 (Catofin/Oleflex) 15〜60 min の中央値 30 を採用
+    #   - ユーザ判断で変更可。値が変わると N_swing_sets (= ceil(t_regen/t_cyc)+1)
+    #     経由で W_cat 総量に効く
+    t_regen:              float = 30.0
+
+    # 反応器サイズ制約 [m³]
+    #   コンテスト仕様: "1基あたりの最大触媒量は 200 m³、それ以上必要なら複数基"
+    #   ─ V_cat (床体積) に対する制約として swing.py で N_parallel 計算に使用
+    V_cat_max_per_vessel: float = 200.0
+
+    # 床/容器体積比 [-]
+    #   コンテスト仕様: "反応器容量 = 触媒量 × 2 の Process Vessel"
+    #   ⇒ V_cat / V_vessel = 0.5 ⇒ (1-eps) = 0.5 ⇒ eps = 0.5
+    #   ※「eps」は粒子間空隙率ではなく「床体積 / 容器体積」比の意味で本コード内で使用。
+    #     V_cat (床) = A × z_cat × (1-eps)、V_vessel (容器) = A × z_cat。
+    #     床自体の粒子間空隙率 (~0.4 typical) は本モデルでは陽に扱わない。
+    eps:                  float = 0.5
+
+    # !仮置き: 触媒充填密度 (bulk density) [kg/m³]
+    #   ─ 架空触媒のためユーザ判断で決定する値
+    #   ─ PtSn/Al2O3 ペレット触媒を想定した場合の公開データ範囲: 400〜800 kg/m³
+    #     (Clariant/BASF 等の公開サンプル値、典型値 500-700)
+    #   ─ 現値 700 は中央値〜やや高め、ユーザ判断で変更可
+    #   ─ 用途: W_cat = V_cat (床体積) × rho_b で触媒重量算出。
+    #     公知の式と一致 (床体積 × 充填密度 = 触媒重量)。
+    rho_b:                float = 700.0
+
+    # 空塔速度 (superficial velocity) 制約 [m/s]
+    # 設計判断 (2026-05-17): 触媒設計アドバイスで「固定床 PFR の SV は通常 1〜3 m/s」
+    # 推奨。本実装では下限を 0.5 にやや緩めて BO 探索空間を確保 (低 SV は滞留時間↑で
+    # over-conversion ぎみ、高 SV は圧損↑で実装注意)。範囲外なら infeasible (penalty 化)。
+    # SV = Q_vol_inlet / (π/4 × D²)、Q_vol は反応器入口 T_in, P_in での理想気体換算。
+    SV_min_m_per_s:       float = 0.5
+    SV_max_m_per_s:       float = 3.0
 
     def __post_init__(self) -> None:
         _checks = {
             "t_regen":              self.t_regen,
             "V_cat_max_per_vessel": self.V_cat_max_per_vessel,
             "eps":                  self.eps,
-            "rho_p":                self.rho_p,
+            "rho_b":                self.rho_b,
+            "SV_min_m_per_s":       self.SV_min_m_per_s,
+            "SV_max_m_per_s":       self.SV_max_m_per_s,
         }
         for name, val in _checks.items():
             if val <= 0:
                 raise ValueError(
                     f"FixedParams.{name}={val} は正値でなければなりません。"
                 )
+        if self.SV_min_m_per_s >= self.SV_max_m_per_s:
+            raise ValueError(
+                f"FixedParams: SV_min ({self.SV_min_m_per_s}) >= SV_max ({self.SV_max_m_per_s})"
+            )
 
 
 @dataclass
@@ -371,13 +433,43 @@ def simulate_swing_reactor_system(
 
     # ---- 装置計算 ----
     A_cross = math.pi / 4.0 * design.D ** 2
+
+    # 空塔速度 (superficial velocity) チェック
+    # 設計判断 (2026-05-17): 触媒設計アドバイス (固定床 PFR、1〜3 m/s) に従い、
+    # FixedParams.SV_{min,max}_m_per_s 範囲外なら infeasible 化。
+    # SV は反応器入口 (T_in, P_in) での理想気体換算体積流量 / 断面積。
+    # 並列分割される場合 (V_cat > V_cat_max) は 1 基あたりの断面積で評価する必要が
+    # あるが、まず全体断面で評価し、N_parallel ≥ 1 とした上で SV をスケールする。
+    n_inlet_mol_s = sum(feed.F_in.values()) * 1000.0 / 3600.0   # kmol/h → mol/s
+    if feed.P_in > 0:
+        Q_vol_m3_s = n_inlet_mol_s * 8.314 * design.T_in / feed.P_in
+    else:
+        Q_vol_m3_s = 0.0
+    # N_parallel をここで仮計算 (後段と同じロジック)
     V_cat_total = A_cross * design.z_cat * (1.0 - fixed.eps)
     N_parallel = max(math.ceil(V_cat_total / fixed.V_cat_max_per_vessel), 1)
+    # 並列分割される場合、1 基あたりの断面積で SV 評価
+    SV_m_per_s = Q_vol_m3_s / (A_cross * N_parallel) if A_cross > 0 else 0.0
+    if not (fixed.SV_min_m_per_s <= SV_m_per_s <= fixed.SV_max_m_per_s):
+        # 範囲外: infeasible として返す
+        warnings.warn(
+            f"swing reactor: SV={SV_m_per_s:.2f} m/s が範囲 "
+            f"[{fixed.SV_min_m_per_s}, {fixed.SV_max_m_per_s}] m/s 外 "
+            f"(D={design.D:.2f}m, N_parallel={N_parallel}, T_in={design.T_in:.1f}K, "
+            f"P_in={feed.P_in/1e5:.2f}bar) — infeasible 化",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result()
+
     N_swing_sets = math.ceil(fixed.t_regen / design.t_cyc) + 1
     N_reactors_total = N_parallel * N_swing_sets
 
     V_vessel_actual = (V_cat_total / N_parallel) / (1.0 - fixed.eps)  # [m³]
-    catalyst_weight_total = V_cat_total * N_swing_sets * fixed.rho_p  # [kg]
+    # W_cat = (床体積) × N_swing_sets × ρ_bulk
+    #   V_cat_total : 床体積 = π/4×D²×z_cat×(1-eps) [m³]、eps は「床/容器比」
+    #   N_swing_sets: 再生中の塔含めた全セット分の触媒が必要
+    #   rho_b       : 床全体の充填密度 [kg/m³] (粒子間空隙込み)
+    catalyst_weight_total = V_cat_total * N_swing_sets * fixed.rho_b  # [kg]
 
     if V_vessel_actual <= 0:
         return _penalty_result()

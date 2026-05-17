@@ -84,7 +84,10 @@ def _annual_okuyen(F_kmol_h: float, MW_kg_per_kmol: float, jpy_per_kg: float) ->
 
 
 def _offgas_GJ_per_h(offgas: dict) -> float:
-    """PSA オフガス組成 (dict {A,B,...: kmol/h}) を高位発熱量ベースで GJ/h 換算。"""
+    """ガス組成 (dict {A,B,...: kmol/h}) を高位発熱量ベースで GJ/h 換算。
+
+    PSA オフガス・Dist1 塔底 (C4H10 主) などの「廃棄→燃料 CR」評価に共用。
+    """
     return sum(
         offgas.get(c, 0.0) * HHV_MJ_PER_KMOL.get(c, 0.0) / 1000.0
         for c in offgas
@@ -356,6 +359,16 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     offgas_GJ_per_h = _offgas_GJ_per_h(R['r_psa'].offgas)
     revenue['PSA オフガス燃料クレジット'] = (
         offgas_GJ_per_h * OPERATING_HOURS_PER_YEAR * FUEL_JPY_PER_GJ / 1.0e8
+    )
+
+    # Dist1 塔底 (C4H10 富化) も燃料系へ送って CR 計上。
+    # 設計判断 (2026-05-17): LPG (C3H8+C4H10) は HHV ~50 MJ/kg と高位、製品 spec
+    # から外れた C4 を burning するのは工業的に標準 (refinery fuel gas header)。
+    # コンテストで LPG 直販オプションがあれば revenue は更に高くなるが、現状は
+    # FUEL_JPY_PER_GJ (1500 円/GJ ≒ LNG 相当) で評価する保守的計上。
+    dist1_bot_GJ_per_h = _offgas_GJ_per_h(R['r1'].bottom.F_in)
+    revenue['Dist1 塔底 燃料クレジット'] = (
+        dist1_bot_GJ_per_h * OPERATING_HOURS_PER_YEAR * FUEL_JPY_PER_GJ / 1.0e8
     )
 
     return capex, opex, revenue
