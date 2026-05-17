@@ -123,6 +123,55 @@ def _print_snapshot(cfg: PipelineConfig, timestamp: str, storage_url: Optional[s
 # ベスト候補の詳細表示
 # ---------------------------------------------------------------------------
 
+def _write_readme(out_dir: Path, cfg, paths, study, be, timestamp: str) -> None:
+    """run subdir に README.md を出力 (結果の見方ガイド)。"""
+    lines = []
+    lines.append(f"# PDH 多変数最適化 run — {timestamp}")
+    lines.append("")
+    lines.append("## まず見るべきファイル (推奨順)")
+    lines.append("")
+    lines.append("1. **`topk.txt`** ─ ★最終結果。top-k 候補の rigorous + Stage 2 再評価詳細。")
+    lines.append("   - BO ベスト ≠ 真のベストの場合あり、本ファイルの `rank 1` が実際の最良。")
+    lines.append("   - `feas_re=True` の中で `effective_TAC_re` 最小が「採用すべき設計」。")
+    lines.append("2. **`best.json`** ─ BO 単体ベスト trial の params + 経済値。簡易確認用。")
+    lines.append("3. **`feasibility.txt`** ─ 収束分類器の AUC + 特徴量重要度。")
+    lines.append("   - 「どの設計変数が収束/非収束を左右するか」のヒント。")
+    lines.append("")
+    lines.append("## 詳細解析用")
+    lines.append("")
+    lines.append("4. **`trials.csv`** ─ 全 trial 履歴。Excel/pandas で散布図・統計解析。")
+    lines.append("5. **`feasibility_2d.png`** ─ 最重要 2 変数で feasible/infeasible 散布図。")
+    lines.append("6. **`optuna.db`** ─ Optuna SQLite。")
+    lines.append("   - 中断時の再開: 同じ main.py で再実行 (storage 自動検出)。")
+    lines.append("   - 可視化: `optuna-dashboard sqlite:///optuna.db`")
+    lines.append("")
+    lines.append("## この run の設定")
+    lines.append("")
+    lines.append(f"- N_TRIALS = {cfg.n_trials}, N_STARTUP = {cfg.n_startup}, N_TOPK = {cfg.n_topk}")
+    lines.append(f"- SAMPLER = {cfg.sampler}, SEED = {cfg.seed}")
+    lines.append(f"- SOLVER_BO = {cfg.solver_bo}")
+    lines.append(f"- SOLVER_TOPK = {cfg.solver_topk}")
+    lines.append(f"- 探索変数数 = {len(cfg.search_space)}")
+    lines.append("")
+    lines.append("## ベスト要約")
+    lines.append("")
+    if be is not None:
+        tag = "feasible ✓" if be.is_feasible_re else "infeasible ✗"
+        lines.append(f"- top-k 再評価ベスト: **trial #{be.trial_number}** (rank {be.rank})")
+        lines.append(f"- effective_TAC (再評価) = **{be.effective_TAC_re:.3f}** 億円/年 ({tag})")
+        if be.result.economics_synth is not None:
+            lines.append(f"- Profit (Stage 2 後) = **{be.result.economics_synth.profit:+.3f}** 億円/年")
+    else:
+        try:
+            best = study.best_trial
+            lines.append(f"- BO ベスト trial #{best.number}: effective_TAC = {best.value:.3f} 億円/年")
+            lines.append(f"- top-k 再評価未実施 or 全 infeasible")
+        except ValueError:
+            lines.append(f"- 完了 trial なし")
+    lines.append("")
+    (out_dir / 'README.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
 def _display_best_full(entry: TopKEntry, cfg: PipelineConfig, config) -> None:
     """top-k のベスト候補について exp1 と同じ詳細レポートを出力。
 
@@ -159,16 +208,21 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     _validate(cfg)
 
     # ---- パス準備 ----
+    # 設計判断 (2026-05-17): 各 run の成果物 6 ファイルを 1 subdir にまとめる。
+    # outputs/main_<timestamp>/{optuna.db, trials.csv, best.json, topk.txt,
+    #   feasibility.txt, feasibility_2d.png}
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir    = Path(cfg.output_dir)
+    out_root   = Path(cfg.output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    out_dir    = out_root / f'main_{timestamp}'   # 本 run 専用 subdir
     out_dir.mkdir(parents=True, exist_ok=True)
     study_name = f'pdh_{timestamp}'
     paths = {
-        'db':                  out_dir / f'main_{timestamp}.db',
-        'trials_csv':          out_dir / f'main_{timestamp}_trials.csv',
-        'best_json':           out_dir / f'main_{timestamp}_best.json',
-        'topk_report':         out_dir / f'main_{timestamp}_topk.txt',
-        'feasibility_prefix':  f'main_{timestamp}_feasibility',
+        'db':                  out_dir / 'optuna.db',
+        'trials_csv':          out_dir / 'trials.csv',
+        'best_json':           out_dir / 'best.json',
+        'topk_report':         out_dir / 'topk.txt',
+        'feasibility_prefix':  'feasibility',   # → out_dir/feasibility.txt, feasibility_2d.png
     }
     storage_url = f'sqlite:///{paths["db"].as_posix()}' if cfg.save_sqlite else None
 
@@ -304,6 +358,21 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
             _display_best_full(be, cfg, config)
         except Exception as e:
             print(f"[詳細表示] 失敗: {type(e).__name__}: {e}")
+
+    # ---- 出力ガイド + README 生成 ----
+    _write_readme(out_dir, cfg, paths, study, be, timestamp)
+    print()
+    print("=" * 72)
+    print(f"成果物: {out_dir.resolve()}/")
+    print("=" * 72)
+    print(f"  📌 README.md       … 結果の見方ガイド (最初に開いて)")
+    print(f"  ★ topk.txt        … top-{cfg.n_topk} 候補の詳細比較 (★最終結果はここ)")
+    print(f"  ・ best.json       … BO ベスト trial (JSON、ベスト 1 件のみ簡易)")
+    print(f"  ・ trials.csv      … 全 {cfg.n_trials} trial 履歴 (Excel/pandas で解析)")
+    if cfg.run_feasibility_analysis:
+        print(f"  ・ feasibility.txt   … 収束分類学習レポート (特徴量重要度)")
+        print(f"  ・ feasibility_2d.png … feasible/infeasible 2D 散布図")
+    print(f"  ・ optuna.db       … SQLite (中断・再開・dashboard 用)")
 
     # ---- 終了メッセージ ----
     print("=" * 72)

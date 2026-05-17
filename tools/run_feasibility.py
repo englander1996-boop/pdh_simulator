@@ -40,10 +40,10 @@ def main():
     parser.add_argument('--model', type=str, default='rf',
                         choices=['rf', 'logreg'],
                         help="分類器 (default: 'rf')")
-    parser.add_argument('--output-dir', type=str, default='outputs',
-                        help='出力先ディレクトリ (default: outputs)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='出力先ディレクトリ (default: DB ファイルと同じ subdir)')
     parser.add_argument('--prefix', type=str, default=None,
-                        help='出力ファイルのプレフィックス (default: <db ベース名>_feasibility)')
+                        help='出力ファイルのプレフィックス (default: "feasibility_<target>_<model>")')
     args = parser.parse_args()
 
     db_path = Path(args.db_path).resolve()
@@ -51,6 +51,10 @@ def main():
         print(f"ERROR: DB ファイルが見つかりません: {db_path}", file=sys.stderr)
         sys.exit(1)
     storage_url = f'sqlite:///{db_path.as_posix()}'
+
+    # 設計判断 (2026-05-17): main.py が run ごと subdir 構造を採用 (outputs/main_<ts>/)。
+    # output_dir 未指定なら DB と同じ subdir に出す。
+    output_dir = Path(args.output_dir) if args.output_dir else db_path.parent
 
     # study 名の解決
     if args.study_name is None:
@@ -66,10 +70,10 @@ def main():
     study = optuna.load_study(study_name=study_name, storage=storage_url)
     print(f"[info] study '{study_name}' をロード ({len(study.trials)} trial)")
 
-    prefix = args.prefix or f'{db_path.stem}_feasibility_{args.target}_{args.model}'
+    prefix = args.prefix or f'feasibility_{args.target}_{args.model}'
     analyze_feasibility(
         study       = study,
-        output_dir  = args.output_dir,
+        output_dir  = output_dir,
         prefix      = prefix,
         target_type = args.target,
         model       = args.model,

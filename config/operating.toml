@@ -98,6 +98,11 @@ tear_mem_B_per_1500_fresh = 600.0
 c3h6_min_wtfrac         = 0.995    # Dist3 塔頂の C3H6 質量分率 (contest 必須)
 h2_min_molfrac          = 0.999    # PSA 製品の H2 モル分率 (販売想定で独自設定)
 production_min_relative = 0.01     # 生産量 1% 不足まで許容 (= 外側 TOL と同値)
+# 設計判断 (2026-05-17): 両側 spec で overshoot 戦略を弾き、BO を高 yield 誘導。
+# 旧版は片側 spec で overshoot 自由 → BO が「生産量過剰で revenue 稼ぐ」戦略を選択。
+# 0.02 = 2% overshoot まで許容 (BO の探索余白を確保)、それ以上 penalty。
+# 0.0 で無効化 (旧仕様)。
+production_max_relative = 0.02
 
 
 # ===========================================================================
@@ -117,5 +122,11 @@ production_min_relative = 0.01     # 生産量 1% 不足まで許容 (= 外側 T
 #   ソフトペナルティの方が探索効率が良い (相談時の合意 2026-05-08)。
 [penalty]
 solver_failure_okuyen = 10000.0   # solver-level 失敗時の TAC 固定値 [億円/年]
-spec_base_okuyen      = 1000.0    # spec 違反 1 つにつき固定加算 [億円/年]
+# 設計判断 (2026-05-17): spec_base 旧 1000 → 50 へ大幅引き下げ。
+# 理由: 両側 production spec を導入したことで「わずかな overshoot/undershoot」
+# でも base 1000 が加算され、effective_TAC ≈ 2000 域に押し上げられて TPE が
+# gradient を学習できなくなる事象が発生 (v7 で 全 trial 1500+ になった)。
+# base を 50 にすると「spec 違反は明確に悪いが、TAC 本体の差は見える」状態に。
+# spec_coef は据置 (1pp 違反で +100 億円、5pp で +500 億円と十分大きい)。
+spec_base_okuyen      = 50.0      # spec 違反 1 つにつき固定加算 [億円/年]
 spec_coef_okuyen      = 100.0     # 違反%pt 当たりの加算係数 [億円/(年・%pt)]

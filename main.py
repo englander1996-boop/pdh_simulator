@@ -120,10 +120,13 @@ SEARCH_SPACE = {
     'reflux_dist3':      (11.0,   20.0,   'linear', 'float'),  # -  下限: R_min ≈ 10 + margin / 上限: !仮置き
 
     # ----- Fresh LPG (BO 直接指定、外側ループ skip) -----
-    # !仮置き: baseline exp1 で外側ループ実測 F_fresh ≈ 1666 kmol/h を中心に -50% / +50% 程度。
-    # production_min spec (1188 ± 1% kmol/h) は soft penalty として効くので、
-    # F_fresh が低すぎる = 生産量不足 = penalty で自然に上向きに収束する想定。
-    'F_C3H8_fresh_kmol_h': (800.0, 2500.0, 'linear', 'float'),  # kmol/h !仮置き
+    # 設計判断 (2026-05-17): yield 0.7-0.95 領域全体を探索可能な範囲に。
+    # production target = 1188 kmol/h、両側 ±2% spec 想定:
+    #   F_fresh 1200 + yield 92% = 1104 (undershoot OK 範囲外、ペナルティ ~3pp)
+    #   F_fresh 1700 + yield 71% = 1207 (overshoot OK 範囲)
+    #   F_fresh 1300 + yield 90% = 1170 (target 近傍 ✓)
+    # 上限 1700 で yield ≥ 71% (baseline 同水準) も探索可、BO が高 yield を選好するはず。
+    'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),
 
     # ----- 蒸留塔 recovery は最適化対象外 (0.99 固定、変更したい場合は ColumnTunables 経由で指定可) -----
     # 'rec_LK_top_dist1':  (0.90, 0.999, 'linear', 'float'),

@@ -40,64 +40,51 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # === 反応器 (Swing) ============================================================
-#  per-pass X が 0.5 bar 反応条件で 30% 前後を確保できる組み合わせを既定値に。
-#  T_in を上げる (940→970K) と X↑ だが副反応 (cracking) も増えて選択率↓。
-#  z_cat を下げる (30→20m) と W_cat 比例で OPEX↓ だが X↓ でリサイクル↑。
-#  ↓ 2026-05-17: main.py BO v4 ベスト Trial #294 の値を採用 (Profit -98 億円/年、baseline 比 +52 改善)
-T_in_K        = 917.5081    # K       入口温度 (BO ベスト、baseline 950 から低温化で選択率↑)
-z_cat_m       = 21.4408     # m       触媒層長さ
-t_cyc_min     = 14.0898     # min     1 サイクル運転時間
-D_reactor_m   = 6.7392      # m       反応器内径
+#  ↓ 2026-05-17: main.py BO v7-third (両側spec±2% + spec_base=50) ベスト Trial #257
+#    (Profit Stage 2 ≈ -225 億円/年、yield 84.5%、生産量 target ぴったり 1178 kmol/h)
+#    Note: yield は v6 (77%) より改善 ✓ だが overshoot 戦略封じで Profit は悪化
+T_in_K        = 908.1870    # K       入口温度
+z_cat_m       = 20.3246     # m       触媒層長さ
+t_cyc_min     = 15.8635     # min     1 サイクル運転時間
+D_reactor_m   = 9.5686      # m       反応器内径
 
 
 # === PSA (Dist2 塔頂から H2 回収) ==============================================
-#  D_col / L_bed を増やすと容積拡大で破過時間 t_abs が伸びて N_total_columns↓。
-#  desorption_target を下げると脱着時間が伸びる。
-D_psa_col_m       = 4.5648    # m       塔径 (BO ベスト)
-L_psa_bed_m       = 11.9958   # m       吸着層高さ
-desorption_target = 0.5258    # -       q が初期値の 52.6% まで脱着
+D_psa_col_m       = 3.8947    # m       塔径
+L_psa_bed_m       = 20.3596   # m       吸着層高さ
+desorption_target = 0.1724    # -       q が初期値の 17% まで脱着
 
 
 # === 膜分離 (Dist2 塔底から C3H6/C3H8 を分離) ===================================
-#  A_mem を増やすと透過量↑、stage cut↑ で C3H6 回収率↑、保留側流量↓ だが CAPEX↑。
-#  P_H 上げると駆動力↑ だが 9.5 bar 上限 (Hua et al. 2024)。
-P_H_Pa     = 5.5150e5    # Pa      膜供給側圧力 (BO ベスト、5.5 bar)
+P_H_Pa     = 6.3178e5    # Pa      膜供給側圧力 (6.3 bar)
 P_L_Pa     = 1.0e5       # Pa      透過側圧力 (大気圧固定)
-A_mem_m2   = 2.1897e5    # m²      総膜面積 (BO ベスト、baseline 1e5 の 2.2倍)
+A_mem_m2   = 9.3262e4    # m²      総膜面積 (baseline 1e5 と同水準、小さめ)
 
 
 # === Dist1 (脱ブタン塔: C3 ←→ C4 分離) =========================================
-#  PR R_min ≈ 0.95、P_col 上げると α↓ で R_min↑ だが冷却水で凝縮しやすくなる。
-#  N_stages 減らすと CAPEX↓ だが N_min=12 を切ると infeasible。
-P_dist1_Pa     = 17.5864e5   # Pa      操作圧力 (BO ベスト 17.6 bar)
-N_dist1        = 27          # -       理論段数 (BO ベスト)
-N_feed_dist1   = 14          # -       フィード段 (Kirkbride 推奨が自動採用、本値は無視)
-reflux_dist1   = 1.6975      # -       還流比 (BO ベスト)
+P_dist1_Pa     = 12.8345e5   # Pa      操作圧力 (12.8 bar)
+N_dist1        = 24          # -       理論段数
+N_feed_dist1   = 12          # -       フィード段 (Kirkbride 自動採用、本値無視)
+reflux_dist1   = 1.9445      # -       還流比
 
 
 # === Dist2 (脱エタン塔: 軽質ガス ←→ C3) ========================================
-#  z_LK=C2H4 が 0.26〜数 mol% で振れるため R_min が運転状態依存 (1.5〜4.8)。
-#  P_col は膜の P_H ≤ 9.5 bar 制約から 8.5 bar が上限近傍。
-P_dist2_Pa     = 5.2169e5    # Pa      操作圧力 (BO ベスト 5.2 bar)
-N_dist2        = 27          # -       理論段数 (rigorous で 99% 達成可能)
+P_dist2_Pa     = 6.0408e5    # Pa      操作圧力 (6 bar)
+N_dist2        = 27          # -       理論段数
 N_feed_dist2   = 14          # -       フィード段 (Kirkbride 自動採用)
-reflux_dist2   = 6.0639      # -       還流比 (BO ベスト)
+reflux_dist2   = 9.2288      # -       還流比
 
 
 # === Dist3 (C3 スプリッタ: C3H6 製品精製) ======================================
-#  α 極小 (1.07) で OPEX 支配的 (Q_reb ~80MW)。R 下げる効果大、下限 11 まで。
-#  N_stages 200 は実機並み、N_min ≈ 81。P_col は冷却水で凝縮可能な下限近く 20 bar。
-P_dist3_Pa     = 19.5662e5   # Pa      操作圧力 (= mem.P_dist と同期、BO ベスト)
-N_dist3        = 127         # -       理論段数 (BO ベスト、N_min ≈ 81 から margin 56%)
-N_feed_dist3   = 63          # -       フィード段 (Kirkbride 自動採用)
-reflux_dist3   = 11.4597     # -       還流比 (R_min ≈ 10 近く、Q_reb 最小狙い)
+P_dist3_Pa     = 20.4920e5   # Pa      操作圧力 (= mem.P_dist と同期、20.5 bar)
+N_dist3        = 178         # -       理論段数
+N_feed_dist3   = 89          # -       フィード段 (Kirkbride 自動採用)
+reflux_dist3   = 17.5116     # -       還流比
 
 
 # === Fresh LPG (BO 直接指定、外側ループ skip) ==================================
-#  None  → 外側ループで自動調整 (従来動作)、target 1188 kmol/h C3H6 に張り付かせる
-#  float → 指定値を使って 1 回内側ループ実行、生産量はそれに応じて変動
-#  ↓ 2026-05-17: BO ベスト = 1366.7 (baseline 1666 から -18%、yield 71→86% 改善)
-F_C3H8_fresh_kmol_h = 1366.7087
+#  ↓ 2026-05-17: BO v7 ベスト = 1394.9 (両側spec で target 厳守、yield 84.5% 達成)
+F_C3H8_fresh_kmol_h = 1394.9415
 
 
 # === 蒸留塔 recovery (None = 0.99 既定値、float = 上書き) ======================
