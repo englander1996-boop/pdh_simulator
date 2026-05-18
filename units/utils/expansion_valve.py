@@ -154,9 +154,15 @@ def simulate_jt_expansion(
     try:
         T2 = brentq(enthalpy_balance, T_lo, T_hi, xtol=0.05, maxiter=200)
     except (ValueError, RuntimeError) as e:
+        # 設計判断 (2026-05-18): JT 膨張の brentq 失敗時は理想気体仮定 (T2=T1) で
+        # 返す。実気体の JT 冷却効果が無視されるため反応器入口プレヒート Q_preheat
+        # が過小推算になる可能性あり (定量はユーザー検証要)。warning は
+        # flowsheet/run_one_pass.py の _capture_warnings 経由で BO log に残るため、
+        # 頻発時は探索範囲または PR EOS 適用範囲を見直すこと。
         warnings.warn(
             f"expansion_valve: brentq 収束失敗 ({e}, T1={T1:.1f}K, "
-            f"P1={P1/1e5:.2f}→P2={P_out/1e5:.2f} bar)。理想気体仮定 (T 維持) で返す。",
+            f"P1={P1/1e5:.2f}→P2={P_out/1e5:.2f} bar)。"
+            f"理想気体仮定 (T2=T1) で fallback、JT 冷却効果は無視される。",
             UserWarning, stacklevel=2,
         )
         T2 = T1

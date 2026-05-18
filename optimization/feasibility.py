@@ -24,10 +24,20 @@ from typing import Dict, List, Optional, Tuple
 import optuna
 
 
-# 設計判断: SOLVER_FAILURE_THRESHOLD は config.penalty.solver_failure_okuyen と同じ。
-# main.py の config をロードせずに済むよう、ここでは「BO のペナルティ値より十分小さい」
-# 閾値を 9999 で固定 (penalty 値の慣例 1000-10000 をカバー)。
-SOLVER_FAILURE_THRESHOLD = 9999.0
+# 設計判断 (2026-05-18): SOLVER_FAILURE_THRESHOLD は config.penalty.solver_failure_okuyen
+# から導出する。閾値 = penalty 値 - 1.0 で「ペナルティ確定」値より僅かに小さい値を取り、
+# float 比較で取りこぼしを防ぐ。旧版は 9999 で hardcode していたが、operating.toml の
+# 値変更時に同期忘れリスクがあったため lazy load 化。
+def _get_solver_failure_threshold() -> float:
+    """operating.toml の penalty.solver_failure_okuyen から閾値を計算する (lazy)。"""
+    from config.load import load_operating_config
+    cfg = load_operating_config()
+    return cfg.penalty.solver_failure_okuyen - 1.0
+
+
+# Backward compat: 旧 API (module-level 定数) もサポート。
+# 初回 import 時に config を 1 回だけロードする。
+SOLVER_FAILURE_THRESHOLD = _get_solver_failure_threshold()
 
 
 @dataclass

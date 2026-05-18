@@ -106,13 +106,13 @@ SEARCH_SPACE = {
 
     # ----- Dist1 (脱ブタン塔) -----
     'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (pump1 出口圧と同期)
-    'N_dist1':           (16,     30,     'linear', 'int'  ),  # -  下限引き上げ (旧14→16): N_min ≈ 12 から margin 33% 確保
-    'reflux_dist1':      (1.1,    3.0,    'linear', 'float'),  # -  下限引き上げ (旧1.0→1.1): R_min ≈ 0.95 から margin 16% 確保
+    'N_dist1':           (16,     30,     'linear', 'int'  ),  # -  !仮置き (下限: 旧14→16、N_min ≈ 12 から margin 33% / 上限: 経験値)
+    'reflux_dist1':      (1.1,    3.0,    'linear', 'float'),  # -  !仮置き (下限: 旧1.0→1.1、R_min ≈ 0.95 から margin 16% / 上限: 経験値)
 
     # ----- Dist2 (脱エタン塔, partial cond) -----
     'P_dist2_Pa':        (5.0e5,  9.5e5,  'linear', 'float'),  # Pa 上限: P_H 9.5 bar と整合 / 下限: !仮置き
-    'N_dist2':           (20,     40,     'linear', 'int'  ),  # -  下限引き上げ (旧10→20): rigorous で 99% recovery 物理達成可能な領域に
-    'reflux_dist2':      (3.0,    10.0,   'linear', 'float'),  # -  R_min 1.5-4.8 運転依存、下限引き上げ (旧2→3): narrow-margin 回避
+    'N_dist2':           (20,     40,     'linear', 'int'  ),  # -  !仮置き (下限: 旧10→20、rigorous で 99% recovery 物理達成可能領域 / 上限: 経験値)
+    'reflux_dist2':      (3.0,    10.0,   'linear', 'float'),  # -  !仮置き (R_min 1.5-4.8 運転依存、下限: 旧2→3、narrow-margin 回避 / 上限: 経験値)
 
     # ----- Dist3 (C3 スプリッタ, narrow-α) -----
     'P_dist3_Pa':        (15.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (mem.P_dist と同期、冷却水凝縮可能下限近傍)
@@ -126,7 +126,7 @@ SEARCH_SPACE = {
     #   F_fresh 1700 + yield 71% = 1207 (overshoot OK 範囲)
     #   F_fresh 1300 + yield 90% = 1170 (target 近傍 ✓)
     # 上限 1700 で yield ≥ 71% (baseline 同水準) も探索可、BO が高 yield を選好するはず。
-    'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),
+    'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),  # kmol/h !仮置き (yield 想定からの逆算範囲、BO 結果見ながら要調整)
 
     # ----- 蒸留塔 recovery は最適化対象外 (0.99 固定、変更したい場合は ColumnTunables 経由で指定可) -----
     # 'rec_LK_top_dist1':  (0.90, 0.999, 'linear', 'float'),

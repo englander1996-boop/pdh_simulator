@@ -146,6 +146,9 @@ class ThermoParams:
     d: float        # [J K⁻⁴ mol⁻¹]
     # Peng-Robinson EOS 用パラメータ（膜分離モジュール向け）
     # PR パラメータが不要な成分は省略可（デフォルト nan）
+    # 注意 (2026-05-18 確認): 全成分 A〜F, Z の Tc/Pc/omega は化学工学便覧 改訂六版
+    # 表1.3 から既に fill 済 (下記 THERMO_DATA 参照)。nan のままの成分は無いが、
+    # 将来新成分追加時に省略可能な余地として nan default を残す。
     Tc:    float = float('nan')  # [K]  臨界温度
     Pc:    float = float('nan')  # [Pa] 臨界圧力
     omega: float = float('nan')  # [-]  アセントリック因子
