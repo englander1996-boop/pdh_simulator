@@ -104,6 +104,11 @@ def _mix(T: float, P: float, x: List[float], keys: List[str]):
     b_m  = Σ xᵢ bᵢ
     da_m/dT = 2·S·Ṡ  ただし S = Σ xᵢ √aᵢ,  Ṡ = Σ xᵢ d(√aᵢ)/dT
 
+    !仮置き k_ij = 0 (van der Waals 古典近似)。文献値の出典確定はユーザー判断要。
+    完全実装には _mix を二重和  a_m = Σᵢ Σⱼ xᵢ xⱼ (1−kᵢⱼ) √(aᵢ aⱼ) に
+    書き換え + k_ij テーブル (src/component_data.py に追加) が必要。
+    """
+
     Returns
     -------
     A      : a_m P / (R²T²)
@@ -209,7 +214,17 @@ def z_factor(T: float, P: float, x: List[float], keys: List[str],
     A, B, *_ = _mix(T, P, x, keys)
     roots = _cubic_z(A, B)
     if not roots:
-        warnings.warn(f"z_factor: 実根なし (T={T:.1f}K, P={P/1e5:.2f}bar)。Z=1 を返します。")
+        # 設計判断 (2026-05-18): PR EOS の cubic root が単相領域で消失する境界
+        # (e.g., 臨界点近傍、低温真空) で Z=1 (理想気体) を返す。下流の fugacity
+        # 計算は φ ≈ 1 となり K ≈ p_sat/P で近似される。蒸留塔の rigorous solver
+        # では MESH 残差で検出されて FUG fallback するが、PSA/Mem の単純な流量
+        # 計算では誤差が直接 CAPEX に伝播するため注意 (定量はユーザー検証要)。
+        warnings.warn(
+            f"z_factor: PR EOS 実根なし (T={T:.1f}K, P={P/1e5:.2f}bar, "
+            f"phase={phase!r}, keys={keys})。Z=1 (理想気体) で fallback。"
+            f"下流計算は φ≈1 仮定で進行。",
+            UserWarning, stacklevel=2,
+        )
         return 1.0
     return max(roots) if phase == 'vapor' else min(roots)
 

@@ -68,7 +68,7 @@
                                （断熱効率とポリトロープ効率は厳密に異なるが初期設計では同値で近似）
   T_vap_superheat = 5 K        気化器出口の過熱度（露点 + 5K）
 
-■ ★★ 仮置き値 — 根拠文献未確定（要確認・要更新） ★★
+■ !仮置き値 — 根拠文献未確定（要確認・要更新）
 
   A_per_module = 500 m²        モジュール 1 本あたり有効膜面積
                                確認方法: Evonik SEPURAN・UBE 等のデータシートから
@@ -157,7 +157,7 @@ class MemFixedParams:
     # 膜性能 — Hua et al. (2024) 実測値
     Q_A_GPU:         float = 40.0    # C3H6 透過度 [GPU]
     alpha:           float = 90.0    # C3H6/C3H8 選択性 [-]
-    # ★ 仮置き — メーカーカタログで要確認（Evonik SEPURAN 等のデータシートから算出）
+    # !仮置き — メーカーカタログで要確認（Evonik SEPURAN 等のデータシートから算出）
     A_per_module:    float = 500.0   # モジュール 1 本あたり有効膜面積 [m²]（仮置き）
     # 気化器
     T_vap_superheat: float = 5.0     # 露点超過の過熱度 [K]（設計ヒューリスティクス）
@@ -191,12 +191,26 @@ class MemFixedParams:
             raise ValueError("eta_comp は (0, 1] でなければなりません。")
         if self.T_hot <= 273.15:
             raise ValueError("T_hot は 273K 超でなければなりません。")
-        warnings.warn(
-            f"MemFixedParams: A_per_module = {self.A_per_module} m² は仮置き値です。"
-            " Evonik SEPURAN 等のデータシートから中空糸寸法を取得して算出後に更新してください。",
-            UserWarning,
-            stacklevel=2,
-        )
+        # 仮置き値の警告はモジュール初回のみ発火 (BO 数千 trial で log noise になるため)。
+        _warn_once_A_per_module(self.A_per_module)
+
+
+# モジュールレベルの "初回のみ警告" フラグ。同じ値で複数回 MemFixedParams が
+# インスタンス化されても警告は 1 度だけに抑える (BO で数千回呼ばれるため)。
+_A_PER_MODULE_WARNED_VALUES: set = set()
+
+
+def _warn_once_A_per_module(value: float) -> None:
+    if value in _A_PER_MODULE_WARNED_VALUES:
+        return
+    _A_PER_MODULE_WARNED_VALUES.add(value)
+    warnings.warn(
+        f"MemFixedParams: A_per_module = {value} m² は仮置き値です。"
+        " Evonik SEPURAN 等のデータシートから中空糸寸法を取得して算出後に更新してください。"
+        " (この警告は同一値に対し初回のみ発火します)",
+        UserWarning,
+        stacklevel=3,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +272,7 @@ class MemEquipmentData:
     CAPEX_comp_feed:  float = float('nan')  # フィード圧縮機
     CAPEX_comp_prod:  float = float('nan')  # 製品圧縮機
     CAPEX_cond:       float = float('nan')  # 製品冷却器
-    # ★ 仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
+    # !仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
     CAPEX_mem:        float = float('nan')  # 膜モジュール（単価仮置き中）
     CAPEX_total:      float = float('nan')  # 合計 [億円]（CAPEX_mem が仮置きのため暫定値）
     # 設計判断 (2026-05-08): ヒートインテグレーション用ストリーム温度。
@@ -729,7 +743,7 @@ def simulate_membrane_system(
         capex_cond      = calc_he_capex_okuyen(A_cond)
     except Exception:
         capex_vap = capex_comp_feed = capex_comp_prod = capex_cond = float('nan')
-    # ★ 仮置き — MEM_UNIT_PRICE_USD_PER_M2 が根拠文献未確定のため暫定値
+    # !仮置き — MEM_UNIT_PRICE_USD_PER_M2 が根拠文献未確定のため暫定値
     #   calc_mem_capex_okuyen 呼び出し時に UserWarning が発行される
     try:
         capex_mem = calc_mem_capex_okuyen(design.A_mem)

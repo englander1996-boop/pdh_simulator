@@ -54,6 +54,11 @@ class FlowsheetResult:
     # ---- Stage 2 = HEN Synthesis (apply_stage2=True のときのみ、top-k 用) ----
     economics_synth: Optional[Economics] = None    # 実 HEN 構成適用後の Economics
     hen_result:      Optional[object]    = None    # synthesize_hen の HENResult
+    # ---- 診断用: 1 パス中に捕捉された warning (run_one_pass の集約) ----
+    # 設計判断 (2026-05-18): silent fallback 検出のため、warnings.simplefilter("ignore")
+    # を catch_warnings(record=True) に置換した。本フィールドで BO ログから fallback
+    # 発火を追跡可能。空リストなら全装置が warning なく動作。
+    warnings_captured: list = None                 # _CapturedWarning のリスト
 
     @property
     def is_feasible(self) -> bool:
@@ -158,6 +163,11 @@ def evaluate(
     # 設計判断 (2026-05-10): exp1 outer-loop 収束後の最終状態で各塔 recovery を
     # 確認する。recycle iter の transient state では誤発動するので、ここで
     # 全体収束後にだけ検査する。non-spec 解 → solver_failure penalty。
+    #
+    # 設計判断 (2026-05-18): feed_LK <= 1e-3 kmol/h (≒ 0 流量) の塔は recovery 検査を
+    # スキップする。但し silent スキップだと「実は分離できていない塔が pass」する
+    # 可能性があるため、import warnings で記録する (BO log の追跡用)。
+    import warnings as _warnings
     if strict_recovery_check:
         for col_key, spec in _COLUMN_RECOVERY_SPECS.items():
             col_result = solver_result.one_pass.get(col_key)
@@ -179,6 +189,13 @@ def evaluate(
                             f"(差 > {recovery_tolerance*100:.0f}%)"
                         ),
                     )
+            else:
+                _warnings.warn(
+                    f"strict_recovery_check: {spec['name']} LK ({spec['LK']}) "
+                    f"feed_LK={feed_LK:.3e} kmol/h ≤ 1e-3 のため検査スキップ。"
+                    f"塔への流入がほぼゼロ、上流装置の penalty 状態または微小流量設計の可能性。",
+                    UserWarning, stacklevel=2,
+                )
             if feed_HK > 1e-3 and not spec['partial_cond']:
                 hk_rec = bot.get(spec['HK'], 0.0) / feed_HK
                 if abs(hk_rec - spec['rec_HK_bot']) > recovery_tolerance:
@@ -190,6 +207,12 @@ def evaluate(
                             f"bot recovery={hk_rec:.3f} vs spec {spec['rec_HK_bot']:.3f}"
                         ),
                     )
+            elif feed_HK <= 1e-3 and not spec['partial_cond']:
+                _warnings.warn(
+                    f"strict_recovery_check: {spec['name']} HK ({spec['HK']}) "
+                    f"feed_HK={feed_HK:.3e} kmol/h ≤ 1e-3 のため検査スキップ。",
+                    UserWarning, stacklevel=2,
+                )
 
     # ---- solver 成功: 経済計算 + spec 判定 ----
     economics = calculate_economics(
@@ -302,6 +325,10 @@ def evaluate(
         eff_econ = economics
     effective_TAC = eff_econ.TAC - eff_econ.total_revenue + soft_penalty
 
+    # run_one_pass で捕捉した warning を取り出す (silent fallback 追跡用)
+    one_pass = solver_result.one_pass or {}
+    warnings_captured = one_pass.get('warnings_captured', []) or []
+
     return FlowsheetResult(
         solver=solver_result,
         economics=economics,
@@ -312,4 +339,5 @@ def evaluate(
         hi_result=hi_result,
         economics_synth=economics_synth,
         hen_result=hen_result,
+        warnings_captured=warnings_captured,
     )

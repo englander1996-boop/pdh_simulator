@@ -670,7 +670,17 @@ def _solve_tridiagonal(
 
 
 def _failure_result(msg: str, N_stages: int, comps: List[str]) -> RigorousResult:
-    """収束失敗時のダミー結果。distillation_core.py 側で警告 + FUG フォールバック対象。"""
+    """収束失敗時のダミー結果。distillation_core.py 側で警告 + FUG フォールバック対象。
+
+    設計判断 (2026-05-18 確認): RigorousResult dataclass は array フィールド
+    (T_profile_K, x/y/K_profile, F_top, F_bot, V/L) を必須としているため、failure 時も
+    全フィールドを埋める必要がある。flag-based の signal は `converged=False` で表現済み。
+    caller (distillation_core.py:680) は `if not rig.converged: raise RuntimeError(...)`
+    で明示的に判定するため、nan/0.0 配列が下流計算に伝播することはない。
+    本構造は問題ないため、追加リファクタは不要 (KNOWN_PLACEHOLDERS §4 から削除)。
+
+    T_profile_K に nan、x/y に 0.0、K に 1.0 を埋めるのは「無意味な値」を強調するため。
+    """
     return RigorousResult(
         converged    = False,
         n_iter       = 0,

@@ -66,7 +66,18 @@ def mix_streams(streams: List[ProcessStream]) -> ProcessStream:
     H_denom = sum(F_out.get(k, 0.0) * cp_of(k) for k in F_out)
 
     if H_denom <= 0.0:
-        # 全流量ゼロの異常ケース
+        # 全流量ゼロの異常ケース。298.15K (基準温度) を返すが、下流の cooler/
+        # compressor が「P_in=0 流量=0」状態を受け取って ValueError を投げる場合
+        # がある。設計判断 (2026-05-18): silent fallback だと原因追跡が難しいため
+        # warning を出す。flowsheet/run_one_pass.py の _capture_warnings 経由で
+        # BO log に残る。
+        import warnings as _warnings
+        _warnings.warn(
+            f"mix_streams: 全流量ゼロ (H_denom={H_denom:.3e})。"
+            f"T_out=298.15K (基準温度) で fallback。"
+            f"入力ストリーム数={len(streams)}、上流装置の penalty 状態の可能性。",
+            UserWarning, stacklevel=2,
+        )
         T_out = 298.15
     else:
         T_out = H_num / H_denom

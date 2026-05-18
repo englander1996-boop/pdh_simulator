@@ -39,8 +39,55 @@ from units.separators.membrane.membrane_system import (
 
 from flowsheet.design import FlowsheetDesignVars
 from config.load import OperatingConfig
+from src.cost_parameters import PENALTY_CAPEX_THRESHOLD_OKUYEN
 
 _ZERO = {'A': 0.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0, 'Z': 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Warning 集約ヘルパ
+# ---------------------------------------------------------------------------
+# 旧版 (〜2026-05-17) は warnings.simplefilter("ignore") で全 warning を抑制し、
+# fallback の発生 (PR EOS Z=1 fallback、brentq 偽根、Wang-Henke MESH 残差超過に
+# よる FUG fallback 等) が静かに進行していた。これが原因で「数値結果は正常だが
+# 実は silent fallback が走っていて TAC が 1 億円/年単位で過小評価」という事案が
+# 2026-05-10 に発覚した (STATUS_2026-05-10.md 参照)。
+#
+# 本実装 (2026-05-18) では catch_warnings(record=True) + simplefilter("always") で
+# warning を抑制せず捕捉し、ラベル付きで結果 dict に格納する。runner.py が
+# failure_reason に集約することで、BO log で fallback 発火が追跡可能になる。
+class _CapturedWarning:
+    """source ラベル付きの warning エントリ。"""
+    __slots__ = ('source', 'category', 'message', 'filename', 'lineno')
+
+    def __init__(self, source: str, w):
+        self.source   = source
+        self.category = w.category.__name__
+        self.message  = str(w.message)
+        self.filename = w.filename
+        self.lineno   = w.lineno
+
+    def __repr__(self) -> str:
+        return f"[{self.source}] {self.category}: {self.message}"
+
+
+def _capture_warnings(source: str, captured_list: list):
+    """`with _capture_warnings("Dist1", warnings_log):` の形で使うヘルパ。
+
+    内部の simplefilter は "always" を設定するため、warning は抑制されずに
+    captured_list に append される。元の warning ストリームには出ない (record=True)。
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            yield
+            for w in ws:
+                captured_list.append(_CapturedWarning(source, w))
+
+    return _ctx()
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +115,8 @@ def _build_penalty_one_pass_result(
 ):
     """reactor が penalty 返却したとき、下流装置を全部スタブにして solver に渡す形を構築。
 
-    solver は `results['r_rx'].equipment.Reactor_CAPEX >= 1e8` を penalty_hit と
-    判定するため、本関数を経由しても適切に penalty 化される。下流装置の
+    solver は `results['r_rx'].equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN`
+    を penalty_hit と判定するため、本関数を経由しても適切に penalty 化される。下流装置の
     P_in=0 例外を回避することが主目的。
     """
     stub = _PenaltyResult()
@@ -86,6 +133,7 @@ def _build_penalty_one_pass_result(
         tear_dist3_new={'A': 0.0, 'B': 0.0},
         tear_mem_new  ={'A': 0.0, 'B': 0.0},
         T_d3_new=298.15, T_mem_new=298.15,
+        warnings_captured=[],
     )
 
 
@@ -123,6 +171,9 @@ def run_one_pass(
     """
     P_rx = config.pressure.reactor_inlet_Pa  # 反応器入口・膨張弁後の圧力 (contest 規定 0.5 bar)
 
+    # 1 パス全体の warning 捕捉用 (旧 simplefilter("ignore") の代替)
+    warnings_captured: list = []
+
     # ---- Fresh LPG 原料 (30°C 飽和液、C3H8:C4H10 = 9:1, ~9.97 bar) ----
     fresh = ProcessStream(
         F_in={'A': F_C3H8_feed, 'Z': F_C4H10_feed,
@@ -136,8 +187,7 @@ def run_one_pass(
     # 設計判断 (2026-05-09): 出口圧力は design.dist1.P_col に同期する
     # (operating.toml の pump1_out_Pa は backward compat のため残置だが未使用)。
     pump1 = simulate_pump(fresh, P_out_target=design.dist1.P_col)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with _capture_warnings("Dist1", warnings_captured):
         r1 = simulate_column1(pump1.outlet, tunables=design.dist1)
 
     # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
@@ -184,9 +234,9 @@ def run_one_pass(
     # _penalty_result()) のとき、effluent は F=0, T=0, P=0。このまま下流の cooler/
     # compressor に流すと「P_in=0」で ValueError 発生 → solver.py の penalty_hit
     # 検査まで到達できない。早期に「penalty 状態で zero 流」のダミーを返して下流の
-    # 全装置を penalty 結果でスキップする。solver 側で Reactor_CAPEX >= 1e8 をもって
-    # penalty_hit と判定する。
-    if r_rx.equipment.Reactor_CAPEX >= 1e8:
+    # 全装置を penalty 結果でスキップする。solver 側で Reactor_CAPEX >=
+    # PENALTY_CAPEX_THRESHOLD_OKUYEN をもって penalty_hit と判定する。
+    if r_rx.equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
         return _build_penalty_one_pass_result(
             r_rx, reactor_inlet, dist1_top_rx, recycle_dist3, recycle_mem,
             r1=r1, fresh=fresh, pump1=pump1,
@@ -218,8 +268,7 @@ def run_one_pass(
     # 処理することになるため、工業実機の desuperheater (冷却水 HE) で dew 直上まで冷却。
     # Q ~12 MW を冷却水 (60 円/GJ) で除去 → 冷凍冷媒 (~1820 円/GJ) より遥かに安い。
     T_dist2_feed_K = 323.15   # 50°C: 8.5bar dew (~40-50°C) より少し上、5K margin
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with _capture_warnings("Comp2/Dist2", warnings_captured):
         comp2a    = simulate_compressor(cooled.outlet, P_out_target=P_mid)
         intercool = simulate_cooler(comp2a.outlet, T_out_target=T_intercool,
                                     process_phase=StreamPhase.GAS)
@@ -232,8 +281,7 @@ def run_one_pass(
     psa_feed = PSAFeedStream(
         F_in=r2.top.F_in, T_in=r2.top.T_in, P_in=r2.top.P_in,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with _capture_warnings("PSA", warnings_captured):
         r_psa = simulate_psa_system(design.psa, psa_feed, PSAFixedParams())
 
     # ---- Step 5: Membrane ----
@@ -254,8 +302,7 @@ def run_one_pass(
         T_in=mem_precool.outlet.T_in,
         P_in=mem_precool.outlet.P_in,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with _capture_warnings("Mem", warnings_captured):
         r_mem = simulate_membrane_system(design.mem, mem_feed, MemFixedParams(vapor_feed=True))
 
     # ---- Step 6: Dist3 ----
@@ -264,8 +311,7 @@ def run_one_pass(
               'C': 0., 'D': 0., 'E': 0., 'F': 0.},
         T_in=r_mem.product.T_out, P_in=r_mem.product.P_out,
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+    with _capture_warnings("Dist3", warnings_captured):
         r3 = simulate_column3(mem_to_dist3, tunables=design.dist3)
 
     # ---- tear stream の更新値 ----
@@ -291,4 +337,5 @@ def run_one_pass(
         r_psa=r_psa, mem_precool=mem_precool, r_mem=r_mem, r3=r3,
         tear_dist3_new=tear_dist3_new, tear_mem_new=tear_mem_new,
         T_d3_new=T_d3_new, T_mem_new=T_mem_new,
+        warnings_captured=warnings_captured,
     )

@@ -58,8 +58,14 @@ FM: float = 1.0
 # コストインデックス（CEPCI: Chemical Engineering Plant Cost Index）
 # ---------------------------------------------------------------------------
 
-CEPCI_BASE: float = 397.0    # 2001年基準値
-CEPCI_CURRENT: float = 544.0  # 2016年8月時点（資料内掲載値）
+CEPCI_BASE:    float = 397.0    # 2001年基準値 (R08-3.pdf 掲載値)
+CEPCI_CURRENT: float = 800.0    # !仮置き 推定値 2026年
+                                # 推定根拠: 既存値 397→544 (2001→2016) の trend 外挿。
+                                #   線形外挿 642、複利 670、近年インフレ加速考慮で 800 採用。
+                                # ⚠️  Chemical Engineering 誌 PCI archive 等で実値を確認後、
+                                #    確定値で置換要 (CEPCI 2026 公表値)。
+                                # 影響: COOLING_WATER, AIR_COOLING, PROPYLENE/ETHYLENE_REFRIG_*,
+                                #   LP/MP/HP_STEAM 等が escalation factor (CEPCI/544) で連動。
 
 # スイング操作ペナルティ係数: K_SWING = 1.2
 # Bare Module Cost法の F_BM は連続定常操作を前提としており、スイング操作固有のコストを含まない。
@@ -72,7 +78,9 @@ K_SWING: float = 1.2
 # 経済パラメータ
 # ---------------------------------------------------------------------------
 
-USD_TO_JPY: float = 157.08          # 為替レート [JPY/USD] 5月2日 14:24 UTC · Morningstar
+USD_TO_JPY: float = 158.8595        # 為替レート [JPY/USD] 2026-05-18 06:35:00 UTC
+                                    # 出典: Google Finance USD-JPY
+                                    # https://www.google.com/finance/beta/quote/USD-JPY
 
 # 減価償却年数: 8年
 # 根拠: 国税庁「減価償却資産の耐用年数等に関する省令」別表第二
@@ -334,22 +342,51 @@ ADSORBENT_LIFETIME_YEARS: float = 4.0  # [年]
 #   触媒交換  : 単価 [円/kg] ÷ 寿命 [年] × 全量 [kg] / 1e8 → 億円/年
 # ==============================================================================
 
-# !仮置き — 要出典: 大口産業用電力単価。コンテスト課題 Ver.2.0 のサイト仕様で置換
-# 電力単価 [円/kWh]  大口産業用 14〜17 円/kWh の中央値を仮置き
-ELECTRICITY_JPY_PER_KWH: float = 15.0
+# 電力単価 [円/kWh]  大規模 PDH プラント = 特別高圧契約想定
+# 出典: 新電力ネット「法人・家庭の電気料金の平均単価の推移」2026年1月
+#   特別高圧 16.72 円/kWh (燃調費・再エネ賦課金込み)
+#   URL: https://pps-net.org/unit (accessed 2026-05-18)
+# 参照: 経産省 電力調査統計 https://www.enecho.meti.go.jp/statistics/electric_power/ep002/
+# 参考: 再エネ賦課金 FY2026 = 4.18 円/kWh (https://enemanex.jp/saienefukakin/)
+ELECTRICITY_JPY_PER_KWH: float = 17.0
 
 # ---------------------------------------------------------------------------
-# スチーム階層 (contest.md §2-3 のユーティリティ仕様)
-# 設計判断 (2026-05-08): 温度が高いほど発生コスト大。
-#   - LP Steam: 160°C 飽和  (1800 円/GJ ベースライン)
-#   - MP Steam: 186°C 飽和  → LP の 1.2 倍程度
-#   - HP Steam: 230°C 飽和  → LP の 1.5 倍程度
+# スチーム階層
+# 温度の出典: PDH 学生コンテスト要綱 Ver.2.0 (ア)(イ)(ウ) より:
+#   - HP Steam: 230°C 飽和蒸気で供給、戻り 230°C 飽和液 or 3bar 液
+#   - MP Steam: 186°C 飽和蒸気で供給、戻り 186°C 飽和液 or 3bar 液
+#   - LP Steam: 160°C 飽和蒸気で供給、戻り 160°C 飽和液 or 3bar 液
+#   コンデンセートの顕熱利用も可 (本実装では潜熱のみ計上で保守)。
 # 加熱箇所の温度に応じて階層から自動選択する (utility_selector.py)。
 # ---------------------------------------------------------------------------
-# !仮置き — 要出典: 各スチーム単価。サイト仕様 or 産業統計から
-LP_STEAM_JPY_PER_GJ: float = 1800.0   # 160°C 飽和
-MP_STEAM_JPY_PER_GJ: float = 2200.0   # 186°C 飽和 (LP × 1.22 仮置き)
-HP_STEAM_JPY_PER_GJ: float = 2800.0   # 230°C 飽和 (LP × 1.56 仮置き)
+# スチーム単価 [円/GJ]
+# ⚠️ !仮置き (Turton 書籍未入手 + 日本補正定数の根拠も簡易) — 入手後/精緻化後に更新要
+# 推定根拠: Turton et al. "Analysis, Synthesis, and Design of Chemical Processes"
+#   5th ed. Appendix Table 8.3 (CEPCI 2016 基準) の推定転載値:
+#   LP (5 barg、160°C): 4.5 USD/GJ
+#   MP (10 barg、184°C): 4.8 USD/GJ
+#   HP (41 barg、254°C): 5.7 USD/GJ
+#   Google Books ID: kWXyhVXztZ8C (Pearson Education, ISBN 9780132459181)
+#
+# 補正フロー:
+#   円/GJ = Turton USD/GJ × CEPCI escalation (1.471) × USD/JPY (158.8595) × 日本補正 (2.0)
+#                          ─────────────────         ───────────────────   ──────────────
+#                          一般インフレ (CEPCI)       為替                  US 安価 NG ⇒ 日本高 LNG 差
+#
+# 日本補正定数 (JAPAN_STEAM_FUEL_CORRECTION) = 2.0
+#   根拠: Turton 2018 は US LNG $3/MMBtu 前提、日本 LNG は約 $12/MMBtu (4倍)。
+#         steam の燃料寄与は ~50-70%。fuel ratio 4 × 0.5 + capital ratio 1 × 0.5 ≒ 2.5
+#         実勢が出るのを待つ間の保守的下限として 2.0 を採用 (要見直し)。
+#
+# 計算:
+#   LP: 4.5 × 1.471 × 158.8595 × 2.0 ≈ 2103 → 2100
+#   MP: 4.8 × 1.471 × 158.8595 × 2.0 ≈ 2244 → 2240
+#   HP: 5.7 × 1.471 × 158.8595 × 2.0 ≈ 2664 → 2660
+# 温度の出典: PDH 学生コンテスト要綱 Ver.2.0 (ア)(イ)(ウ)
+JAPAN_STEAM_FUEL_CORRECTION: float = 2.0   # !仮置き Japan/US 燃料コスト差ざっくり補正
+LP_STEAM_JPY_PER_GJ: float = 2100.0   # 160°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
+MP_STEAM_JPY_PER_GJ: float = 2240.0   # 186°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
+HP_STEAM_JPY_PER_GJ: float = 2660.0   # 230°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
 
 # ---------------------------------------------------------------------------
 # 冷媒階層 (contest.md §2-3 のユーティリティ仕様)
@@ -359,21 +396,45 @@ HP_STEAM_JPY_PER_GJ: float = 2800.0   # 230°C 飽和 (LP × 1.56 仮置き)
 #   - エチレン冷媒の製造にプロピレン冷媒を使うため、同一温度なら
 #     エチレン冷媒の方がプロピレン冷媒より高コスト (本来は重複しない温度域)。
 # ---------------------------------------------------------------------------
-# !仮置き — 要出典: 各冷媒単価。Carnot 効率 + 業界経験則による推定値
-#                サイト仕様 or 冷媒製造プラントの実績データで置換
-AIR_COOLING_JPY_PER_GJ:           float =   30.0   # 空冷 (~35°C 程度まで; 高 ΔT で OPEX 安い)
-COOLING_WATER_JPY_PER_GJ:         float =   60.0   # 30°C 供給 → 40°C 戻り
-PROPYLENE_REFRIG_15C_JPY_PER_GJ:  float =  300.0   # プロピレン冷媒  +15°C
-PROPYLENE_REFRIG_5C_JPY_PER_GJ:   float =  500.0   # プロピレン冷媒   +5°C
-PROPYLENE_REFRIG_M25C_JPY_PER_GJ: float = 1200.0   # プロピレン冷媒  -25°C
-PROPYLENE_REFRIG_M40C_JPY_PER_GJ: float = 2000.0   # プロピレン冷媒  -40°C
-ETHYLENE_REFRIG_M60C_JPY_PER_GJ:  float = 3500.0   # エチレン冷媒    -60°C
-ETHYLENE_REFRIG_M75C_JPY_PER_GJ:  float = 5500.0   # エチレン冷媒    -75°C
-ETHYLENE_REFRIG_M100C_JPY_PER_GJ: float = 9000.0   # エチレン冷媒    -100°C
+# 冷却水・空冷単価 [円/GJ]
+# ⚠️  !仮置き (Turton 書籍未入手のため数値推定) — 入手後に厳密値で更新要
+# 推定根拠: Turton et al. (2018) "Analysis, Synthesis, and Design of Chemical Processes"
+#   5th ed. Appendix Table 8.3 (CEPCI 2016 基準) の推定転載値
+#   Google Books ID: kWXyhVXztZ8C (Pearson Education, ISBN 9780132459181)
+# Escalation factor: CEPCI_CURRENT / CEPCI_2016 = 800 / 544 ≈ 1.471 (CEPCI_CURRENT も推定値)
+# 換算: USD/GJ × 1.471 × USD/JPY (158.8595) = 円/GJ
+#   冷却水 (towers, ΔT=10°C) ≈ 0.354 USD/GJ × 1.471 × 158.8595 ≈ 83 → 85
+#   空冷 (fan power) ≈ 0.40 USD/GJ × 1.471 × 158.8595 ≈ 94 → 95
+AIR_COOLING_JPY_PER_GJ:           float =    95.0   # 空冷 (!仮置き Turton 推定値、書籍未入手)
+COOLING_WATER_JPY_PER_GJ:         float =    85.0   # 30→40°C (!仮置き Turton 推定値、書籍未入手)
 
-# !仮置き — 要出典: LNG 単価。50円/Nm³, HHV 40MJ/Nm³ ≒ 1250 円/GJ から推定
+# 冷凍冷媒単価 [円/GJ]
+# ⚠️  !仮置き (Vasudevan 2017 + Turton 2018 共に書籍/論文未入手のため数値推定) — 入手後更新要
+# 推定根拠:
+#   Vasudevan, Agarwal & Mohan (2017) "Estimating refrigeration costs at
+#   cryogenic temperatures" Computers & Chemical Engineering 103, 28-43
+#   DOI: https://doi.org/10.1016/j.compchemeng.2017.02.041 (論文未入手)
+#   補助: Turton et al. (2018) Appendix Table 8.3 (中温域 +15°C, +5°C) ※書籍未入手
+# Escalation factor: CEPCI_CURRENT / CEPCI_2016 = 800 / 544 ≈ 1.471 (CEPCI_CURRENT も推定値)
+# 換算: USD/GJ × 1.471 × 158.8595 = 円/GJ
+#   プロピレン (Turton 推定): +15°C ≈ 3 USD/GJ → 701、+5°C ≈ 4.4 USD/GJ → 1028
+#   プロピレン (Vasudevan 推定): -25°C ≈ 9.4 USD/GJ → 2197、-40°C ≈ 13 USD/GJ → 3039
+#   エチレン (Vasudevan 推定, cascade): -60°C ≈ 35 → 8178、-75°C ≈ 50 → 11683、-100°C ≈ 85 → 19861
+PROPYLENE_REFRIG_15C_JPY_PER_GJ:  float =    700.0   # +15°C  (!仮置き Turton 推定、書籍未入手)
+PROPYLENE_REFRIG_5C_JPY_PER_GJ:   float =   1030.0   # +5°C   (!仮置き Turton 推定、書籍未入手)
+PROPYLENE_REFRIG_M25C_JPY_PER_GJ: float =   2200.0   # -25°C  (!仮置き Vasudevan 推定、論文未入手)
+PROPYLENE_REFRIG_M40C_JPY_PER_GJ: float =   3040.0   # -40°C  (!仮置き Vasudevan 推定、論文未入手)
+ETHYLENE_REFRIG_M60C_JPY_PER_GJ:  float =   8200.0   # -60°C  (!仮置き Vasudevan 推定、論文未入手)
+ETHYLENE_REFRIG_M75C_JPY_PER_GJ:  float =  11700.0   # -75°C  (!仮置き Vasudevan 推定、論文未入手)
+ETHYLENE_REFRIG_M100C_JPY_PER_GJ: float =  19900.0   # -100°C (!仮置き Vasudevan 推定、論文未入手)
+
 # 燃料 (反応器プリヒーター LNG) 単価 [円/GJ]
-FUEL_JPY_PER_GJ: float = 1500.0
+# 出典: JOGMEC 月例 LNG 市況調査 + 財務省 貿易統計 LNG 輸入 CIF 価格
+#   URL: https://oilgas-info.jogmec.go.jp/info_reports/1009848/index.html
+#   URL: https://www.customs.go.jp/toukei/suii/html/time_latest.htm
+# 値: 2026-05-18 baseline、約 100,000 円/トン (1 トン = 約 54.6 GJ) → 1,830 円/GJ
+# 換算: $12.0/MMBtu × 158.8595 / 1.055 GJ/MMBtu ≈ 1,807 円/GJ で近似一致
+FUEL_JPY_PER_GJ: float = 1830.0
 
 # 加熱炉熱効率 [-] (LHV ベース、燃焼計算 熱勘定の損失率より)
 # Ref: 化工便覧 改訂六版 18·4·3 項 表 18·11 (れき青炭燃焼計算で全熱損失 15% = 効率 85%)
@@ -392,7 +453,25 @@ CATALYST_PTSN_JPY_PER_KG: float = 30000.0
 CATALYST_PTSN_LIFE_YEARS: float = 4.0
 
 # 年間稼働時間 [h/年]  333 日連続稼働相当
+# 出典: PDH 学生コンテスト要綱 (Ver.2.0) で指定された値
 OPERATING_HOURS_PER_YEAR: float = 8000.0
+
+
+# ==============================================================================
+# ペナルティ sentinel — solver 失敗装置の CAPEX 値判定閾値
+#
+# 設計判断 (2026-05-18): 装置 CAPEX が物理計算で求まらないとき、各 unit は
+# _PENALTY_CAPEX = 1e9 億円 (= 1 京円) を sentinel として返す (units/reactors/
+# swing.py, units/separators/psa/psa_system.py, units/separators/membrane/
+# membrane_system.py)。下流側 (flowsheet/economics.py の集計、flowsheet/
+# solver.py のペナルティ判定) はこの sentinel を識別するため閾値で篩い分ける。
+#
+# 正常 CAPEX の最大は数十億円程度のため、1e8 億円を境界に置けば誤判定なし。
+# 旧版は economics.py で 1e6、solver.py で 1e8 と閾値が二重定義されていた
+# (両方とも sentinel 1e9 をフィルタする目的では機能していたが、コメントと実装
+# で食い違い、メンテナンスリスク)。本定数で一元化する。
+# ==============================================================================
+PENALTY_CAPEX_THRESHOLD_OKUYEN: float = 1.0e8
 
 
 # ==============================================================================
@@ -449,25 +528,53 @@ HASEBE_C_WT_OKUYEN_PER_YEAR: float = 0.0
 #   年量に変換する一貫した式 (OPEX_utilities と同様の 1e8 スケール) で扱う。
 # ==============================================================================
 
-# !仮置き — 要出典: 大口産業 LPG 購入単価 (CIF + 関税込み)。
-# 参考: 2024 LPG CIF ~600 USD/t × 157 円/USD ≒ 94 円/kg → 国内大口は割増ありで 50〜100 円/kg。
-# 注: 2026-05-17 にユーザ提供卸売価格 (P 156、B 101) で 150.5 に一時更新したが、
-# 「分離済プロパン前提なので元の値で」のユーザ判断により 50 に戻した。
-LPG_FEED_JPY_PER_KG: float = 50.0
+# LPG プロパン (C3H8) 単価 [円/kg]  CIF 基準 (輸入基地隣接想定)
+# 設計判断 (2026-05-18): 大規模 PDH プラント (年産 40 万 t C3H6) は港湾コンビナート
+#   立地が一般的なため、国内配送費を含まない CIF 価格を採用。
+# 出典: 財務省 貿易統計 液化プロパン 輸入 CIF 価格
+#   URL: https://www.customs.go.jp/toukei/suii/html/time_latest.htm (accessed 2026-05-18)
+# 換算: CP プロパン $600/t × 158.8595 円/USD / 1000 = 95.3 円/kg
+# 参照値 (採用しない、内陸プラント想定の場合):
+#   大阪ガス CIF+フレート 119 円/kg (https://ene.osakagas.co.jp/gas/lpg/pdf/lpgkakaku_CP.pdf)
+#   ChemAnalyst CFR (Q1 2026) 〜120 円/kg
+LPG_C3H8_JPY_PER_KG: float = 95.0
 
-# !仮置き — 要出典: ポリマーグレード C3H6 (≥99.5 wt%) の出荷価格。
-# 国内市況 100〜140 円/kg レンジの中央値。
-C3H6_PRODUCT_JPY_PER_KG: float = 120.0
+# LPG n-ブタン (C4H10) 単価 [円/kg]  CIF 基準 (C3H8 と同シナリオ)
+# 設計判断 (2026-05-18): C3H8 と同じ CIF ベースで揃える。実勢でも C3H8 ± 5% 以内。
+# 出典: 財務省 貿易統計 液化ブタン 輸入 CIF 価格
+#   URL: https://www.customs.go.jp/toukei/suii/html/time_latest.htm (accessed 2026-05-18)
+# 換算: CP n-ブタン $580/t × 158.8595 円/USD / 1000 ≒ 92.5 円/kg、丸めて 95 円/kg
+# 注: C3H8 と同価で扱う (ペナルティ的差別化が必要なら個別更新)
+LPG_C4H10_JPY_PER_KG: float = 95.0
 
-# !仮置き — 要出典: 化学グレード H2 (≥99.9 mol%) の出荷価格。
-# 副生 H2 の OEM 売価 30〜50 円/Nm³ ≒ 330〜560 円/kg の下限を仮置き。
-H2_PRODUCT_JPY_PER_KG: float = 350.0
+# Backward compat: 旧 LPG_FEED_JPY_PER_KG を参照しているコード用 (主にプロパン基準)
+# 設計判断 (2026-05-18): C3H8 と C4H10 を個別単価化したため、共通参照名としてプロパン値を割当
+LPG_FEED_JPY_PER_KG: float = LPG_C3H8_JPY_PER_KG
+
+# ポリマーグレード C3H6 (≥99.5 wt%) 出荷価格 [円/kg]
+# 出典: ChemAnalyst Q1 2026 Northeast Asia propylene 0.93 USD/kg ≈ 147 円/kg
+#   URL: https://www.chemanalyst.com/Pricing-data/polypropylene-10
+# 参照: IMARC Q3 2025 Japan CFR Nagoya 962.67 USD/t ≈ 153 円/kg
+#   URL: https://www.imarcgroup.com/propylene-pricing-report
+# 採用: 両者中央値 150 円/kg
+C3H6_PRODUCT_JPY_PER_KG: float = 150.0
+
+# 化学グレード H2 (≥99.9 mol%) 出荷価格 [円/kg]
+# 出典: ChemAnalyst Q4 2025 Japan industrial hydrogen (SMR-based merchant gas)
+#   URL: https://www.chemanalyst.com/Pricing-data/hydrogen-1165
+#   値: 2,130 USD/t = 2.13 USD/kg × 158.8595 = 338 円/kg
+# 注: PDH 副生 H2 を merchant SMR グレードとして売却想定。
+#     圧縮トレーラー渡し (NEDO 100-120 円/Nm³ = 1100-1300 円/kg) は買値であり該当しない。
+#     売値として 400 円/kg を採用 (販売マージン込み)
+H2_PRODUCT_JPY_PER_KG: float = 400.0
 
 
 # ==============================================================================
 # HHV (高位発熱量) — オフガス燃料クレジット計算用
-# !仮置き — 出典: NIST WebBook (25°C, H2O 液基準) より暫定値。後段で DIPPR と照合し
-#                 必要なら更新。
+# !仮置き — 出典確認要: プロジェクト既存物性 (THERMO_DATA の dHf_298 等) は
+#                       化工便覧 改訂六版 もしくは thermo パッケージ初期値を一次出典と
+#                       しているため、HHV も同系列で確認推奨。値は標準値で問題ないが
+#                       一次出典の確定をユーザーが行うこと。
 #
 # PSA オフガス (主に CH4 + 残留 H2/C2 系 + C3 トレース) を反応器プリヒーター燃料として
 # 戻すと、equivalent FUEL_JPY_PER_GJ 分だけ燃料費が浮く。economics.py で:

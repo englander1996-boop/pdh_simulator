@@ -25,6 +25,7 @@ from flowsheet.design import FlowsheetDesignVars
 from flowsheet.run_one_pass import run_one_pass
 from flowsheet.solvers import make_accelerator
 from config.load import OperatingConfig
+from src.cost_parameters import PENALTY_CAPEX_THRESHOLD_OKUYEN
 
 
 @dataclass
@@ -157,9 +158,9 @@ def run_recycle_convergence(
             design, config,
         )
 
-        if (results['r_psa'].equipment.CAPEX_total >= 1e8 or
-            results['r_mem'].equipment.CAPEX_total >= 1e8 or
-            results['r_rx'].equipment.Reactor_CAPEX >= 1e8):
+        if (results['r_psa'].equipment.CAPEX_total >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
+            results['r_mem'].equipment.CAPEX_total >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
+            results['r_rx'].equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN):
             # 設計判断 (2026-05-17): swing reactor の SV check 違反等で
             # Reactor_CAPEX = 1e9 (_PENALTY_CAPEX) になるケースも penalty_hit と扱う。
             # 旧版は PSA/Mem のみ check していたため、reactor 起因 penalty が下流の

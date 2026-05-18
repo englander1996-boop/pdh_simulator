@@ -100,13 +100,13 @@ PDE モデル
       入口高負荷セルが律速になる場合に t_des を過小推算する可能性がある。
       安全係数 desorption_time_safety_factor=1.2 でこのリスクをカバーしている。
 
-■ ★★ 仮置き値 — 根拠文献未確定 ★★
+■ !仮置き値 — 根拠文献未確定
 
   Langmuir パラメータ (q_s, a): 活性炭 25°C 等温線、学術論文未確認
   KFa (物質移動係数): Carberry 数・Knudsen 拡散の推算未実施
   活性炭単価: メーカーカタログ未照合
   活性炭嵩密度 rho_b = 600 kg/m³: 工業用活性炭の代表値（典型範囲 400〜700 kg/m³）
-      → cost_parameters.py の ★★★ 仮置き ★★★ コメントを参照。
+      → cost_parameters.py の !仮置き コメントを参照。
 --------------------------------------------------------------------
 """
 
@@ -211,7 +211,7 @@ class PSAFixedParams:
         真空 PSA (P_des = 0.1〜0.3 atm) との比較は最終設計段階で再評価すること。
 
     rho_b = 600 kg/m³
-        ★ 仮置き — 工業用活性炭の代表的嵩密度。
+        !仮置き — 工業用活性炭の代表的嵩密度。
         典型範囲: 400〜700 kg/m³ (Perry's Chemical Engineers' Handbook, 8th Ed.)
         実際に使用する活性炭のデータシートで確認後に更新すること。
 
@@ -228,7 +228,7 @@ class PSAFixedParams:
         solve_ivp の打ち切り上限。典型的な t_abs は数分〜数十分であり、
         2 時間以内に破過しない場合はペナルティを返して最適化に再評価を促す。
 
-    use_css_approximation = True  ★ 仮置き
+    use_css_approximation = True  !仮置き
         True のとき、吸着 PDE の初期固相負荷量をゼロ（清浄床）ではなく
         「フィード濃度での Langmuir 平衡値 × desorption_target」で初期化する。
         これはサイクル定常状態（CSS）の近似だが、床全体が飽和していると仮定するため
@@ -236,7 +236,7 @@ class PSAFixedParams:
         → t_abs が清浄床より短くなり、必要塔数はやや多め（コスト保守的）に出る。
         False にすると清浄床（q=0）スタートに戻せる（比較用）。
 
-    desorption_time_safety_factor = 1.2  ★ 仮置き
+    desorption_time_safety_factor = 1.2  !仮置き
         計算された t_des に掛ける安全係数。
         理由: KFa (物質移動係数) が仮置き値であり、文献値との誤差が
         数倍に達する可能性があるため、設計マージンとして 1.2 を仮置きする。
@@ -244,11 +244,11 @@ class PSAFixedParams:
     """
     T_abs:              float = 298.15   # [K]  PSA 操作温度
     P_des:              float = 101325.0 # [Pa] 脱着圧力
-    rho_b:              float = 600.0    # [kg/m³] 活性炭充填嵩密度 ★ 仮置き
+    rho_b:              float = 600.0    # [kg/m³] 活性炭充填嵩密度 !仮置き
     eps:                float = 0.4      # [-]  吸着層空隙率
     breakthrough_ratio: float = 0.001   # [-]  破過基準 (CH4 出口/入口)
     t_ads_max:          float = 7200.0  # [s]  吸着時間の探索上限
-    # ★ 仮置き — 後日検証・調整すること
+    # !仮置き — 後日検証・調整すること
     use_css_approximation:         bool  = True  # CSS 簡易補正フラグ (保守的過大推算)
     desorption_time_safety_factor: float = 1.2   # 脱着時間安全係数 (KFa 不確実性対策)
 
@@ -271,10 +271,10 @@ class PSAEquipmentData:
     CAPEX_vessels:   float = float('nan')   # 塔体 CAPEX [億円]
     CAPEX_adsorbent: float = float('nan')   # 吸着材 CAPEX [億円]
     CAPEX_total:     float = float('nan')   # 合計 CAPEX [億円]
-    # H2 損失 (★ 仮置きモデルによる推算値)
+    # H2 損失 (!仮置きモデルによる推算値)
     H2_loss_blowdown_kmolh:        float = float('nan')  # ブローダウン損失 [kmol/h]
     H2_loss_purge_kmolh:           float = float('nan')  # パージ損失 [kmol/h]
-    # 吸着材交換 OPEX ★ 仮置き (ADSORBENT_LIFETIME_YEARS に依存)
+    # 吸着材交換 OPEX !仮置き (ADSORBENT_LIFETIME_YEARS に依存)
     OPEX_adsorbent_okuyen_per_year: float = float('nan')  # 吸着材年間交換費 [億円/年]
 
 
@@ -582,12 +582,18 @@ def simulate_psa_system(
         q_star_CH4     = q_s[0] * a_lang[0] * C_feed_ads[0] / denom_css
         scaling_ratio  = (fixed.rho_b / fixed.eps) * (q_star_CH4 / C_feed_ads[0])
         if scaling_ratio < 10.0:
+            # 設計判断 (2026-05-18): CSS 近似の妥当性が低下した状態でも計算は続行する
+            # (penalty 化は U-決のため一旦警告強化のみ)。t_abs が線形スケーリングから
+            # 乖離するため、N_total_columns が過小評価され CAPEX が偽の最小値に
+            # なる可能性が高い。BO 最適解がこの領域に偏ったら U-決で penalty 化要。
             warnings.warn(
-                f"CSSスケーリング精度低下リスク: scaling_ratio={scaling_ratio:.1f} < 10.0。"
-                f" シャープフロント近似が成立しない可能性があり、"
-                f" t_abs の線形スケーリング (use_css_approximation=True) の誤差が"
-                f" 大きくなります。高圧・高不純物濃度の影響が疑われます。"
-                f" Langmuir パラメータ確定後に再評価してください。",
+                f"CSSスケーリング精度低下リスク: scaling_ratio={scaling_ratio:.1f} < 10.0"
+                f" (D_col={D_col:.2f}m, L_bed={L_bed:.2f}m, P_in={feed.P_in/1e5:.2f}bar,"
+                f" C_feed_CH4={C_feed_ads[0]:.3f}mol/m³)。"
+                f" シャープフロント近似が成立せず、t_abs 線形スケーリングの誤差が大きい。"
+                f" この設計が BO ベスト解に残る場合、N_total_columns 過小評価で"
+                f" CAPEX が偽の最小値となっている可能性あり。"
+                f" 高圧・高不純物濃度の影響が疑われる。Langmuir パラメータ確定後に再評価要。",
                 UserWarning,
                 stacklevel=2,
             )
@@ -625,7 +631,11 @@ def simulate_psa_system(
     if not converged:
         warnings.warn(
             f"simulate_psa_system: t_ads_max={fixed.t_ads_max:.0f}s 内に"
-            f" CH4 破過が検出されませんでした (D_col={D_col:.2f}m, L_bed={L_bed:.2f}m)。",
+            f" CH4 破過が検出されませんでした (D_col={D_col:.2f}m, L_bed={L_bed:.2f}m,"
+            f" desorption_target={design.desorption_target:.3f},"
+            f" u_0={u_0:.3f}m/s, C_feed_CH4={C_feed_ads[0]:.3f}mol/m³,"
+            f" P_in={feed.P_in/1e5:.2f}bar, T_in={feed.T_in:.1f}K)。"
+            f" CAPEX_total=1e9 億円 (penalty sentinel) を返却。",
             UserWarning, stacklevel=2,
         )
         return _penalty_result()
@@ -787,7 +797,7 @@ def simulate_psa_system(
     capex_total = capex_vessels + capex_adsorbent
 
     # 吸着材交換 OPEX: 初期 CAPEX を耐用年数で除した年均等費
-    # ★ ADSORBENT_LIFETIME_YEARS = 4 年 (仮置き)
+    # !仮置き ADSORBENT_LIFETIME_YEARS = 4 年
     opex_adsorbent_per_year = capex_adsorbent / ADSORBENT_LIFETIME_YEARS
 
     equipment = PSAEquipmentData(

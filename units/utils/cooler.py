@@ -81,7 +81,7 @@ def simulate_cooler(
     P_out : float [Pa] | None
         出口圧力 (None で入口と同じ、圧損なし)
     dT_lm : float [K]
-        対数平均温度差の代替値 (デフォルト 30)
+        対数平均温度差の代替値 (デフォルト 30)。!仮置き 出典未確認 (要文献調査)。
     phase_change : bool
         True のとき、入口/出口で相変化が起こると見なし、全成分の潜熱を Q に加算する。
         加熱方向 (T_out > T_in) なら蒸発、冷却方向なら凝縮として扱う。
@@ -146,6 +146,18 @@ def simulate_cooler(
     A_sens = abs(Q_sensible_kW) * 1000.0 / (U_sens * dT_eff)
     A_lat  = abs(Q_latent_kW)   * 1000.0 / (U_lat  * dT_eff) if Q_latent_kW > 0 else 0.0
     A_m2   = max(A_sens + A_lat, 10.0)
+    # 設計判断 (2026-05-18): A_m2 が nan/inf になると下流の calc_he_capex_okuyen に
+    # 伝播して CAPEX が nan 化し、TAC が不連続になる。早期に raise して原因追跡を
+    # 容易にする (旧版は silent 伝播)。
+    import math as _math
+    if not _math.isfinite(A_m2):
+        raise ValueError(
+            f"simulate_cooler: A_m2 が非有限値 ({A_m2}). "
+            f"Q_sensible_kW={Q_sensible_kW}, Q_latent_kW={Q_latent_kW}, "
+            f"U_sens={U_sens}, U_lat={U_lat}, dT_lm={dT_lm}, "
+            f"T_in={stream.T_in:.1f}K, T_out_target={T_out_target:.1f}K。"
+            f"上流装置の出力に nan が含まれている可能性。"
+        )
 
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")

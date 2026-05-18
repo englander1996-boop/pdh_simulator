@@ -282,8 +282,24 @@ def _ode_axial(z: float, y: np.ndarray,
         呼び出し元（_simulate_one_time）で事前計算した値を受け取る。
     """
     # 負のモル流量をクリップ（数値積分のアンダーシュート対策）
-    F = np.maximum(y[:6], 0.0)
+    # 設計判断 (2026-05-18): clip 量が 1e-3 mol/s を超える場合は警告
+    # (通常 ODE のアンダーシュートは 1e-9 程度。-1e-3 mol/s = -3.6 kmol/h)
+    F_raw = y[:6]
+    F = np.maximum(F_raw, 0.0)
+    _clip_amount = float(np.sum(np.maximum(-F_raw, 0.0)))
+    if _clip_amount > 1.0e-3:
+        warnings.warn(
+            f"swing._ode_axial: 負モル流量を clip (合計 {_clip_amount:.3e} mol/s)。"
+            f" ODE 安定性低下、結果の信頼度に注意。",
+            RuntimeWarning, stacklevel=2,
+        )
     # 物理的温度範囲に制限（ODE 発散防止）
+    # 設計判断 (2026-05-18): [300K, 1500K] は物理パラメータではなく数値ガード。
+    #   下限 300K (27°C): 通常運転温度 (700-950K) より遥かに低く、ODE が中間 step で
+    #                      負温度域に外れたとき計算続行できないため。
+    #   上限 1500K: 通常運転温度の 1.5× 程度。これを超える点を ODE が探索したら
+    #                Radau の step が暴走しているサイン。
+    # !仮置き 文献値ではなく数値ガード (citation 不要)。
     T_local = float(np.clip(y[6], 300.0, 1500.0))
 
     F_total = float(np.sum(F))
@@ -295,9 +311,17 @@ def _ode_axial(z: float, y: np.ndarray,
     P = {comp: max(float(F[i]) / F_total * P_local, 0.0)
          for i, comp in enumerate(_COMPS)}
 
-    # 反応速度定数（ゼロ除算防止のため最小値でクリップ）
+    # 反応速度定数（ゼロ除算・駆動力発散防止のため最小値でクリップ）
     rc = calc_rate_constants(T_local)
     k1, k2, k3 = rc['k1'], rc['k2'], rc['k3']
+    # 設計判断 (2026-05-18): K_B と K_eq の単位は [Pa] (P_B との比が無次元になる必要)。
+    #   K_B (吸着平衡定数): 低温で 0 に近づくと adsorption = 1 + P_B/K_B が発散
+    #                       → r1 → 0 (吸着サイト飽和)。floor 1 Pa は通常運転圧 (~0.5 bar
+    #                       = 5e4 Pa) より 5 桁小さく、物理計算には実質影響しない数値ガード。
+    #   K_eq (反応平衡定数): 低温で 0 に近づくと P_B·P_C/K_eq が発散 → driving_r1 が
+    #                       極端に負 → r1 → 大きな負値 (逆反応暴走)。floor 1 Pa は
+    #                       同様の数値ガード。
+    # citation: 物性値ではなく ODE 数値安定化のための実装判断。
     K_B  = max(rc['K_B'],  1.0)   # [Pa] 低温での吸着項ゼロ除算防止
     K_eq = max(rc['K_eq'], 1.0)   # [Pa] 低温での駆動力発散防止
 
@@ -350,10 +374,22 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
             rtol=1e-4,
             atol=1e-7,
         )
-    except Exception:
+    except Exception as e:
+        warnings.warn(
+            f"swing.solve_ivp 例外: {type(e).__name__}: {e} "
+            f"(T_in={design.T_in:.1f}K, z_cat={design.z_cat:.2f}m, "
+            f"D={design.D:.2f}m, t={t_min:.1f}min, P_in={feed.P_in/1e5:.2f}bar)",
+            RuntimeWarning, stacklevel=2,
+        )
         return None, None
 
     if not sol.success:
+        warnings.warn(
+            f"swing.solve_ivp 収束失敗 (status={sol.status}, message={sol.message!r}) "
+            f"(T_in={design.T_in:.1f}K, z_cat={design.z_cat:.2f}m, "
+            f"D={design.D:.2f}m, t={t_min:.1f}min, P_in={feed.P_in/1e5:.2f}bar)",
+            RuntimeWarning, stacklevel=2,
+        )
         return None, None
 
     return sol.y[:6, -1], float(sol.y[6, -1])

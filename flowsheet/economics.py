@@ -23,11 +23,13 @@ from src.cost_parameters import (
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ, FURNACE_EFFICIENCY,
     CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
-    LPG_FEED_JPY_PER_KG, C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
+    LPG_C3H8_JPY_PER_KG, LPG_C4H10_JPY_PER_KG,
+    C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
     HHV_MJ_PER_KMOL,
     HASEBE_NOL_COEFF, HASEBE_SHIFT_MULTIPLIER, OPERATOR_ANNUAL_SALARY_JPY,
     HASEBE_COEFF_C_TM, HASEBE_COEFF_C_OL, HASEBE_COEFF_C_UT_WT_RM,
     HASEBE_C_WT_OKUYEN_PER_YEAR,
+    PENALTY_CAPEX_THRESHOLD_OKUYEN,
 )
 from src.component_data import MW
 
@@ -211,10 +213,14 @@ def apply_hasebe_aggregation(
     out[HASEBE_AGGR_PREFIX + f'{multiplier_delta:.2f}·C_RM (原料費 上乗せ分)'] = (
         multiplier_delta * C_RM
     )
-    if C_WT > 0:
-        out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_UT_WT_RM:.2f}·C_WT (廃棄物処理)'] = (
-            HASEBE_COEFF_C_UT_WT_RM * C_WT
-        )
+    # 設計判断 (2026-05-13): PDH は気相反応で水処理対象廃棄物が実質発生しない
+    # (使用済み触媒は触媒交換費に内包) ため C_WT = 0 億円/年で固定。
+    # 将来 C_WT > 0 になった場合 (例: 副生水の処理を含める設計変更) でも、
+    # if 判定で項を落とすと OPEX 集計から漏れるため、本実装では常に加算する。
+    # C_WT = 0 のときは加算値も 0 なので副作用なし。
+    out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_UT_WT_RM:.2f}·C_WT (廃棄物処理)'] = (
+        HASEBE_COEFF_C_UT_WT_RM * C_WT
+    )
     return out
 
 
@@ -336,9 +342,10 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     fresh_F = R['pump1'].outlet.F_in        # Pump1 inlet/outlet 同じ組成
     F_C3H8_feed  = fresh_F.get('A', 0.0)
     F_C4H10_feed = fresh_F.get('Z', 0.0)
+    # 設計判断 (2026-05-18): C3H8 と C4H10 で個別単価採用 (n-Butane は約 10% 高い実勢)
     opex['Fresh LPG 原料費'] = (
-        _annual_okuyen(F_C3H8_feed,  MW['A'], LPG_FEED_JPY_PER_KG)
-        + _annual_okuyen(F_C4H10_feed, MW['Z'], LPG_FEED_JPY_PER_KG)
+        _annual_okuyen(F_C3H8_feed,  MW['A'], LPG_C3H8_JPY_PER_KG)
+        + _annual_okuyen(F_C4H10_feed, MW['Z'], LPG_C4H10_JPY_PER_KG)
     )
 
     # ---- Revenue (売上 + 燃料クレジット、全て正値で計上) ----
@@ -383,8 +390,8 @@ def calculate_economics(one_pass: dict, mw_C3H6_kg_per_kmol: float) -> Economics
     """
     capex, opex_raw, revenue = collect_capex_opex(one_pass)
 
-    # ペナルティ装置 (CAPEX >= 1e8 億円相当) は集計から除外
-    total_capex   = sum(v for v in capex.values() if v < 1e6)
+    # ペナルティ装置 (CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN = 1e8 億円相当) は集計から除外
+    total_capex   = sum(v for v in capex.values() if v < PENALTY_CAPEX_THRESHOLD_OKUYEN)
     N_eq          = _count_main_equipment(capex)
     opex          = apply_hasebe_aggregation(opex_raw, total_capex, N_eq)
     total_opex    = sum(opex.values())
