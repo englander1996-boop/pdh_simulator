@@ -12,13 +12,38 @@ sampler は名前文字列で切替可能 ('tpe' | 'cmaes' | 'random')、SQLite 
 """
 
 import optuna
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
+
+
+def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float]:
+    """Optuna TPE 用 constraints_func (Phase C, 2026-05-19)。
+
+    各要素が**負値なら feasible、正値なら違反**として TPE に解釈される。
+    objective.py の _store_diagnostics で trial.user_attrs に設定する値を読む。
+
+    制約:
+      [0] proxy_penalty_total_okuyen : rigorous プロキシ罰則合計 [億円/年]
+          (>0 でも採用するが TPE が積極的に避けるように働く)
+      [1] feasibility flag           : is_feasible=False で 1.0 (非収束等)
+      [2] spec_violation_pp_total    : spec 違反の合計 pp (>0 で違反)
+
+    TPE は constraint 違反 trial を「達成不可能と判断するための情報」として使う。
+    n_startup_trials 後の TPE モデルに非線形な選好を入れられる。
+    """
+    proxy = trial.user_attrs.get('proxy_penalty_total_okuyen', 0.0)
+    is_feasible = trial.user_attrs.get('is_feasible', True)
+    feas_violation = 0.0 if is_feasible else 1.0
+    # spec 違反 pp は failure_reason に書かれているが、現状 user_attr 化していない
+    # ので簡易的に「proxy + feas」の 2 制約だけにする。
+    return [proxy, feas_violation]
 
 
 def make_sampler(
-    name:       str,
-    seed:       int,
-    n_startup:  int,
+    name:              str,
+    seed:              int,
+    n_startup:         int,
+    *,
+    constraints_func:  Optional[Callable] = None,
 ) -> optuna.samplers.BaseSampler:
     """Sampler を名前から生成。
 
@@ -31,12 +56,19 @@ def make_sampler(
     n_startup : int
         TPE/CMA-ES の冒頭ランダム探索試行数。
         TPE は通常 n_trials // 6 程度が目安、本プロジェクトでは 50 を既定。
+    constraints_func : callable | None
+        TPE 用 constraints_func (Phase C, 2026-05-19)。trial → Sequence[float] で
+        負値=feasible、正値=violated。TPE 内部で feasible/violated を分けて
+        学習させる。None なら _default_constraints_func を使う。CMAES/Random は
+        constraints 非対応なので無視される (warning なし)。
     """
     name_lower = name.lower()
     if name_lower == 'tpe':
+        cf = constraints_func if constraints_func is not None else _default_constraints_func
         return optuna.samplers.TPESampler(
             seed=seed,
             n_startup_trials=n_startup,
+            constraints_func=cf,
         )
     elif name_lower == 'cmaes':
         return optuna.samplers.CmaEsSampler(

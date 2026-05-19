@@ -258,6 +258,30 @@ def evaluate(
     soft_penalty = (n_violations * pen.spec_base_okuyen
                     + total_violation_pp * pen.spec_coef_okuyen)
 
+    # ---- (b') rigorous プロキシ罰則 (2026-05-19 Phase A) ----
+    # 各蒸留塔の equipment.proxy_penalty_okuyen を合算して soft_penalty にマージ。
+    # FUG が「narrow margin / C3 漏れ過大」と判定した設計に対する追加コスト。
+    # 詳細は src/distillation_core.py の _compute_proxy_penalty。
+    # 設計判断: BO objective が「FUG では feasible でも rigorous で詰む領域」を
+    # 自動的に避けるように誘導する (ユーザー指示: 「FUG があんまりよろしくない」)。
+    proxy_penalty_total = 0.0
+    proxy_reasons: list[str] = []
+    for col_key in ('r1', 'r2', 'r3'):
+        col_result = solver_result.one_pass.get(col_key)
+        if col_result is None or col_result.equipment is None:
+            continue
+        p = getattr(col_result.equipment, 'proxy_penalty_okuyen', 0.0)
+        if p > 0:
+            proxy_penalty_total += p
+            reason = getattr(col_result.equipment, 'proxy_penalty_reason', '')
+            if reason:
+                proxy_reasons.append(f"{col_key}: {reason}")
+    if proxy_penalty_total > 0:
+        soft_penalty += proxy_penalty_total
+        failures.append(
+            f"rigorous プロキシ罰則 +{proxy_penalty_total:.1f} 億円/年 ({' | '.join(proxy_reasons)})"
+        )
+
     # ---- HI (post-processing) ----
     # 設計判断 (2026-05-09): apply_hi=True のときのみ pinch targeting を実行し、
     # HI 後の OPEX/TAC/Profit を別 Economics として保持する。BO ループでは

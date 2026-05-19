@@ -40,56 +40,55 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # === 反応器 (Swing) ============================================================
-#  ↓ 2026-05-19: main.py BO (動的 Dist3 recovery 導入後) ベスト
-#    rank 5 / trial #235、rigorous 再評価で feasible 確定 (top-1〜3 は FUG 楽観で生産量 spec 違反)。
-#    Profit Stage 2 = -267.48 億円/年 (旧 -363.86 から -96 改善 ✓)
-#    生産量 1207.08 kmol/h ✓、C3H6 純度 99.85 wt% ✓、H2 純度 99.9998 mol% ✓
-#    出力先: outputs/main_20260519_122615/
-T_in_K        = 910.327     # K       入口温度
-z_cat_m       = 27.4719     # m       触媒層長さ
-t_cyc_min     = 20.2316     # min     1 サイクル運転時間
-D_reactor_m   = 8.87302     # m       反応器内径
+#  ↓ 2026-05-19 (16:17 run): C3 強制移動撤廃 + rigorous fail-fast 後 BO ベスト
+#    trial #258、TAC_bo (FUG 楽観) = 455.4 億円/年
+#    rigorous 再評価は top-10 全敗 (Wang-Henke 収束失敗 dT_max~7K)、TAC_re = 10000 (penalty)
+#    調査用に exp1 へ転写。実走で何が起きるか確認する。
+#    出力先: outputs/main_20260519_161753/
+T_in_K        = 917.851     # K       入口温度
+z_cat_m       = 27.1332     # m       触媒層長さ
+t_cyc_min     = 12.8697     # min     1 サイクル運転時間
+D_reactor_m   = 9.34346     # m       反応器内径
 
 
 # === PSA (Dist2 塔頂から H2 回収) ==============================================
-D_psa_col_m       = 4.71405   # m       塔径
-L_psa_bed_m       = 28.9726   # m       吸着層高さ
-desorption_target = 0.252775  # -       q が初期値の 25.3% まで脱着
+D_psa_col_m       = 3.10955   # m       塔径
+L_psa_bed_m       = 19.0131   # m       吸着層高さ
+desorption_target = 0.246343  # -
 
 
 # === 膜分離 (Dist2 塔底から C3H6/C3H8 を分離) ===================================
-P_H_Pa     = 8.94009e5   # Pa      膜供給側圧力 (8.94 bar)
+P_H_Pa     = 7.62773e5   # Pa      膜供給側圧力
 P_L_Pa     = 1.0e5       # Pa      透過側圧力 (大気圧固定)
-A_mem_m2   = 1.35031e5   # m²      総膜面積
+A_mem_m2   = 2.17538e5   # m²      総膜面積
 
 
 # === Dist1 (脱ブタン塔: C3 ←→ C4 分離) =========================================
-P_dist1_Pa     = 22.1031e5   # Pa      操作圧力 (22.1 bar)
-N_dist1        = 23          # -       理論段数
-N_feed_dist1   = 12          # -       フィード段 (Kirkbride 自動採用、本値無視)
-reflux_dist1   = 2.89182     # -       還流比
+#  N_feed は探索対象外 (rigorous/sm では core 側 Kirkbride 推奨を自動採用、本値無視)。
+#  参考表示は results.equipment.N_feed_kirkbride を見ること (2026-05-19 改訂)。
+P_dist1_Pa     = 21.7646e5   # Pa      操作圧力
+N_dist1        = 26          # -       理論段数
+reflux_dist1   = 2.83932     # -       還流比
 
 
 # === Dist2 (脱エタン塔: 軽質ガス ←→ C3) ========================================
-P_dist2_Pa     = 7.4812e5    # Pa      操作圧力 (7.48 bar)
-N_dist2        = 23          # -       理論段数
-N_feed_dist2   = 12          # -       フィード段 (Kirkbride 自動採用)
-reflux_dist2   = 9.37202     # -       還流比
+P_dist2_Pa     = 7.54785e5   # Pa      操作圧力
+N_dist2        = 26          # -       理論段数
+reflux_dist2   = 5.21708     # -       還流比
 
 
 # === Dist3 (C3 スプリッタ: C3H6 製品精製) ======================================
 #  ↑ 2026-05-19: 動的 recovery_HK_bot 導入 (column3.py で純度 spec から逆算)
 #    旧版は recovery=0.99 hardcode + Gilliland check で N=174 強制 (純度 100% overspec)
 #    現版は spec 99.5 wt% に対応する rec_HK_bot ≒ 0.63 を動的計算、BO が N=100 (下限) を選択
-P_dist3_Pa     = 20.3939e5   # Pa      操作圧力 (= mem.P_dist と同期、20.4 bar)
-N_dist3        = 100         # -       理論段数 (BO 探索下限 100 ぎりぎり)
-N_feed_dist3   = 50          # -       フィード段 (Kirkbride 自動採用)
-reflux_dist3   = 15.9244     # -       還流比
+P_dist3_Pa     = 18.3716e5   # Pa      操作圧力 (= mem.P_dist と同期)
+N_dist3        = 174         # -       理論段数
+reflux_dist3   = 18.4525     # -       還流比
 
 
 # === Fresh LPG (BO 直接指定、外側ループ skip) ==================================
-#  ↓ 2026-05-19: BO ベスト trial #235
-F_C3H8_fresh_kmol_h = 1430.96
+#  ↓ 2026-05-19 (16:17): BO ベスト trial #258
+F_C3H8_fresh_kmol_h = 1515.71
 
 
 # === 蒸留塔 recovery (None = 0.99 既定値、float = 上書き) ======================
@@ -147,23 +146,25 @@ design = FlowsheetDesignVars(
         # mem.P_dist は Dist3 操作圧力と一致させる必要があるため P_dist3_Pa を共有
         P_H=P_H_Pa, P_L=P_L_Pa, A_mem=A_mem_m2, P_dist=P_dist3_Pa,
     ),
+    # ColumnTunables.N_feed は core 側 Kirkbride 推奨を自動採用するため
+    # プレースホルダ (=1) を渡す。実値は results.equipment.N_feed_kirkbride 参照。
     dist1=ColumnTunables(
         P_col=P_dist1_Pa, N_stages=N_dist1,
-        N_feed=N_feed_dist1, reflux_ratio=reflux_dist1,
+        N_feed=1, reflux_ratio=reflux_dist1,
         solver_method=SOLVER_DIST1,
         recovery_LK_top=rec_LK_top_dist1,
         recovery_HK_bot=rec_HK_bot_dist1,
     ),
     dist2=ColumnTunables(
         P_col=P_dist2_Pa, N_stages=N_dist2,
-        N_feed=N_feed_dist2, reflux_ratio=reflux_dist2,
+        N_feed=1, reflux_ratio=reflux_dist2,
         solver_method=SOLVER_DIST2,
         recovery_LK_top=rec_LK_top_dist2,
         recovery_HK_bot=rec_HK_bot_dist2,
     ),
     dist3=ColumnTunables(
         P_col=P_dist3_Pa, N_stages=N_dist3,
-        N_feed=N_feed_dist3, reflux_ratio=reflux_dist3,
+        N_feed=1, reflux_ratio=reflux_dist3,
         solver_method=SOLVER_DIST3,
         recovery_LK_top=rec_LK_top_dist3,
         recovery_HK_bot=rec_HK_bot_dist3,

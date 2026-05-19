@@ -59,9 +59,24 @@ _T_MAX_K = 600.0      # stage T の上限
 _EPS     = 1e-12
 
 # 収束パラメータ (デフォルト)
-_DEFAULT_MAX_ITER  = 200
+# 設計判断 (2026-05-19 Phase D): narrow-margin 設計で dT_max が ~7K で stall するケース
+# (Dist2 trial #258 級) に対処するため max_iter を 200 → 500 に拡張。
+# damping は Wegstein 加速の初回フォールバック値。失敗時の retry では 0.2 (no Wegstein)
+# を使う (_simulate_rigorous で実装)。
+_DEFAULT_MAX_ITER  = 500
 _DEFAULT_T_TOL_K   = 0.05    # ストレージ毎の T 変化が < 0.05 K で収束
 _DEFAULT_DAMPING   = 0.5     # T プロファイル更新の重み (0=無更新, 1=全更新、Wegstein 初回フォールバック)
+# 失敗時 retry 用パラメータ (Phase D, 2026-05-19)
+_RETRY_DAMPING     = 0.2     # Wegstein 振動を抑えた pure substitution 寄り
+_RETRY_DISABLE_WEGSTEIN = True   # retry では Wegstein を使わず damping のみ
+
+# Phase E (2026-05-19): partial condenser stage 1 で non-condensable を液側から除く際の K 上書き値
+# 物理的「液側に入らない」= K → ∞ の理想化。1e8 は数値オーバーフローを避けつつ
+# tridiagonal で x_1[i] → V_2 y_2 / (D × K) ≈ 0 を作れる十分大きい値。
+_K_NONCONDENSABLE_LARGE = 1.0e8
+
+# partial cond の non-condensable 成分 (モジュール独立性のため再定義、distillation_core.NON_CONDENSABLE_COMPS と同期)
+_NON_CONDENSABLE_KEYS = frozenset(['C', 'E'])    # H2, CH4
 
 # 物理定数 (PR EOS と整合)
 _R_GAS = 8.314    # [J/(mol·K)]
@@ -79,6 +94,41 @@ _LAMBDA_KJ_PER_MOL: Dict[str, float] = {
     'Z': 22.0,    # C4H10
 }
 _LAMBDA_DEFAULT = 15.0    # [kJ/mol] フォールバック
+
+# 純成分 NBP (1 atm 沸点) [K]、Clausius-Clapeyron 計算用 (Ref: NIST)
+# 2026-05-19 修正 (Phase E): 旧版は H2/CH4 に「重平均で異常にならない程度の placeholder」
+# 値 (H2=100, CH4=150) を入れていたが、_K_cc_fallback で使うと CC が誤った K を返す
+# (例: H2 K=0.2 で完全に物理逆方向)。実 NBP に置き換えて CC が正しい K を出すようにする。
+_T_NBP_K: Dict[str, float] = {
+    'A': 231.0,   # C3H8 (−42.1°C)
+    'B': 225.5,   # C3H6 (−47.6°C)
+    'C':  20.3,   # H2 (−252.9°C, 超低温で液化)
+    'D': 169.4,   # C2H4 (−103.7°C)
+    'E': 111.7,   # CH4 (−161.5°C)
+    'F': 184.6,   # C2H6 (−88.6°C)
+    'Z': 272.6,   # C4H10 (−0.5°C, n-butane)
+}
+_T_NBP_DEFAULT = 250.0
+
+
+def _weighted_NBP_K(z: Dict[str, float], comps: List[str], P_col: float) -> float:
+    """初期 T 推定の NaN フォールバック: 成分加重 NBP を CC で塔圧に補正。
+
+    bubble_point_T が NaN を返す系 (incondensable を含むフィード) で使う粗推定。
+    厳密性は不要 (Wang-Henke 外側反復で収束させるので)。
+    """
+    T_atm = sum(z.get(c, 0.0) * _T_NBP_K.get(c, _T_NBP_DEFAULT) for c in comps)
+    if T_atm <= 0.0:
+        T_atm = _T_NBP_DEFAULT
+    # CC で塔圧補正 (近似): ln(P/P_atm) = ΔH/R × (1/T_atm - 1/T_col)
+    lam_J = (sum(z.get(c, 0.0) * _LAMBDA_KJ_PER_MOL.get(c, _LAMBDA_DEFAULT)
+                 for c in comps) or _LAMBDA_DEFAULT) * 1000.0
+    inv_T_col = 1.0 / T_atm - _R_GAS / lam_J * math.log(P_col / 101_325.0)
+    if inv_T_col <= 0.0:
+        return T_atm * 1.5
+    T_col = 1.0 / inv_T_col
+    return max(_T_MIN_K, min(_T_MAX_K - 50.0, T_col))
+
 
 # Newton 1 ステップ bubble-point の安全装置
 _NEWTON_DT_MAX_K   = 20.0   # 1 ステップで動かす T の最大幅 [K]
@@ -145,6 +195,7 @@ def wang_henke_solve(
     damping:          float = _DEFAULT_DAMPING,
     T_top_init_K:     Optional[float] = None,
     T_bot_init_K:     Optional[float] = None,
+    use_wegstein:     bool = True,    # Phase D (2026-05-19): retry 用に Wegstein 無効化可
 ) -> RigorousResult:
     """Wang-Henke で多成分蒸留塔の MESH を解く。
 
@@ -234,17 +285,32 @@ def wang_henke_solve(
     # ---- 3. 初期 T プロファイル (線形) ----
     # 設計判断: 塔頂 (LK 主体) と塔底 (HK 主体) の純成分沸点を初期推定。
     # FUG から渡された値があればそれを使う、無ければ z 全成分で粗推定。
+    #
+    # 2026-05-19 修正: bubble_point_T が NaN を返す系 (H2/CH4 等の incondensable を
+    # 含むフィード, 例: Dist2 z=[H2 11.7%, CH4 2.4%, ...]) で NaN が伝播して
+    # max/min クランプを抜け _T_MAX_K=600K trivial 解 (K=1 全段) に陥っていた。
+    # フォールバック値を成分加重平均沸点 (CC ベース) に置換、さらに NaN check を追加。
     if T_top_init_K is None or T_bot_init_K is None:
-        # フィード組成で泡点 T を粗推定 (どちらの sec でも良い、線形 init の参考だけ)
+        T_mid = float('nan')
         try:
             x_init = [z_feed[c] for c in comps]
             T_mid = bubble_point_T(P_col, x_init, comps)
         except Exception:
-            T_mid = 350.0
-        T_top_init_K = T_top_init_K if T_top_init_K is not None else T_mid - 30.0
-        T_bot_init_K = T_bot_init_K if T_bot_init_K is not None else T_mid + 30.0
-    T_top_init_K = max(_T_MIN_K, min(_T_MAX_K, T_top_init_K))
-    T_bot_init_K = max(_T_MIN_K, min(_T_MAX_K, T_bot_init_K))
+            T_mid = float('nan')
+        # NaN フォールバック: 成分別 NBP (CC で P 補正) の加重平均
+        if not math.isfinite(T_mid):
+            T_mid = _weighted_NBP_K(z_feed, comps, P_col)
+        if T_top_init_K is None:
+            T_top_init_K = T_mid - 30.0
+        if T_bot_init_K is None:
+            T_bot_init_K = T_mid + 30.0
+    # NaN/Inf 最終ガード (FUG 経由でも T_top が NaN/600K 等の異常値を渡してくる可能性)
+    if not math.isfinite(T_top_init_K):
+        T_top_init_K = 300.0
+    if not math.isfinite(T_bot_init_K):
+        T_bot_init_K = 350.0
+    T_top_init_K = max(_T_MIN_K, min(_T_MAX_K - 50.0, T_top_init_K))
+    T_bot_init_K = max(_T_MIN_K, min(_T_MAX_K - 50.0, T_bot_init_K))
     if T_bot_init_K <= T_top_init_K:
         T_bot_init_K = T_top_init_K + 5.0
 
@@ -256,6 +322,15 @@ def wang_henke_solve(
     for j in range(N_stages):
         for i, c in enumerate(comps):
             x[j, i] = z_feed[c]
+
+    # Phase E (2026-05-19): partial cond の non-condensable インデックス集合 (現状は
+    # _compute_K_profile の縮退検出ベース CC フォールバックで処理されるため、ここでは
+    # 使わない。将来 K 強制上書き等の追加対策を入れる場合に備えて保持)。
+    non_condensable_idx: List[int] = []
+    if partial_condenser:
+        non_condensable_idx = [
+            i for i, c in enumerate(comps) if c in _NON_CONDENSABLE_KEYS
+        ]
 
     # ---- 5. 反復ループ (Newton 1ステップ bubble-point + Wegstein 加速) ----
     # Wegstein 用の前回履歴 (各段の T と Newton-計算 T_calc を覚えておく)
@@ -270,7 +345,12 @@ def wang_henke_solve(
         # 5a. 現在の T, x で K 値を計算 (各段で PR EOS + phi_L/phi_V)
         # Newton step では K 値を内部で再計算するので、ここの K_profile は
         # tridiagonal 用 (= MESH の係数行列) のみに使う。
-        K = _compute_K_profile(T, x, comps, P_col, K_method)
+        # Phase E (2026-05-19): partial cond stage 1 で non-condensable K を上書き。
+        K = _compute_K_profile(
+            T, x, comps, P_col, K_method,
+            partial_condenser=partial_condenser,
+            non_condensable_idx=non_condensable_idx,
+        )
         if K is None:
             return _failure_result(
                 f"iter {it}: K 値計算失敗 (単相領域逸脱)",
@@ -320,8 +400,11 @@ def wang_henke_solve(
         #   q = s/(s-1), s = (T_calc[j] - T_calc_prev[j]) / (T[j] - T_prev[j])
         #   q ∈ [-5, 0] にクランプ (加速のみ、振動方向への発散を防止)
         # 初回 2 反復は履歴がないので固定 damping にフォールバック。
-        if T_prev is None or T_calc_prev is None:
+        # Phase D (2026-05-19): use_wegstein=False のときは pure substitution (damping 固定) のみ
+        # を使う。narrow-margin で Wegstein が振動方向に逸脱するケースの retry 用。
+        if T_prev is None or T_calc_prev is None or not use_wegstein:
             T_damped = (1.0 - damping) * T + damping * T_calc
+            T_damped = np.clip(T_damped, _T_MIN_K, _T_MAX_K)
         else:
             T_damped = np.empty_like(T)
             for j in range(N_stages):
@@ -367,7 +450,11 @@ def wang_henke_solve(
     # x と K の整合を取る。T は固定 (= 静止点維持)、x のみ磨く。
     # 経験的に 2-3 回で MESH 残差は 1e-3 → 1e-6 オーダーまで縮む。
     for polish_iter in range(3):
-        K_polish = _compute_K_profile(T, x, comps, P_col, K_method)
+        K_polish = _compute_K_profile(
+            T, x, comps, P_col, K_method,
+            partial_condenser=partial_condenser,
+            non_condensable_idx=non_condensable_idx,
+        )
         if K_polish is None:
             break
         x_polish = np.zeros_like(x)
@@ -397,7 +484,11 @@ def wang_henke_solve(
             break
 
     # ---- 6. 結果整理 ----
-    K_final = _compute_K_profile(T, x, comps, P_col, K_method)
+    K_final = _compute_K_profile(
+        T, x, comps, P_col, K_method,
+        partial_condenser=partial_condenser,
+        non_condensable_idx=non_condensable_idx,
+    )
     y = np.zeros_like(x)
     for j in range(N_stages):
         for i in range(n_comp):
@@ -499,6 +590,11 @@ def _bubble_T_newton_step(
       - Newton が暴れるケース (極小 df/dT、df/dT 符号反転) に備えて
         T 変化を _NEWTON_DT_MAX_K [K] でクランプする
 
+    2026-05-19 修正 (Phase E 続き): PR EOS が単相縮退 (Z_L ≈ Z_V → 全成分 K=1) の
+    場合、f(T) = Σ 1·x_i - 1 = 0 で停止して T が動かない問題を修正。縮退検出時は
+    K と df/dT を Clausius-Clapeyron で再計算する。これにより subcooled な T_init
+    から正しい bubble point へ Newton が収束する。
+
     Returns
     -------
     (T_new, K_at_T_old)
@@ -508,17 +604,27 @@ def _bubble_T_newton_step(
         Z_V = z_factor(T_old, P, x, comps, phase='vapor')
         Z_L = z_factor(T_old, P, x, comps, phase='liquid')
     except Exception:
-        return T_old, [1.0] * len(comps)
+        Z_V = Z_L = float('nan')
+
+    _Z_DEGEN_TOL = 1.0e-3
+    is_degenerate = (math.isfinite(Z_V) and math.isfinite(Z_L)
+                     and abs(Z_V - Z_L) < _Z_DEGEN_TOL)
+    is_failed = not (math.isfinite(Z_V) and math.isfinite(Z_L))
 
     # K 値計算
     K_values: List[float] = []
-    for i in range(len(comps)):
-        try:
-            phi_V = fugacity_coeff(i, T_old, P, x, comps, Z_V)
-            phi_L = fugacity_coeff(i, T_old, P, x, comps, Z_L)
-            K_values.append(phi_L / max(phi_V, _EPS))
-        except Exception:
-            K_values.append(1.0)
+    if is_degenerate or is_failed:
+        # CC フォールバック (Phase E、2026-05-19)
+        for i, c in enumerate(comps):
+            K_values.append(_K_cc_fallback(c, T_old, P))
+    else:
+        for i in range(len(comps)):
+            try:
+                phi_V = fugacity_coeff(i, T_old, P, x, comps, Z_V)
+                phi_L = fugacity_coeff(i, T_old, P, x, comps, Z_L)
+                K_values.append(phi_L / max(phi_V, _EPS))
+            except Exception:
+                K_values.append(_K_cc_fallback(comps[i], T_old, P))
 
     # f(T) = Σ K x - 1
     f_T = sum(K_values[i] * x[i] for i in range(len(x))) - 1.0
@@ -540,18 +646,48 @@ def _bubble_T_newton_step(
     return T_new, K_values
 
 
+def _K_cc_fallback(comp: str, T: float, P_col: float) -> float:
+    """Clausius-Clapeyron で K_i = P_sat,i(T) / P_col を計算 (PR EOS 縮退時用)。
+
+    src/distillation_core.py の _K_cc と同等。モジュール独立性のため再定義。
+    超臨界 (Tc < T) でも公式は単純外挿で大きな値を返すので、PR EOS の単相縮退
+    (Z_L ≈ Z_V → K=1 全成分) を物理的に正しく補正できる。
+    """
+    T_b = _T_NBP_K.get(comp, _T_NBP_DEFAULT)
+    lam_J = _LAMBDA_KJ_PER_MOL.get(comp, _LAMBDA_DEFAULT) * 1000.0
+    try:
+        P_sat = 101_325.0 * math.exp(lam_J / _R_GAS * (1.0 / T_b - 1.0 / T))
+    except OverflowError:
+        P_sat = 1.0e30
+    return P_sat / P_col
+
+
 def _compute_K_profile(
     T: np.ndarray, x: np.ndarray,
     comps: List[str], P_col: float, K_method: str,
+    partial_condenser: bool = False,
+    non_condensable_idx: Optional[List[int]] = None,
 ) -> Optional[np.ndarray]:
     """各段で K_{i,j} = phi_L_i / phi_V_i を計算。
 
     各段の x_{:,j} は液相組成、T_j は仮の段温度。両相が共存する点 (= 泡点近傍)
     では Z_L, Z_V とも有効な根が得られる。仮 T で単相に張り付いた場合は
     None を返して呼び出し側でフォールバック。
+
+    2026-05-19 修正 (Phase E "single-phase degeneracy auto-fallback"):
+      partial_condenser=True で PR EOS が単相縮退 (Z_L ≈ Z_V → 全成分 K≈1 で
+      分離装置として機能不能) を返した段は、Clausius-Clapeyron で K を再計算する。
+      CC は純成分蒸気圧ベースで H2 (Tc=33K) など超臨界成分にも K_huge を返すため、
+      物理的に妥当な「H2/CH4 はほぼ液相に入らない」結果になる。
+
+      バグ発見の経緯 (HYSYS との乖離調査 2026-05-19):
+        stage 1 で T=-73°C / 8.5bar / x={H2:64%, ...} の状態に PR が Z_L=Z_V を
+        返し K=1 全成分の縮退解になっていた。この縮退で C3H6 漏れが 4.5% に膨らみ
+        HYSYS 報告の <1% と乖離。CC フォールバックで縮退を解消する。
     """
     N_stages, n_comp = x.shape
     K = np.zeros_like(x)
+    _Z_DEGEN_TOL = 1.0e-3      # |Z_V - Z_L| がこれ未満なら単相縮退と判定
     for j in range(N_stages):
         x_j = list(x[j])
         try:
@@ -559,13 +695,18 @@ def _compute_K_profile(
             Z_L = z_factor(T[j], P_col, x_j, comps, phase='liquid')
         except Exception:
             return None
+        is_degenerate = abs(Z_V - Z_L) < _Z_DEGEN_TOL
         for i in range(n_comp):
-            try:
-                phi_V = fugacity_coeff(i, T[j], P_col, x_j, comps, Z_V)
-                phi_L = fugacity_coeff(i, T[j], P_col, x_j, comps, Z_L)
-                K[j, i] = phi_L / phi_V if phi_V > _EPS else 0.0
-            except Exception:
-                return None
+            if is_degenerate:
+                # 単相縮退: CC で K を再計算 (Phase E 修正)
+                K[j, i] = _K_cc_fallback(comps[i], T[j], P_col)
+            else:
+                try:
+                    phi_V = fugacity_coeff(i, T[j], P_col, x_j, comps, Z_V)
+                    phi_L = fugacity_coeff(i, T[j], P_col, x_j, comps, Z_L)
+                    K[j, i] = phi_L / phi_V if phi_V > _EPS else 0.0
+                except Exception:
+                    return None
     return K
 
 

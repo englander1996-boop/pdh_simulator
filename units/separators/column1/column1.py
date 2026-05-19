@@ -75,6 +75,7 @@ def simulate_column1(
         K_method        = 'pr',
         q               = 1.0,       # 飽和液 (Pump1 後の Fresh)
         solver_method   = t.solver_method,
+        D_override      = t.D_override,
     )
     return simulate_distillation_column(
         design, feed,
