@@ -9,7 +9,7 @@ from stream.stream import ProcessStream
 from src.cost_parameters import (
     ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ,
-    CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
+    CATALYST_JPY_PER_KG, CATALYST_LIFE_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
     LPG_FEED_JPY_PER_KG, C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
 )
@@ -502,7 +502,7 @@ def show_tac_summary(result, C3H6_product: float) -> None:
           f"LPG {LPG_FEED_JPY_PER_KG}/C3H6 {C3H6_PRODUCT_JPY_PER_KG}/H2 {H2_PRODUCT_JPY_PER_KG} 円/kg, "
           f"電力 {ELECTRICITY_JPY_PER_KWH} 円/kWh, "
           f"LP蒸気/冷水/燃料 {LP_STEAM_JPY_PER_GJ}/{COOLING_WATER_JPY_PER_GJ}/{FUEL_JPY_PER_GJ} 円/GJ")
-    print(f"  触媒 PtSn {CATALYST_PTSN_JPY_PER_KG:.0f}円/kg × {CATALYST_PTSN_LIFE_YEARS:.0f}年, "
+    print(f"  触媒 Cr2O3-Al2O3 (Catofin相当) {CATALYST_JPY_PER_KG:.0f}円/kg × {CATALYST_LIFE_YEARS:.1f}年, "
           f"稼働 {OPERATING_HOURS_PER_YEAR:.0f}h/年, 償却 {DEPRECIATION_YEARS}年")
 
 

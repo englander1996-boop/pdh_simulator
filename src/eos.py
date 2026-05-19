@@ -107,7 +107,6 @@ def _mix(T: float, P: float, x: List[float], keys: List[str]):
     !仮置き k_ij = 0 (van der Waals 古典近似)。文献値の出典確定はユーザー判断要。
     完全実装には _mix を二重和  a_m = Σᵢ Σⱼ xᵢ xⱼ (1−kᵢⱼ) √(aᵢ aⱼ) に
     書き換え + k_ij テーブル (src/component_data.py に追加) が必要。
-    """
 
     Returns
     -------

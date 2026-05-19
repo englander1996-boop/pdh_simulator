@@ -4,6 +4,25 @@ PDH スイング反応器システム シミュレーター
 触媒失活を伴うプロパン脱水素断熱PFR（スイング操作）を模擬し、
 後段分離工程への時間平均ストリームと装置コスト情報を出力する。
 
+========================================================================
+触媒モデル: Cr2O3-Al2O3 (Catofin プロセス相当)
+========================================================================
+コンテスト要項 §3-3 で提供される a (失活係数) データは「架空触媒」のもの
+だが、その挙動 (700°C で 30 min で a≈0.04 と分単位で急速失活、400°C で
+a≈0.81) は工業 Cr2O3-Al2O3 触媒 (Catofin プロセス, ABB Lummus 1986〜) の
+バッチ再生型 PDH の物理と整合する。
+Pt-Sn/Al2O3 (UOP Oleflex) は本来 CCR (連続触媒再生) 方式で日〜週オーダー
+の緩慢失活であり、本実装のスイング再生方式 (t_regen=30 min) + a データの
+分単位失活とは物理整合しない。よって以下の経済パラメータも Cr2O3 系の
+文献値を採用 (CATALYST_*, rho_b):
+  - 単価 $23/kg ≒ 3,654 円/kg : Mangalindan et al. (2025) ACS Eng. Au
+  - 寿命 2.5 年 (2-3 年中央値) : Ni (2022) TUM 博士論文 p.20 Catofin 解説
+  - bulk density 900 kg/m³    : Chauruka (2021) Leeds 博士論文 p.86 γ-Al2O3
+環境懸念: Cr2O3 触媒は六価 Cr の生成/排出規制が厳しい (大気汚染防止法・
+水質汚濁防止法)。実プラント設計では Pt-Sn/Pt-Ga 系への置換を検討すべき
+だが、本シミュレータでは a データとの物理整合性を優先。レポートで言及予定。
+詳細: KNOWN_PLACEHOLDERS.md §A.4 (2026-05-19 卒業エントリ)
+
 使用方法:
     from units.reactors.swing import (
         DesignVars, FeedStream, FixedParams, simulate_swing_reactor_system
@@ -152,14 +171,22 @@ class FixedParams:
     #     床自体の粒子間空隙率 (~0.4 typical) は本モデルでは陽に扱わない。
     eps:                  float = 0.5
 
-    # !仮置き: 触媒充填密度 (bulk density) [kg/m³]
-    #   ─ 架空触媒のためユーザ判断で決定する値
-    #   ─ PtSn/Al2O3 ペレット触媒を想定した場合の公開データ範囲: 400〜800 kg/m³
-    #     (Clariant/BASF 等の公開サンプル値、典型値 500-700)
-    #   ─ 現値 700 は中央値〜やや高め、ユーザ判断で変更可
-    #   ─ 用途: W_cat = V_cat (床体積) × rho_b で触媒重量算出。
+    # 触媒充填密度 (bulk density) [kg/m³]
+    #   触媒モデル: Cr2O3-Al2O3 (Catofin プロセス相当)。コンテスト要項 §3-3
+    #     提供の a データ (分単位の急速失活) と本実装のスイング再生方式
+    #     (t_regen=30 min) の物理整合性から決定。
+    #   出典: Chauruka, S. R. (2021). "The formulation and characterisation of
+    #     extruded alumina catalyst supports" (Doctoral thesis, University of
+    #     Leeds; White Rose eTheses Online)。γ-アルミナ触媒担体の物性表で
+    #     Packed Bulk Density 800-1000 g/L (= kg/m³) と記載。
+    #   参照 PDF: report_for_processdesign/references/Chauruka_2021_Leeds_alumina_thesis.pdf
+    #   採用値: レンジ 800-1000 の中央値 900 kg/m³。Catofin の Cr2O3-Al2O3
+    #     触媒は担体 (γ-Al2O3) が bulk density を支配するため、γ-アルミナ
+    #     担体の値を採用 (Cr 担持 12-25 wt% で bulk density 微増想定だが
+    #     一次データ未取得のため担体値で代用)。
+    #   用途: W_cat = V_cat (床体積) × rho_b で触媒重量算出。
     #     公知の式と一致 (床体積 × 充填密度 = 触媒重量)。
-    rho_b:                float = 700.0
+    rho_b:                float = 900.0
 
     # 空塔速度 (superficial velocity) 制約 [m/s]
     # 設計判断 (2026-05-17): 触媒設計アドバイスで「固定床 PFR の SV は通常 1〜3 m/s」
