@@ -60,14 +60,22 @@ PDH 学生コンテスト Ver.2.0 にはユーティリティ単価規定が無�
 
 ### 1.2 触媒・吸着剤・膜モジュール 🔴 優先度高
 
+**触媒モデル (2026-05-19 確定)**: Cr₂O₃-Al₂O₃ (Catofin プロセス相当)。
+コンテスト要項 §3-3 で提供される a (失活係数) データは架空触媒のものだが、
+その挙動 (700°C で 30 min で a≈0.04 と分単位で急速失活) は工業 Cr₂O₃ 触媒の
+バッチ再生型 PDH (Catofin) の物理と整合する。Pt-Sn/Al₂O₃ (Oleflex) は CCR
+方式で日〜週オーダーの緩慢失活であり、本実装のスイング (t_regen=30 min) +
+a データの分単位失活とは物理整合しない。
+環境懸念: 六価 Cr の生成/排出規制が厳しい (大気汚染防止法・水質汚濁防止法
+の特定/有害物質)。実プラントでは Pt 系への置換を検討すべきだが、本シミュ
+レータでは a データとの物理整合性を優先。レポートで言及予定。
+
+**触媒 3 値 (単価/寿命/ρ_b) は 2026-05-19 に文献 citation 付きで確定**し §A.4 へ卒業。下表は残る項目。
+
 | 項目 | 現値 | ファイル | 想定出典 |
 |---|---|---|---|
-| **PtSn 触媒単価** | 30,000 円/kg | `src/cost_parameters.py` `CATALYST_PTSN_JPY_PER_KG` | 触媒メーカー (Clariant 等) のデータシート、Pt 含有率依存 |
-| **PtSn 触媒寿命** | 4 年 | 同上 `CATALYST_PTSN_LIFE_YEARS` | 工業実績 (Catofin/Oleflex 共に 3〜5 年) |
-| **PtSn 触媒充填密度 ρ_p** | 700 kg/m³ | `units/reactors/swing.py` `FixedParams.rho_p` | 実触媒 PtSn/Al2O3 ペレットの粒子密度寄り。空隙の二重控除になっている可能性は要確認 |
 | **膜モジュール単価** | 50 USD/m² | `src/cost_parameters.py` `MEM_UNIT_PRICE_USD_PER_M2` | Hua et al. (2024) / ZIF-8 膜 TEA 論文 |
 | **膜モジュール A_per_module** | 500 m² | `units/separators/membrane/membrane_system.py` `MemFixedParams.A_per_module` | Evonik SEPURAN 等のデータシートから中空糸寸法計算 |
-| **膜パラメータ (Q_A=40 GPU, α=90)** | 文献値 | 同上 `MemFixedParams` | Hua et al. (2024) 実測値、室温・大気圧 |
 | **活性炭単価** | 5 USD/kg | `src/cost_parameters.py` `ACTIVATED_CARBON_PRICE_USD_PER_KG` | 試薬メーカーカタログ (工業グレード) |
 | **活性炭寿命** | 4 年 | 同上 `ADSORBENT_LIFETIME_YEARS` | メーカー仕様書 / 運転実績 |
 
@@ -249,6 +257,36 @@ USD/JPY=158.8595 (Google Finance 2026-05-18 06:35:00 UTC) で換算。
 
 **`exp1` / `main` の TAC・Profit ベースライン値は変動するため、再実行して新ベースライン取得推奨**。
 
+## §A.4 2026-05-19 §1.2 触媒 3 値を Cr2O3-Al2O3 (Catofin 相当) で確定
+
+コンテスト要項 §3-3 の a (失活係数) データの分単位失活挙動が工業 Cr2O3 触媒
+(Catofin プロセス) と物理整合することから、触媒モデルを Cr2O3-Al2O3 に確定。
+3 値を一次文献から citation 付きで採用。
+
+| 定数名 | 採用値 | 一次出典 |
+|---|---|---|
+| `CATALYST_USD_PER_KG` | 23.0 USD/kg | Mangalindan, J. R. et al. (2025) "Tandem Cu/ZnO/ZrO2-SAPO-34 System for Dimethyl Ether Synthesis from CO2 and H2: Catalyst Optimization, Techno-Economic, and Carbon-Footprint Analyses". *ACS Engineering Au.* Table 2 (TEA Parameters) 白金を含まない遷移金属酸化物ベース触媒単価。参照 PDF: `references/Mangalindan_2025_DME_TEA_ACS_Eng_Au.pdf` |
+| `CATALYST_JPY_PER_KG` | ≒ 3,654 円/kg | 上記 × `USD_TO_JPY` (158.8595) |
+| `CATALYST_LIFE_YEARS` | 2.5 年 | Ni, L. (2022). "Propane dehydrogenation on highly active and selective Ga/BEA and ethanol conversion to butadiene on zincosilicate BEA" (Doctoral dissertation, TUM; 受理 2022-02-24; mediaTUM doc id 1638095). PDF p.20 (Chapter 1 工業 PDH プロセス節) で Catofin について "stable dehydrogenation performance (2-3 years lifetime)" と明記。pypdf 全 124 ページ検索で文言一致を検証済。レンジ 2-3 の中央値を採用。参照 PDF: `references/Ni_2022_TUM_PDH_thesis.pdf` |
+| `FixedParams.rho_b` (`units/reactors/swing.py`) | 900 kg/m³ | Chauruka, S. R. (2021). "The formulation and characterisation of extruded alumina catalyst supports" (Doctoral thesis, University of Leeds; White Rose eTheses Online). γ-アルミナ触媒担体物性表で Packed Bulk Density 800-1000 g/L (= kg/m³)。Catofin の Cr2O3-Al2O3 触媒は担体 (γ-Al2O3) が bulk density を支配するためそのまま採用。レンジ中央値。参照 PDF: `references/Chauruka_2021_Leeds_alumina_thesis.pdf` |
+
+### 環境懸念 (本表に併記)
+
+Cr2O3 触媒は六価 Cr の生成/排出規制が厳しい (大気汚染防止法 特定物質、水質
+汚濁防止法 有害物質)。実プラント設計では Pt 系 (Pt-Sn/Oleflex, Pt-Ga/STARplus)
+への置換を検討すべきだが、本シミュレータでは a データとの物理整合性を優先。
+レポートでも言及予定。
+
+### 主要副作用 (再実行で値が変わる)
+
+- 触媒単価: 30,000 → 3,654 円/kg (× 0.12、約 1/8 に低下)
+- 触媒寿命: 4 → 2.5 年 (× 0.625、短縮)
+- bulk density: 700 → 900 kg/m³ (× 1.29)
+- 触媒交換 OPEX の純変化: (3,654 / 2.5) ÷ (30,000 / 4) × (900 / 700) ≒ 0.250 (約 1/4 に低下)
+- 反応器 CAPEX (W_cat = V_cat × rho_b 経由) は ρ_b 増で微増の方向 (Catalyst_Weight_Total は容器 CAPEX に直接効かないため、Hasebe C_OL 経由の間接効果のみ)。
+
+`exp1` / `main` ベースライン要再取得。
+
 ## §A. 出典確定済み (本表から卒業した項目)
 
 過去に仮置きだったが、文献・コンテスト仕様で確定した項目。記録のため保持。
@@ -261,6 +299,7 @@ USD/JPY=158.8595 (Google Finance 2026-05-18 06:35:00 UTC) で換算。
 - **HE U 値** — 第17回プロセスデザイン学生コンテスト Ver.2.0 §4-4 表 (2026-05-09)
 - **蒸留塔 G\* / 段間隔 0.6m / 段効率 80% / 塔頂2m+塔底4m** — contest Ver.2.0 §4-2 (2026-05-09)
 - **PR EOS Ω_a=0.45724 / Ω_b=0.07780** — Peng & Robinson (1976) *Ind. Eng. Chem. Fundam.* 15(1), 59-64 (2026-05-09)
+- **膜パラメータ Q_A=40 GPU / α=90** — Hua et al. (2024) "Unexpectedly High Propylene/Propane Separation Performance..." 実測値（室温・大気圧条件）。`MemFixedParams.Q_A_GPU`, `MemFixedParams.alpha` (`units/separators/membrane/membrane_system.py:158-159`) および SPEC_membrane_system.md §7-3, §12 で既に citation 明記済 (2026-05-19)
 - **蒸留塔 rigorous solver アルゴリズム** — Seader, Henley & Roper "Separation Process Principles" 3rd ed., Ch.10.4 (Wang-Henke bubble-point method) (2026-05-09 実装)
 - **蒸留塔 rigorous K 値検証** — CalebBell/thermo (https://github.com/CalebBell/thermo, MIT License v0.6.0) と `src/eos.py` の PR EOS が 0.02% 一致を確認 (2026-05-09)。core 計算は src/eos.py 流用、thermo は将来 PT/PH flash 用に install 済
 - **`bubble_point_T` 内部実装** — thermo (CalebBell, MIT v0.6.0) で内部置換、外向き API 不変 (wrapper パターン、2026-05-10)。cubic root 切替境界の偽根問題が根本解決
@@ -343,6 +382,24 @@ Silent fallback / コード品質問題 (§4) を修正したら:
 ---
 
 ## §C. 履歴
+
+### 2026-05-19 — §1.2 整備
+- **膜パラメータ Q_A=40 GPU / α=90 を §A.1 へ卒業**: `MemFixedParams` のコード側および SPEC_membrane_system.md で既に Hua et al. (2024) 一次出典が明記されており、§1.2 表の「文献値」記述は実態と乖離していた。§1.2 から行を削除し §A.1 に転記。
+- **§1.2 表の `rho_p` → `rho_b` 表記修正**: 実コード変数名 (`units/reactors/swing.py` `FixedParams.rho_b`、bulk density) に合わせた。値 (700 kg/m³) は変更なし。
+- **触媒モデルを Cr₂O₃-Al₂O₃ (Catofin 相当) に確定**: コンテスト要項 §3-3 の a データ (分単位の急速失活) と本実装スイング方式 (t_regen=30 min) の物理整合性から決定。Pt-Sn (Oleflex CCR) は本来 日〜週オーダー失活なので不整合。定数を中立名に rename:
+  - `CATALYST_PTSN_JPY_PER_KG` → `CATALYST_JPY_PER_KG`
+  - `CATALYST_PTSN_LIFE_YEARS` → `CATALYST_LIFE_YEARS`
+  - 参照 3 ファイル (`flowsheet/economics.py`, `simulation/display.py`, `src/cost_parameters.py` 内コメント) を一括更新。
+  - 環境懸念 (六価 Cr) を `cost_parameters.py` ヘッダコメントと SPEC_swing.md に明記。
+- **SPEC_swing.md 更新**: §1 概要表に「触媒モデル: Cr₂O₃-Al₂O₃ (Catofin 相当)」を追加、`rho_p` 表記を `rho_b` に統一。
+- **触媒 3 値を文献 citation 付きで確定** (§A.4 参照):
+  - 単価: 30,000 → 3,654 円/kg ($23/kg × 158.8595)、出典 Mangalindan et al. (2025) ACS Engineering Au.
+  - 寿命: 4 → 2.5 年 (Catofin 2-3 年レンジ中央値)、出典 Ni (2022) TUM 博士論文 p.20
+  - ρ_b: 700 → 900 kg/m³ (γ-Al2O3 担体 800-1000 g/L レンジ中央値)、出典 Chauruka (2021) Leeds 博士論文
+  - 触媒交換 OPEX は約 1/4 に低下、`exp1`/`main` ベースライン要再取得。
+- **副作業**: `src/eos.py:110` の余計な `"""` を削除して docstring を 1 つに戻し、import を回復 (2026-05-18 の `fix:0518` コミット混入バグ)。
+- **参照 PDF 命名規則統一**: `report_for_processdesign/references/` 配下を `<著者>_<年>_<内容>.pdf` 形式に rename (Mangalindan_2025_DME_TEA_ACS_Eng_Au.pdf / Ni_2022_TUM_PDH_thesis.pdf / Chauruka_2021_Leeds_alumina_thesis.pdf)。Ni JACS 論文 (誤って共有された別物) は Ni_2022_JACS_GaBEA.pdf として保持。
+- **Ni citation 年/ページ修正**: 当初 Ni (2023) p.11 とユーザー提供されたが、博士論文の受理日 2022-02-24 で正しい年は **2022**、citation 文言は PDF p.20 (Chapter 1 工業 PDH プロセス節) にあった (pypdf 全 124 ページ検索で文言完全一致を検証)。
 
 ### 2026-05-18 (午後) — エージェント実装で監査結果を解消
 午前監査で抽出した 25 項目のうち、コード実装作業 (🟪 A-実) 24 項目を完了 (§A.2 参照):

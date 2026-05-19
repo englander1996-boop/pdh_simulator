@@ -46,6 +46,50 @@ _DEFAULT_TUNABLES = ColumnTunables(
 _DEFAULT_FIXED = DistFixedParams()
 
 
+# 製品純度 spec (C3H6 ≥ 99.5 wt% — contest spec)。
+# C3H6 (MW=42.08) と C3H8 (MW=44.10) は MW 差 < 5% なので mol 分率と wt 分率は
+# ほぼ等価とみなし、ここでは mol 分率基準で recovery を逆算する。
+_DIST3_PURITY_SPEC_MOL = 0.995
+
+# rigorous との乖離余裕。Gilliland (Eduljee) は constant α 仮定の経験式で、
+# rigorous PR EOS よりやや楽観 (= 同 N で実 recovery がやや低い) になる傾向あり。
+# 動的 recovery 計算で得た値に 1/SAFETY_FACTOR を掛けて純度 spec の余裕を持たせる。
+# 1.2 は経験的 magic constant (=実 spec margin 20%)、要 rigorous 比較で調整。
+_DIST3_PURITY_SAFETY_FACTOR = 1.2
+
+
+def _dist3_dynamic_recovery_HK_bot(
+    F_LK_feed: float,
+    F_HK_feed: float,
+    rec_LK_top: float,
+) -> float:
+    """製品純度 spec から recovery_HK_bot を動的計算 (Dist3 特有のロジック)。
+
+    設計判断 (2026-05-19):
+      旧版は recovery_HK_bot=0.99 hardcode で、Dist3 のフィード C3H8 量が極少
+      (~1%) のとき製品純度 100% の overspec を生んでいた。Gilliland feasibility
+      check (src/distillation_core.py:1060-1101) がこの高 recovery 達成のための
+      N_stages を強制し、BO が N=170+ を選ばざるを得ない構造になっていた。
+      本関数はフィード組成から「純度 99.5 wt% spec を満たす最低 recovery_HK_bot」
+      を逆算し、Gilliland check の基準を真の spec 制約に揃える。
+
+    物質収支:
+      F_LK_top = rec_LK_top × F_LK_feed
+      F_HK_top = (1 - rec_HK_bot) × F_HK_feed
+      purity   = F_LK_top / (F_LK_top + F_HK_top) ≥ purity_spec
+      → rec_HK_bot ≥ 1 - rec_LK_top × (F_LK_feed/F_HK_feed) × ((1-p)/p)
+    """
+    target = 1.0 - (1.0 - _DIST3_PURITY_SPEC_MOL) / _DIST3_PURITY_SAFETY_FACTOR
+    F_LK = max(F_LK_feed, 1e-9)
+    F_HK = max(F_HK_feed, 1e-9)
+    rec_HK_bot = 1.0 - rec_LK_top * (F_LK / F_HK) * ((1.0 - target) / target)
+    # 物理的に有効な範囲に clip:
+    #   下限 0.5: フィード HK が極少のとき rec_HK_bot が負になり得る → 0.5 で頭打ち
+    #            (recovery < 0.5 は LK/HK が逆になっており物理的に意味がない)
+    #   上限 0.999: 旧 hardcode 0.99 より厳しい指定が来た場合の保守的 cap
+    return max(0.5, min(0.999, rec_HK_bot))
+
+
 def simulate_column3(
     feed:     ProcessStream,
     tunables: ColumnTunables | None = None,
@@ -53,12 +97,21 @@ def simulate_column3(
 ) -> DistResult:
     """Dist3 (C3 スプリッター) をシミュレーションする。
 
-    LK/HK/回収率/K_method/q は本ラッパで固定:
-      LK='B' (C3H6), HK='A' (C3H8), recovery 0.99/0.99, K_method='pr', q=1.0
+    LK/HK/K_method/q は本ラッパで固定: LK='B' (C3H6), HK='A' (C3H8), K_method='pr', q=1.0
+    recovery_LK_top は None なら 0.99 既定 (BO 等で上書き可)。
+    recovery_HK_bot は None なら **製品純度 99.5 wt% から動的計算** (2026-05-19〜)。
+    float 明示なら尊重 (BO で振りたいときの後方互換、要注意: 過剰な高値は overspec を再発させる)。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
-    rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99
+    if t.recovery_HK_bot is not None:
+        rec_HK_bot = t.recovery_HK_bot
+    else:
+        rec_HK_bot = _dist3_dynamic_recovery_HK_bot(
+            F_LK_feed = feed.F_in.get('B', 0.0),   # C3H6
+            F_HK_feed = feed.F_in.get('A', 0.0),   # C3H8
+            rec_LK_top = rec_LK_top,
+        )
     design = DistDesignVars(
         P_col           = t.P_col,
         N_stages        = t.N_stages,

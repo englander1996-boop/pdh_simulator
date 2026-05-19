@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from src.cost_parameters import (
     ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ, FURNACE_EFFICIENCY,
-    CATALYST_PTSN_JPY_PER_KG, CATALYST_PTSN_LIFE_YEARS,
+    CATALYST_JPY_PER_KG, CATALYST_LIFE_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
     LPG_C3H8_JPY_PER_KG, LPG_C4H10_JPY_PER_KG,
     C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
@@ -323,8 +323,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
                                         COOLING_WATER_JPY_PER_GJ)
 
     opex['Reactor触媒交換'] = (R['r_rx'].equipment.Catalyst_Weight_Total
-                                * CATALYST_PTSN_JPY_PER_KG
-                                / CATALYST_PTSN_LIFE_YEARS / 1.0e8)
+                                * CATALYST_JPY_PER_KG
+                                / CATALYST_LIFE_YEARS / 1.0e8)
     opex['PSA活性炭交換']   = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
 
     # 設計判断 (2026-05-09): PSA 予熱を OPEX に計上 (旧版は抜けていた)。

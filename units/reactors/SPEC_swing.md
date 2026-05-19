@@ -1,7 +1,7 @@
 # SPEC: swing.py — PDH スイング反応器システム シミュレーター
 
 **ファイルパス**: `units/reactors/swing.py`
-**最終更新**: 2026-05-09 (rho_p 400→700 に更新、触媒単価 50000→30000 円/kg、寿命 3→4 年)
+**最終更新**: 2026-05-19 (触媒モデルを Cr2O3-Al2O3 (Catofin 相当) に確定、単価 3,654 円/kg/寿命 2.5 年/ρ_b 900 kg/m³ を文献 citation 付きで採用)
 
 ---
 
@@ -34,6 +34,7 @@
 | 反応 | C₃H₈ → C₃H₆ + H₂（主反応）+ 2つの副反応 |
 | 反応器型式 | 断熱・固定床・管型（PFR） |
 | 操作方式 | スイング（反応と触媒再生を複数基で切り替え） |
+| 触媒モデル | Cr₂O₃-Al₂O₃ (Catofin プロセス相当) — コンテスト要項 §3-3 の a データ (分単位の急速失活) との物理整合性から決定 |
 | 触媒失活 | コーキングによる活性低下を時間積分で考慮 |
 | 出力 | 後段分離工程向け時間平均ストリーム＋装置コスト |
 
@@ -338,7 +339,7 @@ $$V_{vessel,actual} = \frac{V_{cat,total} / N_{parallel}}{\varepsilon} \quad [\m
 
 ### 6-4. 触媒総量
 
-$$W_{cat,total} = V_{cat,total} \times N_{swing,sets} \times \rho_p \quad [\mathrm{kg}]$$
+$$W_{cat,total} = V_{cat,total} \times N_{swing,sets} \times \rho_b \quad [\mathrm{kg}]$$
 
 **記号定義（6節共通）**
 
@@ -357,7 +358,7 @@ $$W_{cat,total} = V_{cat,total} \times N_{swing,sets} \times \rho_p \quad [\math
 | $N_{reactors,total}$ | システム全体の総反応器基数 | — |
 | $V_{vessel,actual}$ | 1基あたりプロセス容器体積（触媒 + 空隙） | m³ |
 | $W_{cat,total}$ | システム全体の触媒総量（再生中の基を含む） | kg |
-| $\rho_p$ | 触媒充填密度 | kg/m³ |
+| $\rho_b$ | 触媒 bulk density | kg/m³ |
 
 ---
 
@@ -472,7 +473,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | `t_regen` | 30.0 | min | 触媒再生時間 |
 | `V_cat_max_per_vessel` | 200.0 | m³ | 1基最大触媒量 |
 | `eps` | 0.5 | — | 空隙率 |
-| `rho_p` | 700.0 | kg/m³ | 触媒充填密度 (★仮置き、2026-05-09 に 400→700 へ。実触媒 PtSn/Al2O3 ペレットの粒子密度寄り) |
+| `rho_b` | 900.0 | kg/m³ | 触媒 bulk density (Cr2O3-Al2O3 / Catofin 相当)。出典: Chauruka 2021 博士論文 (University of Leeds) γ-Al2O3 担体物性表 Packed Bulk Density 800-1000 g/L の中央値 |
 
 > `FixedParams` は `__post_init__` で全フィールドが正値であることを検証する。
 
@@ -602,7 +603,7 @@ print(result.equipment.Reactor_CAPEX)       # 億円
 result = simulate_swing_reactor_system(design, feed, FixedParams(), n_time_samples=50)
 
 # 触媒充填密度や再生時間を変更する場合
-fixed = FixedParams(t_regen=20.0, rho_p=500.0)
+fixed = FixedParams(t_regen=20.0, rho_b=900.0)
 
 # CEPCI を最新値に更新する場合（src/cost_parameters.py を直接編集）
 # CEPCI_CURRENT = 800.0  # 最新値に差し替え

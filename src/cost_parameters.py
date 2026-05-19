@@ -441,16 +441,40 @@ FUEL_JPY_PER_GJ: float = 1830.0
 # 設計判断 (2026-05-09): 反応器プリヒーター燃料消費は Q_preheat / η_furnace で計算する。
 FURNACE_EFFICIENCY: float = 0.85
 
-# !仮置き — 要出典: PtSn 触媒単価。文献値範囲 3〜10 万円/kg の下〜中央値。
-# 設計判断 (2026-05-09): 旧値 50,000 は文献中央値 (Pt 含有率 ~0.5wt% 想定) だが
-# 商用 PtSn ペレット (Al2O3 担持、Pt 0.3〜0.5 wt%) のサプライヤー見積もり下限
-# レンジに合わせて 30,000 円/kg を採用。コンテスト要項の値で確定後に置換。
-CATALYST_PTSN_JPY_PER_KG: float = 30000.0
+# 触媒モデル: Cr2O3-Al2O3 (Catofin プロセス相当) をモデルとする。
+# 設計判断 (2026-05-19): コンテスト要項 §3-3 で提供される a (失活係数) データは
+#   架空触媒のものだが、その挙動 (700°C で 30 min で a≈0.04 と分単位で急速失活、
+#   400°C で a≈0.81) は工業 Cr2O3-Al2O3 触媒 (Catofin プロセス) の物理と整合する。
+#   Pt-Sn/Al2O3 (UOP Oleflex) は本来 CCR (連続再生) 方式で日〜週オーダーの緩慢
+#   失活であり、本実装のスイング (t_regen=30 min) + a データの分単位失活とは
+#   物理整合しない。よって経済パラメータも Cr2O3 系の文献値を採用する。
+# 環境懸念: Cr2O3 触媒は六価 Cr の生成/排出規制が厳しい (大気汚染防止法 特定物質、
+#   水質汚濁防止法 有害物質)。実プラント設計では Pt 系 (Pt-Sn/Oleflex, Pt-Ga/STARplus)
+#   への置換を検討すべきだが、本シミュレータでは a データとの物理整合性を優先。
+#
+# 触媒単価
+# 出典: Mangalindan, J. R. et al. (2025) "Tandem Cu/ZnO/ZrO2-SAPO-34 System
+#   for Dimethyl Ether Synthesis from CO2 and H2: Catalyst Optimization,
+#   Techno-Economic, and Carbon-Footprint Analyses". ACS Engineering Au.
+#   Table 2 (TEA Parameters) にて、白金を含まない遷移金属酸化物ベース触媒の
+#   単価として $23/kg を採用。CrOx/Al2O3 直接の単価表は機密情報のため、
+#   検証可能なベースメタル系酸化物触媒リファレンスとして引用。
+# 参照 PDF: report_for_processdesign/references/Mangalindan_2025_DME_TEA_ACS_Eng_Au.pdf
+# 換算: $23/kg × USD_TO_JPY (158.8595 円/USD) ≒ 3,654 円/kg
+CATALYST_USD_PER_KG: float = 23.0
+CATALYST_JPY_PER_KG: float = CATALYST_USD_PER_KG * USD_TO_JPY
 
-# !仮置き — 要出典: PtSn 触媒寿命 [年]。通常 2〜5 年、コーキング・再生回数で変動
-# 設計判断 (2026-05-09): 旧値 3 年は短め寄り。スイング再生のサイクル数を考慮し、
-# 工業実績で典型値の 4 年 (Catofin/Oleflex 共に 3〜5 年) を採用。
-CATALYST_PTSN_LIFE_YEARS: float = 4.0
+# 触媒寿命 [年]
+# 出典: Ni, L. (2022). "Propane dehydrogenation on highly active and selective
+#   Ga/BEA and ethanol conversion to butadiene on zincosilicate BEA"
+#   (Doctoral dissertation, Technical University of Munich, Fakultät für Chemie;
+#   accepted 2022-02-24; mediaTUM repository, doc id 1638095).
+#   PDF p.20 (Chapter 1, 工業 PDH プロセス解説節) で Catofin について
+#   "stable dehydrogenation performance (2-3 years lifetime)" と明記。
+#   pypdf による全 124 ページ検索で文言一致を検証済 (2026-05-19)。
+# 参照 PDF: report_for_processdesign/references/Ni_2022_TUM_PDH_thesis.pdf
+# 採用値: レンジ 2-3 年の中央値 2.5 年。
+CATALYST_LIFE_YEARS: float = 2.5
 
 # 年間稼働時間 [h/年]  333 日連続稼働相当
 # 出典: PDH 学生コンテスト要綱 (Ver.2.0) で指定された値
@@ -508,7 +532,7 @@ HASEBE_COEFF_C_UT_WT_RM: float = 1.23 # 用役費・廃棄物処理費・原料�
 
 # 廃棄物処理費 C_WT [億円/年]。
 # PDH は気相反応で水処理対象廃棄物が実質発生しない (PSA オフガスは
-# 燃料クレジットで回収済み、使用済み触媒は CATALYST_PTSN_JPY_PER_KG の
+# 燃料クレジットで回収済み、使用済み触媒は CATALYST_JPY_PER_KG の
 # 回収費込みで別建て計上) ため 0 を採用する。レポート §3.3 にも注記する。
 HASEBE_C_WT_OKUYEN_PER_YEAR: float = 0.0
 
