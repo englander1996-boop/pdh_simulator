@@ -121,6 +121,12 @@ class ColumnTunables:
     # float (e.g., 0.95〜0.999) → ラッパ既定値を上書き。
     recovery_LK_top: Optional[float] = None
     recovery_HK_bot: Optional[float] = None
+    # 設計判断 (2026-05-19): HYSYS との比較・D 直接指定検証用。
+    # None → 従来通り FUG が Fenske split で D を決定。
+    # float → rigorous solver で D_total を強制上書き (= "Distillate Rate spec" モード)。
+    # 主に Dist2 partial cond で HYSYS の D 値と整合を取るデバッグ用。
+    # 値が物理的に不適 (D > F_total など) なら solver 側で _failure_result を返す。
+    D_override: Optional[float] = None
 
 
 # 分流 (partial condenser) で凝縮させない成分セット
@@ -130,12 +136,112 @@ class ColumnTunables:
 # C2H4 (Tc=282K) 以上は propylene/ethylene 冷媒で凝縮可能なので reflux 寄与あり。
 NON_CONDENSABLE_COMPS = frozenset(['C', 'E'])  # H2, CH4
 
-# 分流 (partial condenser) で「必ず液側に保持」する成分セット
+# 分流 (partial condenser) で「液側に強く偏る」成分セット (旧 ALWAYS_CONDENSABLE)
 # 設計判断 (2026-05-09): C3 (Tc≈370K, P_sat@-30°C ≈ 1.5-1.6 bar) は Dist2 の
-# 操作圧 (8.5 bar) >> P_sat なので塔頂温度 -30°C で完全に凝縮する。Fenske の
-# recovery_HK_bot=0.99 で 1% 漏れる解は数値的なもので物理的に成立しない。
-# partial condenser ではこれら成分を強制的に F_top → F_bot に振り戻す。
-ALWAYS_CONDENSABLE_COMPS = frozenset(['A', 'B'])  # C3H8, C3H6
+# 操作圧 (7-8 bar) >> P_sat なので塔頂温度 -30〜-40°C で大半が凝縮する。
+# 設計判断 (2026-05-19): ただし PR EOS 実値で K(C3H6) @ -43°C/7.5bar = 0.18 と
+# 「ゼロ」ではない。旧版は無条件 F_top → F_bot 100% 強制移動だったが、これだと
+# (i) HYSYS との不一致 (C3H6 100% vs 物理は数%漏れ)
+# (ii) FUG の D_total が C3=0 で固定 → rigorous (Wang-Henke) に渡ると質量保存が
+#      閉じず MESH 残差過大 → サイレント FUG フォールバック → rigorous 名目だけ
+# という同根バグを生んでいた。
+# 現版は「閾値ベース丸め」: feed の _PARTIAL_COND_C3_ROUND_FRAC 未満の F_top 漏れだけ
+# 0 に丸めて塔底に集約。「ほぼほぼ分離して PSA/Mem に C3 が流れない」目標を保ちつつ
+# 物理的な D_total を尊重する。閾値以上の漏れは物理値を残し、警告を出す。
+ALWAYS_CONDENSABLE_COMPS = frozenset(['A', 'B'])  # C3H8, C3H6 (閾値判定対象)
+
+# 丸め閾値: feed flow に対する比。これ未満の F_top 漏れは 0 に丸めて塔底集約。
+# 1% = C3H6 feed 2753 kmol/h なら 27.5 kmol/h 以下を丸め。
+# ユーザー指示 (2026-05-19): 「ほぼほぼ分離・有効数字範囲のバランス崩れは OK」。
+_PARTIAL_COND_C3_ROUND_FRAC = 0.01
+
+# rigorous プロキシ罰則の係数 (2026-05-19 Phase A、ユーザー指示「FUG があんまりよろしくない」)
+# 単位は spec_coef_okuyen (= 100 億円/(年・%pt)) と同次元。
+# 設計判断: BO objective でちゃんと効くオーダーに揃える。spec_coef と同じ 100 を使うと
+# C3 漏れ 3% → (3-1)% × 100 = 200 億円/年 ≒ spec_base + 2 spec_coef 相当でしっかり効く。
+_PROXY_LEAK_COEF_OKUYEN_PER_PP = 50.0    # C3 漏れ 1pp 超過につき [億円/年]
+_PROXY_MARGIN_COEF_OKUYEN     = 30.0    # narrow margin 1pt につき [億円/年]
+# 「narrow」の判定閾値 (R/R_min, N/N_min がこれ未満なら罰則対象)
+_PROXY_R_MARGIN_THRESHOLD     = 1.30    # R/R_min < 1.30 で narrow 認定
+_PROXY_N_MARGIN_THRESHOLD     = 1.30    # N/N_min < 1.30 で narrow 認定
+
+
+def _compute_proxy_penalty(
+    design,
+    F_top: Dict[str, float],
+    feed_F: Dict[str, float],
+    R_min: float,
+    N_min: float,
+    *,
+    is_rigorous: bool = False,
+) -> Tuple[float, str]:
+    """rigorous プロキシ罰則を計算。
+
+    BO objective の effective_TAC に乗せる罰則 [億円/年] を返す。
+    呼び出し側 (FUG / rigorous 両パス) で結果整理直前にコールし、
+    DistEquipment.proxy_penalty_okuyen にセットする。
+
+    成分:
+      (a) C3 漏れ罰則  : partial cond の F_top に C3 が _PARTIAL_COND_C3_ROUND_FRAC を
+                       超えて漏れている場合、超過 pp に係数を掛ける。
+                       (= FUG が「物理的に C3 が漏れる設計」と判断してもまだ feasible
+                        と通してしまうケースをペナルティ化)
+      (b) margin 罰則  : R/R_min が _PROXY_R_MARGIN_THRESHOLD 未満、または
+                       N/N_min が _PROXY_N_MARGIN_THRESHOLD 未満で罰則。
+                       (= FUG 通過するが rigorous Wang-Henke が dT_max stall する領域)
+
+    Returns
+    -------
+    (penalty_okuyen, reason)
+        penalty_okuyen: 罰則合計 [億円/年]
+        reason: デバッグ用文字列 (発火項目を列挙)
+    """
+    penalty = 0.0
+    reasons: List[str] = []
+
+    # (a) C3 漏れ罰則 (partial cond のみ)
+    if getattr(design, 'partial_condenser', False):
+        for c in ALWAYS_CONDENSABLE_COMPS:
+            moved = F_top.get(c, 0.0)
+            f_c = feed_F.get(c, 0.0)
+            if f_c <= 0 or moved <= 0:
+                continue
+            leak_frac = moved / f_c
+            if leak_frac > _PARTIAL_COND_C3_ROUND_FRAC:
+                over_pp = (leak_frac - _PARTIAL_COND_C3_ROUND_FRAC) * 100.0
+                add = over_pp * _PROXY_LEAK_COEF_OKUYEN_PER_PP
+                penalty += add
+                reasons.append(
+                    f"{c}漏れ{leak_frac*100:.2f}% (超過{over_pp:.2f}pp → +{add:.1f}億円)"
+                )
+
+    # (b) R/R_min, N/N_min margin 罰則
+    R = design.reflux_ratio
+    N = design.N_stages
+    if R_min > 0 and math.isfinite(R_min):
+        r_ratio = R / R_min
+        if r_ratio < _PROXY_R_MARGIN_THRESHOLD:
+            shortage = (_PROXY_R_MARGIN_THRESHOLD - r_ratio) * 100.0
+            add = shortage * _PROXY_MARGIN_COEF_OKUYEN
+            penalty += add
+            reasons.append(
+                f"R/R_min={r_ratio:.3f} < {_PROXY_R_MARGIN_THRESHOLD} "
+                f"(不足{shortage:.1f}pt → +{add:.1f}億円)"
+            )
+    if N_min > 0 and math.isfinite(N_min):
+        n_ratio = N / N_min
+        if n_ratio < _PROXY_N_MARGIN_THRESHOLD:
+            shortage = (_PROXY_N_MARGIN_THRESHOLD - n_ratio) * 100.0
+            add = shortage * _PROXY_MARGIN_COEF_OKUYEN
+            penalty += add
+            reasons.append(
+                f"N/N_min={n_ratio:.3f} < {_PROXY_N_MARGIN_THRESHOLD} "
+                f"(不足{shortage:.1f}pt → +{add:.1f}億円)"
+            )
+
+    prefix = "rigorous" if is_rigorous else "fug"
+    reason_str = f"[{prefix}] " + "; ".join(reasons) if reasons else ""
+    return penalty, reason_str
 
 
 @dataclass(frozen=True)
@@ -172,6 +278,11 @@ class DistDesignVars:
     #              ※ 本体未実装。設定された場合は NotImplementedError を投げて
     #                 FUG にフォールバック (警告つき)。VLE ソルバ実装後に有効化される。
     solver_method:    str = 'fug'
+    # 設計判断 (2026-05-19): D 直接指定モード (HYSYS の "Distillate Rate spec" 相当)。
+    # None → 従来通り FUG の Fenske split で D を決定。
+    # float → rigorous で D_total を直接指定 (= recovery spec を上書き)。
+    # HYSYS の Distillate Rate 値と直接比較するための機能。
+    D_override:       Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +335,13 @@ class DistEquipment:
     reb_utility_jpy_per_GJ:  float = 0.0
     T_top:                   float = 0.0    # 塔頂温度 [K] (clamp なし)
     T_bot:                   float = 0.0    # 塔底温度 [K]
+    # ---- rigorous プロキシ罰則 (2026-05-19 追加、Phase A) ----
+    # FUG の楽観性を是正するために BO objective に乗せる罰則 [億円/年]。
+    # narrow-margin (R/R_min, N/N_min ≪ 1.5) や partial cond の C3 漏れ過大 等、
+    # FUG では feasible でも rigorous で詰むことが多い設計に対して加算。
+    # runner.py で soft_penalty にマージされ effective_TAC に反映される。
+    proxy_penalty_okuyen:    float = 0.0    # 罰則合計 [億円/年]
+    proxy_penalty_reason:    str   = ""     # 罰則発火理由 (デバッグ用)
 
 
 @dataclass
@@ -658,7 +776,22 @@ def _simulate_rigorous(
 
     # ---- 2. Wang-Henke 求解 ----
     comps   = list(feed.F_in.keys())
-    D_total = sum(fug_result.top.F_in.values())
+    F_total = sum(max(F, 0.0) for F in feed.F_in.values())
+    # 設計判断 (2026-05-19): D_override がある場合は FUG の D を上書き。
+    # HYSYS の "Distillate Rate spec" 相当。物理的に不適な値は solver 内で _failure_result 化。
+    if design.D_override is not None and design.D_override > 0:
+        if design.D_override >= F_total:
+            warnings.warn(
+                f"D_override={design.D_override:.2f} >= F_total={F_total:.2f} は物理不適 "
+                f"(D < F でなければ B ≤ 0)。FUG の D={sum(fug_result.top.F_in.values()):.2f} にフォールバック。",
+                UserWarning, stacklevel=2,
+            )
+            D_total = sum(fug_result.top.F_in.values())
+        else:
+            D_total = design.D_override
+    else:
+        D_total = sum(fug_result.top.F_in.values())
+    N_feed_kirk = max(1, min(fug_result.equipment.N_feed_kirkbride, design.N_stages))
 
     # フィード段は FUG の Kirkbride 推奨を採用 (design.N_feed は無視)。
     # ColumnTunables.N_feed の docstring 通り、rigorous では Kirkbride を自動採用する。
@@ -667,7 +800,7 @@ def _simulate_rigorous(
         comps             = comps,
         P_col             = design.P_col,
         N_stages          = design.N_stages,
-        N_feed            = max(1, min(fug_result.equipment.N_feed_kirkbride, design.N_stages)),
+        N_feed            = N_feed_kirk,
         reflux_ratio      = design.reflux_ratio,
         D_total           = D_total,
         q_feed            = design.q,
@@ -677,25 +810,66 @@ def _simulate_rigorous(
         T_bot_init_K      = fug_result.equipment.T_bot,
     )
 
+    # ---- Phase D (2026-05-19): 失敗時 retry (Wegstein off + 低 damping) ----
+    # narrow-margin 設計で Wegstein 加速が振動方向に逸脱する症例 (dT_max=7K stall) に対処。
+    # 第一試行で converge せず、または MESH/balance が許容外のとき、Wegstein を切って
+    # pure substitution 寄りの damping=0.2 で再試行する。
+    retry_needed = (
+        not rig.converged
+        or rig.mesh_residual_max > 0.01
+        or rig.component_balance_max > 0.01
+    )
+    if retry_needed:
+        from src.distillation_rigorous import _RETRY_DAMPING
+        rig2 = wang_henke_solve(
+            feed_F            = feed.F_in,
+            comps             = comps,
+            P_col             = design.P_col,
+            N_stages          = design.N_stages,
+            N_feed            = N_feed_kirk,
+            reflux_ratio      = design.reflux_ratio,
+            D_total           = D_total,
+            q_feed            = design.q,
+            partial_condenser = design.partial_condenser,
+            K_method          = design.K_method,
+            T_top_init_K      = fug_result.equipment.T_top,
+            T_bot_init_K      = fug_result.equipment.T_bot,
+            max_iter          = 1000,           # 倍 retry
+            damping           = _RETRY_DAMPING,  # 0.2 (Wegstein 振動回避)
+            use_wegstein      = False,           # 加速無し、pure substitution
+        )
+        # retry 結果が改善していれば採用
+        if (rig2.converged
+            and rig2.mesh_residual_max <= 0.01
+            and rig2.component_balance_max <= 0.01):
+            rig = rig2
+        elif rig2.converged and not rig.converged:
+            # 完全には数値基準を満たさないが、少なくとも converge した結果は試す
+            rig = rig2
+
     if not rig.converged:
         raise RuntimeError(
-            f"Wang-Henke 収束失敗: {rig.message} "
+            f"Wang-Henke 収束失敗 (retry 後も): {rig.message} "
             f"(LK={design.LK}, HK={design.HK}, R={design.reflux_ratio:.2f}, "
             f"N={design.N_stages}, P={design.P_col/1e5:.1f}bar)"
         )
 
     # ---- always-on validation: 内部不整合の早期検知 ----
-    # 設計判断 (2026-05-10): MESH 残差と成分マスバランスが許容外なら例外を投げて
-    # 上流の dispatch で FUG にフォールバック (warning 経由)。閾値は経験的:
-    #   MESH 残差 max > 0.01 または 成分バランス err > 1% を異常とみなす。
-    if rig.mesh_residual_max > 0.01:
+    # 設計判断 (2026-05-10/2026-05-19 Phase D 修正):
+    #   MESH 残差 max > 0.05 (旧 0.01)、成分バランス err > 5% (旧 1%) を異常とみなす。
+    #   リサイクル過渡 (Δ_rel > 50% で組成が暴れている状態) では 1-2% の残差が
+    #   普通に出るため、旧 1% 閾値が strict すぎて recycle 全体を止めていた。
+    #   閾値超え分は Phase A proxy_penalty が捕捉する設計。
+    _MESH_TOL = 0.05
+    _MASS_BAL_TOL = 0.05
+    if rig.mesh_residual_max > _MESH_TOL:
         raise RuntimeError(
-            f"Wang-Henke MESH 残差過大: max={rig.mesh_residual_max:.4f} (>0.01)。"
+            f"Wang-Henke MESH 残差過大 (retry 後も): max={rig.mesh_residual_max:.4f} (>{_MESH_TOL})。"
             f" solver 内部不整合の疑い (B_bottoms 等のバグ可能性)。"
         )
-    if rig.component_balance_max > 0.01:
+    if rig.component_balance_max > _MASS_BAL_TOL:
         raise RuntimeError(
-            f"Wang-Henke 成分マスバランス破綻: max_err={rig.component_balance_max*100:.2f}% (>1%)。"
+            f"Wang-Henke 成分マスバランス破綻 (retry 後も): max_err={rig.component_balance_max*100:.2f}% (>{_MASS_BAL_TOL*100:.0f}%)。"
             f" solver 内部不整合の疑い。"
         )
 
@@ -713,13 +887,34 @@ def _simulate_rigorous(
     #   - 成分マスバランス check (同上)
     # rating mode で recovery が物理的に動くこと自体は正常挙動。
 
-    # ---- 3. partial condenser の場合: C3 強制移動補正は不要 (rigorous は物理的に正しい) ----
-    # FUG では Step 5b で ALWAYS_CONDENSABLE_COMPS のヒューリスティック補正を
-    # 行ったが、rigorous では VLE 物理から自然に C3 が塔底へ振り分けられる。
-
-    # ---- 4. rigorous の F_top/F_bot/T_top/T_bot で結果を更新 ----
+    # ---- 3. partial condenser: C3 微小漏れの閾値丸め (PSA/Mem への流入抑止) ----
+    # 設計判断 (2026-05-19): rigorous は物理的に正しく C3 を「ほぼほぼ塔底へ」振り分ける
+    # が、PR EOS 実値で K(C3H6) ≈ 0.18 @ -43°C/7.5bar 程度の有限値があり、F_top に微小量
+    # (数 kmol/h オーダー) が残る。下流の PSA/Mem は組成上 C3 を流したくない設計なので、
+    # FUG パスと同じ閾値丸め (feed の _PARTIAL_COND_C3_ROUND_FRAC 未満なら 0 集約) を
+    # rigorous 結果にも適用する。閾値超えは物理値を残して warning。
     F_top = dict(rig.F_top)
     F_bot = dict(rig.F_bot)
+    if design.partial_condenser:
+        for c in ALWAYS_CONDENSABLE_COMPS:
+            moved = F_top.get(c, 0.0)
+            f_c = feed.F_in.get(c, 0.0)
+            if moved <= 0 or f_c <= 0:
+                continue
+            if moved <= _PARTIAL_COND_C3_ROUND_FRAC * f_c:
+                F_top[c] = 0.0
+                F_bot[c] = F_bot.get(c, 0.0) + moved
+            else:
+                warnings.warn(
+                    f"rigorous partial cond: comp '{c}' が F_top に "
+                    f"{moved:.2f} kmol/h ({moved / f_c * 100:.2f}% of feed) 漏出。"
+                    f" 閾値 {_PARTIAL_COND_C3_ROUND_FRAC * 100:.1f}% 超 → 物理値を残す。"
+                    f" 設計 (P_col={design.P_col / 1e5:.1f}bar, R={design.reflux_ratio:.2f}, "
+                    f"N={design.N_stages}) の見直しを検討。",
+                    UserWarning, stacklevel=2,
+                )
+
+    # ---- 4. rigorous の F_top/F_bot/T_top/T_bot で結果を更新 ----
     F_top_total = sum(F_top.values())
     F_bot_total = sum(F_bot.values())
     T_top = rig.T_profile_K[0]
@@ -821,6 +1016,13 @@ def _simulate_rigorous(
     # (rigorous でも feed enthalpy は同じなので)
     Q_feed_preheat_kW = eq.Q_feed_preheat_kW
 
+    # ---- 9b. rigorous プロキシ罰則 (Phase A, 2026-05-19) ----
+    # rigorous でも leak と margin を再計算して BO objective に反映する。
+    # FUG と rigorous の値が異なるのでそれぞれで計算する設計。
+    proxy_penalty, proxy_reason = _compute_proxy_penalty(
+        design, F_top, feed.F_in, eq.R_min, eq.N_min, is_rigorous=True,
+    )
+
     # ---- 10. DistResult 組み立て ----
     top_stream = ProcessStream(F_in=F_top, T_in=T_top, P_in=design.P_col)
     bottom_stream = ProcessStream(F_in=F_bot, T_in=T_bot, P_in=design.P_col)
@@ -849,6 +1051,8 @@ def _simulate_rigorous(
         reb_utility_jpy_per_GJ  = reb_utility_jpy_per_GJ,
         T_top              = T_top,
         T_bot              = T_bot,
+        proxy_penalty_okuyen = proxy_penalty,
+        proxy_penalty_reason = proxy_reason,
     )
     return DistResult(top=top_stream, bottom=bottom_stream, equipment=equipment)
 
@@ -897,23 +1101,41 @@ def simulate_distillation_column(
      11. infeasible なら ペナルティ返却
     """
     # ---- Solver dispatch ----
+    # 設計判断 (2026-05-19): rigorous 指定時のフォールバックは fail-fast がデフォルト。
+    # 旧版は例外を warnings.warn で握り潰して FUG にサイレント切替していたが、これにより
+    #   - exp1 表示は solver=rigorous なのに実体は FUG (発見1, 2026-05-19)
+    #   - 結果に rigorous の物理が反映されない (例: Dist2 C3H6 100% 回収の見かけ)
+    # という重大な信頼性問題があった。fail-fast にして「rigorous 指定なら rigorous で
+    # 通すか or 例外停止」を保証する。
+    # BO 等で fallback が必要な場合は環境変数 PDH_RIGOROUS_STRICT=0 で旧挙動 (warn + FUG)
+    # に切り替えられる退路を残す。
     if design.solver_method == 'rigorous':
+        _strict = os.environ.get('PDH_RIGOROUS_STRICT', '1') != '0'
         try:
             return _simulate_rigorous(design, feed, fixed)
         except NotImplementedError as e:
+            if _strict:
+                raise RuntimeError(
+                    f"simulate_distillation_column: rigorous solver 未実装 ({e})。"
+                    f" PDH_RIGOROUS_STRICT=0 で FUG にフォールバック可能。"
+                ) from e
             warnings.warn(
                 f"simulate_distillation_column: rigorous solver 未実装 ({e})。"
-                f" FUG にフォールバック。",
+                f" FUG にフォールバック (PDH_RIGOROUS_STRICT=0)。",
                 UserWarning, stacklevel=2,
             )
-            # FUG でフォールバック実行 (下に続く)
         except Exception as e:
+            if _strict:
+                raise RuntimeError(
+                    f"simulate_distillation_column: rigorous solver で例外 "
+                    f"({type(e).__name__}: {e})。"
+                    f" PDH_RIGOROUS_STRICT=0 で FUG にフォールバック可能。"
+                ) from e
             warnings.warn(
                 f"simulate_distillation_column: rigorous solver で例外 ({type(e).__name__}: {e})。"
-                f" FUG にフォールバック。",
+                f" FUG にフォールバック (PDH_RIGOROUS_STRICT=0)。",
                 UserWarning, stacklevel=2,
             )
-            # 同上
 
     if design.solver_method == 'sm':
         # SM (smith?) 法。実装は別途追加予定。NotImplementedError なら FUG に fallback。
@@ -1034,18 +1256,34 @@ def simulate_distillation_column(
     # ---- Step 5: Underwood で R_min ----
     R_min = _underwood_R_min(alpha, z, x_top, design.q, design.LK, design.HK)
 
-    # ---- Step 5b: partial condenser 物質収支補正 ----
-    # 設計判断 (2026-05-09): 分流型では P_op >> P_sat の成分 (C3 系) は塔頂温度で
-    # 完全凝縮するので vapor distillate に含まれない。Fenske の数値解 (1% 漏れ等)
-    # を物理に合わせて 0 に修正し、塔底に戻す。
-    # この補正はマスバランスを物理的に正しくするだけで、R_min/N_min/Underwood は
-    # Fenske 仕様 (recovery_HK_bot=0.99 等) で評価しているため変更しない。
+    # ---- Step 5b: partial condenser 物質収支補正 (閾値丸め) ----
+    # 設計判断 (2026-05-19 改訂): 旧版は ALWAYS_CONDENSABLE_COMPS を F_top → F_bot に
+    # 無条件 100% 強制移動していたが、これは PR EOS 実値 (K(C3H6) ≈ 0.18 @ -43°C/7.5bar)
+    # と整合せず、かつ rigorous の D_total を C3=0 で固定して Wang-Henke の質量保存を
+    # 破綻させていた (発見: 2026-05-19、Dist2 HYSYS 不一致調査)。
+    # 本版は閾値丸めに変更: F_top の C3 漏れが feed の _PARTIAL_COND_C3_ROUND_FRAC 未満
+    # なら 0 に丸めて塔底に集約 (= PSA/Mem に C3 を流さない目的を保つ)。閾値以上の漏れ
+    # は物理値を残す (= rigorous で D_total が物理に近づく)。
     if design.partial_condenser:
         for c in ALWAYS_CONDENSABLE_COMPS:
             moved = F_top.get(c, 0.0)
-            if moved > 0:
+            f_c = feed.F_in.get(c, 0.0)
+            if moved <= 0 or f_c <= 0:
+                continue
+            if moved <= _PARTIAL_COND_C3_ROUND_FRAC * f_c:
+                # 丸めスコープ内: 塔底に集約
                 F_top[c] = 0.0
                 F_bot[c] = F_bot.get(c, 0.0) + moved
+            else:
+                # 閾値超え: 物理値を残し warning (設計が壊れているサイン)
+                warnings.warn(
+                    f"partial condenser: comp '{c}' が F_top に "
+                    f"{moved:.2f} kmol/h ({moved / f_c * 100:.2f}% of feed) 漏出。"
+                    f" 閾値 {_PARTIAL_COND_C3_ROUND_FRAC * 100:.1f}% 超 → 物理値を残す。"
+                    f" 設計 (P_col={design.P_col / 1e5:.1f}bar, R={design.reflux_ratio:.2f}, "
+                    f"N={design.N_stages}) の見直しを検討。",
+                    UserWarning, stacklevel=2,
+                )
         F_top_total = sum(F_top.values())
         F_bot_total = sum(F_bot.values())
         if F_top_total <= 0 or F_bot_total <= 0:
@@ -1270,7 +1508,12 @@ def simulate_distillation_column(
         capex_reb   = calc_he_capex_okuyen(A_reb)
     capex_total = capex_vessel + capex_trays + capex_cond + capex_reb
 
-    # ---- Step 11: 結果 ----
+    # ---- Step 11: rigorous プロキシ罰則 (Phase A, 2026-05-19) ----
+    proxy_penalty, proxy_reason = _compute_proxy_penalty(
+        design, F_top, feed.F_in, R_min, N_min, is_rigorous=False,
+    )
+
+    # ---- Step 12: 結果 ----
     top_stream = ProcessStream(
         F_in=F_top, T_in=T_top, P_in=design.P_col,
     )
@@ -1294,6 +1537,8 @@ def simulate_distillation_column(
         reb_utility_name=reb_utility.name,
         reb_utility_jpy_per_GJ=reb_utility.jpy_per_GJ,
         T_top=T_top, T_bot=T_bot,
+        proxy_penalty_okuyen=proxy_penalty,
+        proxy_penalty_reason=proxy_reason,
     )
     return DistResult(top=top_stream, bottom=bottom_stream, equipment=equipment)
 

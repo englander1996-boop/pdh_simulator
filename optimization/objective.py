@@ -106,3 +106,17 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         trial.set_user_attr('h2_purity_molfrac',  result.specs.h2_purity_molfrac)
         trial.set_user_attr('production_kmol_h',  result.specs.production_kmol_h)
         trial.set_user_attr('target_kmol_h',      result.specs.target_kmol_h)
+
+    # rigorous プロキシ罰則の内訳 (Phase A デバッグ用)
+    if result.solver is not None and result.solver.one_pass:
+        total_proxy = 0.0
+        for col_key in ('r1', 'r2', 'r3'):
+            col_r = result.solver.one_pass.get(col_key)
+            if col_r is None or col_r.equipment is None:
+                continue
+            p = getattr(col_r.equipment, 'proxy_penalty_okuyen', 0.0)
+            if p > 0:
+                trial.set_user_attr(f'proxy_penalty_{col_key}_okuyen', p)
+                total_proxy += p
+        if total_proxy > 0:
+            trial.set_user_attr('proxy_penalty_total_okuyen', total_proxy)

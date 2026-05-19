@@ -92,31 +92,42 @@ SEARCH_SPACE = {
     # ----- 反応器 (Swing) -----
     'T_in_K':            (900.0,  970.0,  'linear', 'float'),  # K  制約: swing.py 活性式の有効範囲 400-700°C、上限 970K (≈696.85°C, 3°C 安全マージン)
     'z_cat_m':           (15.0,   40.0,   'linear', 'float'),  # m  !仮置き (反応器最大容積 200 m³/基 制約と併せて経験範囲)
-    't_cyc_min':         (10.0,   30.0,   'linear', 'float'),  # min !仮置き (触媒再生 30 min との比から経験範囲)
-    'D_reactor_m':       (4.0,    10.0,   'linear', 'float'),  # m  !仮置き (大型固定床の経験範囲)
+    't_cyc_min':         (12.0,   25.0,   'linear', 'float'),  # min 下限/上限: 再生 30min との比 0.4-0.83 の経験範囲、極端値は SV/cyc 整合に不利
+    # 設計判断 (2026-05-19): D_reactor 下限を 7m に。4-7m だと feed 流量で
+    # SV > 3 m/s に必ず違反、旧 BO 良設計はすべて 8-10m に集中していた。
+    'D_reactor_m':       (7.0,    10.0,   'linear', 'float'),  # m  下限: SV 制約 ≤ 3m/s から逆算 / 上限: !仮置き
 
     # ----- PSA -----
-    'D_psa_col_m':       (1.5,    5.0,    'linear', 'float'),  # m  制約: 空塔速度 ≤ 1 m/s (化工便覧 §13-31, 但し除湿用)
-    'L_psa_bed_m':       (10.0,   30.0,   'linear', 'float'),  # m  !仮置き
-    'desorption_target': (0.15,   0.55,   'linear', 'float'),  # -  !仮置き
+    # 設計判断 (2026-05-19): D/L/desorption の物理整合領域に絞り込み。
+    # 旧 BO 良設計 (trial #235, #258) はすべて D 3-5m, L 19-29m, desorption 0.25 周辺。
+    # それ以外の範囲では t_abs < _T_ABS_MIN 等で penalty 発火頻発。
+    'D_psa_col_m':       (2.5,    5.0,    'linear', 'float'),  # m  下限: D 小で空塔速度過大→ t_abs 極小 / 上限: 化工便覧
+    'L_psa_bed_m':       (15.0,   30.0,   'linear', 'float'),  # m  下限: L 短で t_abs 極小 / 上限: !仮置き
+    'desorption_target': (0.15,   0.40,   'linear', 'float'),  # -  上限: target↑で吸着時間圧縮→矛盾 / 下限: !仮置き
 
     # ----- 膜 (P_L は 1 atm 固定、P_dist は Dist3 と同期) -----
-    'P_H_Pa':            (5.0e5,  9.5e5,  'linear', 'float'),  # Pa 上限: Hua et al. (2024) 9.5 bar / 下限: !仮置き
+    # 設計判断 (2026-05-19): P_H 下限を 7.5 bar に引き上げ。Mem 圧縮機が
+    # 必ず正方向 (P_H > P_dist2 = 5-7 bar) になるよう構造的に保証する。
+    # 旧 5-9.5 bar だと P_dist2 (5-9.5) と重なり、50% で圧縮機逆向き penalty。
+    'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),  # Pa 上限: Hua et al. 9.5 bar / 下限: P_dist2 上限 7 bar + 0.5 bar margin
     'A_mem_m2':          (3.0e4,  3.0e5,  'log',    'float'),  # m² !仮置き (CAPEX 支配、log scale)
 
     # ----- Dist1 (脱ブタン塔) -----
     'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (pump1 出口圧と同期)
     'N_dist1':           (16,     30,     'linear', 'int'  ),  # -  !仮置き (下限: 旧14→16、N_min ≈ 12 から margin 33% / 上限: 経験値)
-    'reflux_dist1':      (1.1,    3.0,    'linear', 'float'),  # -  !仮置き (下限: 旧1.0→1.1、R_min ≈ 0.95 から margin 16% / 上限: 経験値)
+    'reflux_dist1':      (1.3,    3.0,    'linear', 'float'),  # -  下限: R_min ≈ 1.23 を確実に上回る (Gilliland feasible 保証) / 上限: 経験値
 
     # ----- Dist2 (脱エタン塔, partial cond) -----
-    'P_dist2_Pa':        (5.0e5,  9.5e5,  'linear', 'float'),  # Pa 上限: P_H 9.5 bar と整合 / 下限: !仮置き
+    # 設計判断 (2026-05-19): P_dist2 上限を 7 bar に引き下げ。Mem 圧縮機が
+    # 必ず正方向 (P_H ≥ 7.5 > P_dist2 ≤ 7) になるよう構造的に保証する。
+    # 旧 9.5 bar だと Mem P_H レンジと重複し 50% で penalty。
+    'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),  # Pa 上限: Mem P_H 下限 7.5 - 0.5 bar margin / 下限: !仮置き
     'N_dist2':           (20,     40,     'linear', 'int'  ),  # -  !仮置き (下限: 旧10→20、rigorous で 99% recovery 物理達成可能領域 / 上限: 経験値)
-    'reflux_dist2':      (3.0,    10.0,   'linear', 'float'),  # -  !仮置き (R_min 1.5-4.8 運転依存、下限: 旧2→3、narrow-margin 回避 / 上限: 経験値)
+    'reflux_dist2':      (5.0,    10.0,   'linear', 'float'),  # -  下限: R_min ≈ 4.5 から R/R_min ≥ 1.1 で proxy_penalty 発火多発、下限 5 で margin 1.5× 確保
 
     # ----- Dist3 (C3 スプリッタ, narrow-α) -----
     'P_dist3_Pa':        (15.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (mem.P_dist と同期、冷却水凝縮可能下限近傍)
-    'N_dist3':           (100,    250,    'linear', 'int'  ),  # -  下限: N_min ≈ 81 + margin / 上限: !仮置き
+    'N_dist3':           (120,    250,    'linear', 'int'  ),  # -  下限: N_min ≈ 60-80、N/N_min ≥ 1.3 確保 (proxy_penalty 回避) / 上限: !仮置き
     'reflux_dist3':      (11.0,   20.0,   'linear', 'float'),  # -  下限: R_min ≈ 10 + margin / 上限: !仮置き
 
     # ----- Fresh LPG (BO 直接指定、外側ループ skip) -----
@@ -128,11 +139,17 @@ SEARCH_SPACE = {
     # 上限 1700 で yield ≥ 71% (baseline 同水準) も探索可、BO が高 yield を選好するはず。
     'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),  # kmol/h !仮置き (yield 想定からの逆算範囲、BO 結果見ながら要調整)
 
-    # ----- 蒸留塔 recovery は最適化対象外 (0.99 固定、変更したい場合は ColumnTunables 経由で指定可) -----
+    # ----- 蒸留塔 recovery -----
+    # 設計判断 (2026-05-19 確定): Dist2 の C3 漏れを物理的に <1% に保証する
+    # ため recovery_HK_bot_dist2 の下限を 0.998 にタイトニング。BO は「0.01
+    # まで分離が保証された設計領域」内で経済最適を探す。残り 0.01 は
+    # PSA/Mem の trace bypass (= 1% 閾値) が吸収する。
+    # rec_LK_top_dist2 は柔軟に 0.95-0.999 とし、BO に C2H6 のリサイクル比を
+    # 経済性で選ばせる。
     # 'rec_LK_top_dist1':  (0.90, 0.999, 'linear', 'float'),
     # 'rec_HK_bot_dist1':  (0.90, 0.999, 'linear', 'float'),
-    # 'rec_LK_top_dist2':  (0.90, 0.999, 'linear', 'float'),
-    # 'rec_HK_bot_dist2':  (0.90, 0.999, 'linear', 'float'),
+    'rec_LK_top_dist2':  (0.95, 0.999, 'linear', 'float'),   # C2H6 → top (柔軟)
+    'rec_HK_bot_dist2':  (0.998, 0.9999, 'linear', 'float'), # C3H8 → bot ≥ 99.8% で C3 漏れ <1% 保証
     # 'rec_LK_top_dist3':  (0.90, 0.999, 'linear', 'float'),
     # 'rec_HK_bot_dist3':  (0.95, 0.999, 'linear', 'float'),
 }

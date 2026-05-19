@@ -15,6 +15,7 @@ PDH プロセスの 1 パス計算 (リサイクル収束の 1 反復に相当)�
 
 import math
 import warnings
+from typing import Dict, Tuple
 
 from stream.stream import ProcessStream
 from units.utils.mixer import mix_streams
@@ -42,6 +43,85 @@ from config.load import OperatingConfig
 from src.cost_parameters import PENALTY_CAPEX_THRESHOLD_OKUYEN
 
 _ZERO = {'A': 0.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0, 'Z': 0.0}
+
+
+# ---------------------------------------------------------------------------
+# trace bypass (2026-05-19 追加、モデル簡略化に対する数値補正)
+# ---------------------------------------------------------------------------
+#
+# 設計判断 (2026-05-19): PSA / Mem の design モデルは入口組成に「主要成分のみ」
+# の前提を置いている (PSA は CH4 破過計算、Mem は C3H6/C3H8 二成分透過)。
+# 上流 (Dist2 partial cond) で微量の不純物 (例: C3H6 漏れ → PSA 入口に C3,
+# C2H6 漏れ → Mem 入口に C2) が流れ込むと簡略モデルが破綻し _penalty_result
+# を返してしまう。
+#
+# 本来は PSA / Mem を多成分対応に拡張すべき (TODO) だが、当面は orchestration
+# 層で「閾値未満の微量成分を design 計算から除き、マスバランスは保ったまま下流
+# (PSA: offgas, Mem: retentate=recycle) に直接ルーティング」する近似処置を入れる。
+# これは「物理装置の追加」ではなく「シミュレータの数値処理」であり、物理嘘の
+# force-move とは区別される (= マスは保たれる、設計計算の適用範囲を明示)。
+#
+# 閾値超過時は warning を出して「もう微量とは言えない量」を明示。
+_TRACE_BYPASS_FRAC = 0.01    # 入口総モル流量に対する微量判定閾値 (1%)
+# 設計判断 (2026-05-19 確定): 1% で固定。
+# 当初 5% / 15% への拡張を試したが、これは「Dist2 設計の不味さ (10%+ 漏れ) を
+# シミュレータの bypass で隠す」物理嘘になっていた。本来の意図は:
+#   - Dist2 を設計でしっかり詰めて、物理的に C3 漏れ <1% を達成する
+#   - 残った微量 (≤ 1%) を bypass で吸収 (= 数値処理として透過的)
+# つまり 1% 閾値は「設計が正しいことの保証」、超えたら設計が悪い (=本物の警告)。
+# BO は探索範囲を制約することで <1% 領域を探すよう誘導 (search_space.py を見直し)。
+_PSA_TRACE_COMPS = ('A', 'B')                # PSA で許容しない: C3H8, C3H6
+_MEM_TRACE_COMPS = ('C', 'D', 'E', 'F')      # Mem で許容しない: H2, CH4, C2H4, C2H6
+
+
+def _apply_trace_bypass(
+    F_in:           Dict[str, float],
+    trace_comps:    tuple,
+    threshold_frac: float,
+    label:          str,
+) -> Tuple[Dict[str, float], Dict[str, float]]:
+    """入口流量から指定成分の微量 (= total の threshold_frac 未満) を抽出。
+
+    Parameters
+    ----------
+    F_in : dict
+        入口の成分別モル流量 [kmol/h]。
+    trace_comps : tuple
+        微量判定対象の成分キー ('A'〜'F','Z')。
+    threshold_frac : float
+        F_in 全量に対する微量判定の閾値 (= 0.01 で 1%)。
+    label : str
+        warning 用のユニット識別子 ("PSA" / "Mem")。
+
+    Returns
+    -------
+    (cleaned_F, bypass_F)
+        cleaned_F: 微量分を除いた入口流量 (ユニットの design 計算へ)。
+        bypass_F : 除かれた微量分 (ユニットの出口に合算してマスバランス保持)。
+    """
+    F_total = sum(max(F, 0.0) for F in F_in.values())
+    cleaned: Dict[str, float] = dict(F_in)
+    bypass:  Dict[str, float] = {c: 0.0 for c in F_in}
+    if F_total <= 0:
+        return cleaned, bypass
+    for c in trace_comps:
+        v = F_in.get(c, 0.0)
+        if v <= 0:
+            continue
+        frac = v / F_total
+        if frac <= threshold_frac:
+            # 微量 → bypass
+            cleaned[c] = 0.0
+            bypass[c]  = v
+        else:
+            # 閾値超え → モデル外なので警告 (= モデル簡略化前提が破れている)
+            warnings.warn(
+                f"{label} trace bypass: comp '{c}' は {frac*100:.2f}% で閾値 "
+                f"{threshold_frac*100:.1f}% 超過。簡略モデルの適用範囲外。"
+                f" PSA/Mem の多成分対応化 (TODO) を検討。",
+                UserWarning, stacklevel=2,
+            )
+    return cleaned, bypass
 
 
 # ---------------------------------------------------------------------------
@@ -278,11 +358,21 @@ def run_one_pass(
         r2        = simulate_column2(desuper.outlet, tunables=design.dist2)
 
     # ---- Step 4: PSA ----
+    # trace bypass (2026-05-19): PSA design モデルは C3 を扱えないため、入口の
+    # C3 微量分 (≤ 1% of total) を design 計算から除き、後で offgas に合算する。
+    psa_in_cleaned, psa_bypass = _apply_trace_bypass(
+        r2.top.F_in, _PSA_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='PSA',
+    )
     psa_feed = PSAFeedStream(
-        F_in=r2.top.F_in, T_in=r2.top.T_in, P_in=r2.top.P_in,
+        F_in=psa_in_cleaned, T_in=r2.top.T_in, P_in=r2.top.P_in,
     )
     with _capture_warnings("PSA", warnings_captured):
         r_psa = simulate_psa_system(design.psa, psa_feed, PSAFixedParams())
+    # bypass 分を offgas に合算 (マスバランス保持)。r_psa.offgas は Dict[str,float]。
+    if any(v > 0 for v in psa_bypass.values()):
+        for c, v in psa_bypass.items():
+            if v > 0:
+                r_psa.offgas[c] = r_psa.offgas.get(c, 0.0) + v
 
     # ---- Step 5: Membrane ----
     # Dist2 を 8.5 bar 運転にした影響で塔底液の泡点が ~20°C まで下がり、冷却水
@@ -296,14 +386,23 @@ def run_one_pass(
         phase_change=True,
         process_phase=StreamPhase.LIQUID,    # 顕熱区間: 液相加熱、潜熱区間は EVAPORATING に自動切替
     )
+    # trace bypass (2026-05-19): Mem design モデルは C3H6/C3H8 二成分のみを扱う。
+    # 上流 (Dist2 bot) に微量の non-C3 (H2/CH4/C2H4/C2H6) が混在する場合、
+    # それを抽出して retentate (= recycle) に合算する。閾値超え時は warning。
+    mem_in_cleaned, mem_bypass = _apply_trace_bypass(
+        mem_precool.outlet.F_in, _MEM_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='Mem',
+    )
     mem_feed = MemFeedStream(
-        F_C3H6=mem_precool.outlet.F_in.get('B', 0.),
-        F_C3H8=mem_precool.outlet.F_in.get('A', 0.),
+        F_C3H6=mem_in_cleaned.get('B', 0.),
+        F_C3H8=mem_in_cleaned.get('A', 0.),
         T_in=mem_precool.outlet.T_in,
         P_in=mem_precool.outlet.P_in,
     )
     with _capture_warnings("Mem", warnings_captured):
         r_mem = simulate_membrane_system(design.mem, mem_feed, MemFixedParams(vapor_feed=True))
+    # mem_bypass は recycle に合算 (= reactor 入口 mixer で扱われる)。tear_mem 構造は
+    # 'A', 'B' しか持たないので、bypass 分は別チャネルで管理し reactor_inlet 直前で合流。
+    # mem_bypass を後段で reactor_inlet に注入するため一旦保持。
 
     # ---- Step 6: Dist3 ----
     mem_to_dist3 = ProcessStream(

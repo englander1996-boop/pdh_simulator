@@ -65,8 +65,10 @@ def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
                        ('Dist2 (脱エタン塔, partial cond)', design.dist2),
                        ('Dist3 (C3 スプリッタ)', design.dist3)]:
         print(f"[{label}]")
+        # N_feed は探索対象外で core 側 Kirkbride 推奨を自動採用。
+        # 入力値表示は誤解を招くため省略 (実値は results.equipment.N_feed_kirkbride)。
         print(f"  P = {col.P_col/1e5:.1f} bar, N = {col.N_stages}, "
-              f"N_feed = {col.N_feed}, R = {col.reflux_ratio}")
+              f"R = {col.reflux_ratio}  (N_feed: Kirkbride 自動採用)")
         print(f"  solver = {col.solver_method}")
         print()
 

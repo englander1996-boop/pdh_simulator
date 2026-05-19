@@ -93,6 +93,7 @@ def simulate_column2(
         # 残りの C2 だけを propylene 冷媒で凝縮して reflux する分流モデル。
         partial_condenser = True,
         solver_method   = t.solver_method,
+        D_override      = t.D_override,
     )
     return simulate_distillation_column(
         design, feed,

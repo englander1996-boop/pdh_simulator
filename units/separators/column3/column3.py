@@ -124,6 +124,7 @@ def simulate_column3(
         K_method        = 'pr',
         q               = 1.0,
         solver_method   = t.solver_method,
+        D_override      = t.D_override,
     )
     return simulate_distillation_column(
         design, feed,
