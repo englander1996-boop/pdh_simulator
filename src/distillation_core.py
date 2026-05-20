@@ -157,13 +157,32 @@ _PARTIAL_COND_C3_ROUND_FRAC = 0.01
 
 # rigorous プロキシ罰則の係数 (2026-05-19 Phase A、ユーザー指示「FUG があんまりよろしくない」)
 # 単位は spec_coef_okuyen (= 100 億円/(年・%pt)) と同次元。
-# 設計判断: BO objective でちゃんと効くオーダーに揃える。spec_coef と同じ 100 を使うと
-# C3 漏れ 3% → (3-1)% × 100 = 200 億円/年 ≒ spec_base + 2 spec_coef 相当でしっかり効く。
-_PROXY_LEAK_COEF_OKUYEN_PER_PP = 50.0    # C3 漏れ 1pp 超過につき [億円/年]
-_PROXY_MARGIN_COEF_OKUYEN     = 30.0    # narrow margin 1pt につき [億円/年]
+# 設計判断 (2026-05-20 Phase A強化): main_20260520_040740 BO で trial #32 が
+# FUG 中は feasible (TAC_bo=295) なのに rigorous で LK recovery 0.877 (vs spec 0.99)
+# 違反で死亡。proxy_penalty 旧係数 (50/30) では BO 中の effective_TAC へのシグナル
+# が弱く、BO が FUG の楽観性領域に張り付き続けるため強化:
+#   - LEAK 50 → 150 (3x): partial cond の C3 漏れに対する罰則を強化
+#   - MARGIN 30 → 80 (~2.7x): narrow margin trial を effective_TAC で明確に弾く
+#   - R/N THRESHOLD 1.30 → 1.50: より早期に margin 不足を検出 (FUG-rigorous 乖離は
+#     R/R_min < 1.5 領域で顕在化しやすい経験則)
+#   - 加えて _compute_proxy_penalty 内で partial cond は係数 ×2 を追加適用
+#     (Dist2 のような partial cond は FUG 楽観性が特に大きいため)
+_PROXY_LEAK_COEF_OKUYEN_PER_PP = 150.0   # C3 漏れ 1pp 超過につき [億円/年]
+_PROXY_MARGIN_COEF_OKUYEN      = 80.0    # narrow margin 1pt につき [億円/年]
 # 「narrow」の判定閾値 (R/R_min, N/N_min がこれ未満なら罰則対象)
-_PROXY_R_MARGIN_THRESHOLD     = 1.30    # R/R_min < 1.30 で narrow 認定
-_PROXY_N_MARGIN_THRESHOLD     = 1.30    # N/N_min < 1.30 で narrow 認定
+# 設計判断 (2026-05-20): partial cond / total cond で閾値を分ける。
+#   partial cond (Dist2): 1.50。FUG の non-key 分配が物理から大きく乖離するため厳しめ。
+#                          C3H6 漏れと連動して BO 楽観性領域を強力に弾く必要あり。
+#   total cond (Dist1/Dist3): 1.30 (Phase A 旧値)。C3 splitter 等は physics 素直で
+#                            実機運用 R/R_min=1.1-1.3 が一般的。1.50 だと Dist3 の
+#                            R 下限を引き下げて overspec 解消する経済探索が阻害される
+#                            (= R を下げると penalty が乗りすぎて BO が高 R に張り付く)。
+_PROXY_R_MARGIN_THRESHOLD_PARTIAL = 1.50  # partial cond の R/R_min 閾値
+_PROXY_R_MARGIN_THRESHOLD_TOTAL   = 1.30  # total   cond の R/R_min 閾値
+_PROXY_N_MARGIN_THRESHOLD_PARTIAL = 1.50  # partial cond の N/N_min 閾値
+_PROXY_N_MARGIN_THRESHOLD_TOTAL   = 1.30  # total   cond の N/N_min 閾値
+# partial cond の追加倍率 (Dist2 など、FUG 楽観性が大きい塔への上乗せ)
+_PROXY_PARTIAL_COND_MULTIPLIER = 2.0     # partial cond の塔は係数 ×2.0 で評価
 
 
 def _compute_proxy_penalty(
@@ -199,8 +218,19 @@ def _compute_proxy_penalty(
     penalty = 0.0
     reasons: List[str] = []
 
+    # 設計判断 (2026-05-20 Phase A強化): partial cond の塔 (Dist2) は FUG の
+    # non-key 分配が物理から大きく乖離しやすいので、係数を _PROXY_PARTIAL_COND_MULTIPLIER
+    # で底上げする。Dist1/Dist3 (total cond) は ×1.0 のまま。
+    # 同時に margin 閾値も partial / total で分ける (partial は 1.50、total は 1.30)。
+    is_partial = bool(getattr(design, 'partial_condenser', False))
+    coef_mult = _PROXY_PARTIAL_COND_MULTIPLIER if is_partial else 1.0
+    leak_coef = _PROXY_LEAK_COEF_OKUYEN_PER_PP * coef_mult
+    margin_coef = _PROXY_MARGIN_COEF_OKUYEN * coef_mult
+    r_threshold = _PROXY_R_MARGIN_THRESHOLD_PARTIAL if is_partial else _PROXY_R_MARGIN_THRESHOLD_TOTAL
+    n_threshold = _PROXY_N_MARGIN_THRESHOLD_PARTIAL if is_partial else _PROXY_N_MARGIN_THRESHOLD_TOTAL
+
     # (a) C3 漏れ罰則 (partial cond のみ)
-    if getattr(design, 'partial_condenser', False):
+    if is_partial:
         for c in ALWAYS_CONDENSABLE_COMPS:
             moved = F_top.get(c, 0.0)
             f_c = feed_F.get(c, 0.0)
@@ -209,38 +239,43 @@ def _compute_proxy_penalty(
             leak_frac = moved / f_c
             if leak_frac > _PARTIAL_COND_C3_ROUND_FRAC:
                 over_pp = (leak_frac - _PARTIAL_COND_C3_ROUND_FRAC) * 100.0
-                add = over_pp * _PROXY_LEAK_COEF_OKUYEN_PER_PP
+                add = over_pp * leak_coef
                 penalty += add
                 reasons.append(
                     f"{c}漏れ{leak_frac*100:.2f}% (超過{over_pp:.2f}pp → +{add:.1f}億円)"
                 )
 
     # (b) R/R_min, N/N_min margin 罰則
+    # 設計判断 (2026-05-20 Phase A強化): shortage は生値 (0-1) で扱う。
+    # threshold は partial / total で分岐 (上で r_threshold/n_threshold 選択済)。
+    # 生値のまま coef 80 を掛けることで BO best ~300 億スケールに対し effective
+    # な (数十億円オーダー) を狙う。partial cond は ×2 (上で coef_mult 適用済)。
     R = design.reflux_ratio
     N = design.N_stages
     if R_min > 0 and math.isfinite(R_min):
         r_ratio = R / R_min
-        if r_ratio < _PROXY_R_MARGIN_THRESHOLD:
-            shortage = (_PROXY_R_MARGIN_THRESHOLD - r_ratio) * 100.0
-            add = shortage * _PROXY_MARGIN_COEF_OKUYEN
+        if r_ratio < r_threshold:
+            shortage = r_threshold - r_ratio   # 生値 (0-1.5)
+            add = shortage * margin_coef
             penalty += add
             reasons.append(
-                f"R/R_min={r_ratio:.3f} < {_PROXY_R_MARGIN_THRESHOLD} "
-                f"(不足{shortage:.1f}pt → +{add:.1f}億円)"
+                f"R/R_min={r_ratio:.3f} < {r_threshold} "
+                f"(不足{shortage:.3f} → +{add:.1f}億円)"
             )
     if N_min > 0 and math.isfinite(N_min):
         n_ratio = N / N_min
-        if n_ratio < _PROXY_N_MARGIN_THRESHOLD:
-            shortage = (_PROXY_N_MARGIN_THRESHOLD - n_ratio) * 100.0
-            add = shortage * _PROXY_MARGIN_COEF_OKUYEN
+        if n_ratio < n_threshold:
+            shortage = n_threshold - n_ratio   # 生値 (0-1.5)
+            add = shortage * margin_coef
             penalty += add
             reasons.append(
-                f"N/N_min={n_ratio:.3f} < {_PROXY_N_MARGIN_THRESHOLD} "
-                f"(不足{shortage:.1f}pt → +{add:.1f}億円)"
+                f"N/N_min={n_ratio:.3f} < {n_threshold} "
+                f"(不足{shortage:.3f} → +{add:.1f}億円)"
             )
 
     prefix = "rigorous" if is_rigorous else "fug"
-    reason_str = f"[{prefix}] " + "; ".join(reasons) if reasons else ""
+    suffix = " (partial cond×2)" if is_partial else ""
+    reason_str = f"[{prefix}{suffix}] " + "; ".join(reasons) if reasons else ""
     return penalty, reason_str
 
 
@@ -893,8 +928,10 @@ def _simulate_rigorous(
     # (数 kmol/h オーダー) が残る。下流の PSA/Mem は組成上 C3 を流したくない設計なので、
     # FUG パスと同じ閾値丸め (feed の _PARTIAL_COND_C3_ROUND_FRAC 未満なら 0 集約) を
     # rigorous 結果にも適用する。閾値超えは物理値を残して warning。
+    # 設計判断 (2026-05-20 Phase A強化): proxy_penalty 計算用に丸める前の F_top を保持。
     F_top = dict(rig.F_top)
     F_bot = dict(rig.F_bot)
+    F_top_pre_round = dict(F_top)
     if design.partial_condenser:
         for c in ALWAYS_CONDENSABLE_COMPS:
             moved = F_top.get(c, 0.0)
@@ -1019,8 +1056,10 @@ def _simulate_rigorous(
     # ---- 9b. rigorous プロキシ罰則 (Phase A, 2026-05-19) ----
     # rigorous でも leak と margin を再計算して BO objective に反映する。
     # FUG と rigorous の値が異なるのでそれぞれで計算する設計。
+    # 設計判断 (2026-05-20 Phase A 強化): 丸める前の F_top_pre_round を渡す
+    # (FUG path と同じ意図 — <1% 漏れも捕捉できる拡張余地を確保)。
     proxy_penalty, proxy_reason = _compute_proxy_penalty(
-        design, F_top, feed.F_in, eq.R_min, eq.N_min, is_rigorous=True,
+        design, F_top_pre_round, feed.F_in, eq.R_min, eq.N_min, is_rigorous=True,
     )
 
     # ---- 10. DistResult 組み立て ----
@@ -1264,6 +1303,13 @@ def simulate_distillation_column(
     # 本版は閾値丸めに変更: F_top の C3 漏れが feed の _PARTIAL_COND_C3_ROUND_FRAC 未満
     # なら 0 に丸めて塔底に集約 (= PSA/Mem に C3 を流さない目的を保つ)。閾値以上の漏れ
     # は物理値を残す (= rigorous で D_total が物理に近づく)。
+    # 設計判断 (2026-05-20 Phase A強化): proxy_penalty 計算用に「丸める前の生 F_top」を
+    # 保持。丸めで <1% 漏れが消えると BO 中の penalty が発火せず BO が FUG 楽観性領域に
+    # 張り付く問題を是正する。閾値判定 (1%) は proxy_penalty 側でも使うので、ここで
+    # 「<1% でも penalty 発火」を意図するなら proxy_penalty 側のロジックも別途調整する。
+    # 現状は proxy_penalty 内で leak_frac > 1% で発火、丸めもこれと同じ閾値で消去。
+    # ここで生値を保持しておけば将来「<1% でも penalty 発火」拡張も最小変更で可能。
+    F_top_pre_round = dict(F_top)
     if design.partial_condenser:
         for c in ALWAYS_CONDENSABLE_COMPS:
             moved = F_top.get(c, 0.0)
@@ -1508,9 +1554,11 @@ def simulate_distillation_column(
         capex_reb   = calc_he_capex_okuyen(A_reb)
     capex_total = capex_vessel + capex_trays + capex_cond + capex_reb
 
-    # ---- Step 11: rigorous プロキシ罰則 (Phase A, 2026-05-19) ----
+    # ---- Step 11: rigorous プロキシ罰則 (Phase A, 2026-05-19 / Phase A 強化 2026-05-20) ----
+    # 丸める前の F_top_pre_round を渡すことで、<1% の C3 漏れでも判定可能になる
+    # (現状の proxy_penalty 内ロジック自体は 1% 閾値ベースだが、将来の拡張余地を確保)。
     proxy_penalty, proxy_reason = _compute_proxy_penalty(
-        design, F_top, feed.F_in, R_min, N_min, is_rigorous=False,
+        design, F_top_pre_round, feed.F_in, R_min, N_min, is_rigorous=False,
     )
 
     # ---- Step 12: 結果 ----

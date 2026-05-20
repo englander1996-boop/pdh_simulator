@@ -46,10 +46,22 @@ mem_feed_K             = 323.15   # Mem フィード温度 (露点+30K の過熱
 [solver.inner]
 # リサイクル収束 (tear stream: Mem retentate + Dist3 bottom の A,B 計4変数)
 #   判定式: max( |Δtear[k]| / max(|tear[k]|, tol_floor_kmol_h) ) < tol_relative
-#   tear=7500 → 7.5 kmol/h 相当 (旧 0.10 比 75倍緩い、相対 0.1%)
-#   tear=30   → tol_floor が効いて 0.10 kmol/h 相当 (小流量で過度に厳しくしない)
-max_iter            = 500
-tol_relative        = 0.001
+#   tear=7500 → 75 kmol/h 相当 (相対 1%)
+#   tear=30   → tol_floor が効いて 1.0 kmol/h 相当 (小流量で過度に厳しくしない)
+#
+# 設計判断 (2026-05-20、top-k 全 rigorous 詰まり問題の修正):
+#   旧 tol_relative=0.001 (0.1%) は BO の FUG (決定的、ノイズなし) 前提だった。
+#   top-k 再評価で Dist1+Dist2+Dist3 全 rigorous (Wang-Henke MESH) になると、各塔の
+#   収束 tol 内ジッタ (~0.05%) が tear stream に伝播し、0.1% に届かない無限反復が発生
+#   (main_20260520_182716 で実証: top-k 1 候補に 50 分以上、計 87 分経過しても完了せず)。
+#   Dist3 N≥170 だと 1 リサイクル周回が ~10 分、500 周で理論上限 80 時間に達するため
+#   実用不可。
+#   tol を 1% に緩和し max_iter を 100 に下げる:
+#     - 1% は経済評価 (~億円スケール) において有効数字外で問題なし
+#     - max_iter 100 で最悪 ~20 分/候補に上限制限
+#     - Dist3 rigorous の MESH 収束 tol (0.05%) + マージンで 1% は自然な水準
+max_iter            = 100
+tol_relative        = 0.01
 tol_floor_kmol_h    = 100.0
 relax               = 0.50      # アンダーリラックス係数 (Wegstein 第1反復にも使用)
 recycle_guard_ratio = 15.0      # tear_mem.A > Fresh × これ で暴走打ち切り

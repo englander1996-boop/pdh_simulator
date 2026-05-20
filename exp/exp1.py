@@ -40,55 +40,57 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # === 反応器 (Swing) ============================================================
-#  ↓ 2026-05-19 (16:17 run): C3 強制移動撤廃 + rigorous fail-fast 後 BO ベスト
-#    trial #258、TAC_bo (FUG 楽観) = 455.4 億円/年
-#    rigorous 再評価は top-10 全敗 (Wang-Henke 収束失敗 dT_max~7K)、TAC_re = 10000 (penalty)
-#    調査用に exp1 へ転写。実走で何が起きるか確認する。
-#    出力先: outputs/main_20260519_161753/
-T_in_K        = 917.851     # K       入口温度
-z_cat_m       = 27.1332     # m       触媒層長さ
-t_cyc_min     = 12.8697     # min     1 サイクル運転時間
-D_reactor_m   = 9.34346     # m       反応器内径
+#  ↓ 2026-05-20 (00:36 run): main_20260520_003551 BO 完了。
+#    BO ベスト trial #32 (TAC_bo=294.87) は rigorous 再評価で strict-recovery 違反
+#    (Dist2 LK recovery=0.877 vs spec 0.99) → infeasible (TAC_re=10000)。
+#    実用ベストは top-k rank 2 = trial #115 (rigorous でも feasible):
+#      TAC_re (Stage 2 後) = 331.68 億円/年、C3H6 純度 99.78 wt% ✓、
+#      H2 純度 99.99 mol% ✓、生産量 1193 kmol/h (target 1188 達成)。
+#    出力先: outputs/main_20260520_003551/
+T_in_K        = 955.6260    # K       入口温度
+z_cat_m       = 21.0550     # m       触媒層長さ
+t_cyc_min     = 14.2111     # min     1 サイクル運転時間
+D_reactor_m   = 8.4363      # m       反応器内径
 
 
 # === PSA (Dist2 塔頂から H2 回収) ==============================================
-D_psa_col_m       = 3.10955   # m       塔径
-L_psa_bed_m       = 19.0131   # m       吸着層高さ
-desorption_target = 0.246343  # -
+D_psa_col_m       = 3.3187    # m       塔径
+L_psa_bed_m       = 25.6086   # m       吸着層高さ
+desorption_target = 0.2805    # -
 
 
 # === 膜分離 (Dist2 塔底から C3H6/C3H8 を分離) ===================================
-P_H_Pa     = 7.62773e5   # Pa      膜供給側圧力
+P_H_Pa     = 7.5403e5    # Pa      膜供給側圧力
 P_L_Pa     = 1.0e5       # Pa      透過側圧力 (大気圧固定)
-A_mem_m2   = 2.17538e5   # m²      総膜面積
+A_mem_m2   = 1.2085e5    # m²      総膜面積
 
 
 # === Dist1 (脱ブタン塔: C3 ←→ C4 分離) =========================================
 #  N_feed は探索対象外 (rigorous/sm では core 側 Kirkbride 推奨を自動採用、本値無視)。
 #  参考表示は results.equipment.N_feed_kirkbride を見ること (2026-05-19 改訂)。
-P_dist1_Pa     = 21.7646e5   # Pa      操作圧力
-N_dist1        = 26          # -       理論段数
-reflux_dist1   = 2.83932     # -       還流比
+P_dist1_Pa     = 20.3468e5   # Pa      操作圧力
+N_dist1        = 29          # -       理論段数
+reflux_dist1   = 2.1669      # -       還流比
 
 
 # === Dist2 (脱エタン塔: 軽質ガス ←→ C3) ========================================
-P_dist2_Pa     = 7.54785e5   # Pa      操作圧力
-N_dist2        = 26          # -       理論段数
-reflux_dist2   = 5.21708     # -       還流比
+P_dist2_Pa     = 5.1724e5    # Pa      操作圧力
+N_dist2        = 35          # -       理論段数
+reflux_dist2   = 9.5533      # -       還流比
 
 
 # === Dist3 (C3 スプリッタ: C3H6 製品精製) ======================================
 #  ↑ 2026-05-19: 動的 recovery_HK_bot 導入 (column3.py で純度 spec から逆算)
 #    旧版は recovery=0.99 hardcode + Gilliland check で N=174 強制 (純度 100% overspec)
 #    現版は spec 99.5 wt% に対応する rec_HK_bot ≒ 0.63 を動的計算、BO が N=100 (下限) を選択
-P_dist3_Pa     = 18.3716e5   # Pa      操作圧力 (= mem.P_dist と同期)
-N_dist3        = 174         # -       理論段数
-reflux_dist3   = 18.4525     # -       還流比
+P_dist3_Pa     = 22.8693e5   # Pa      操作圧力 (= mem.P_dist と同期)
+N_dist3        = 91          # -       理論段数
+reflux_dist3   = 18.5171     # -       還流比
 
 
 # === Fresh LPG (BO 直接指定、外側ループ skip) ==================================
-#  ↓ 2026-05-19 (16:17): BO ベスト trial #258
-F_C3H8_fresh_kmol_h = 1515.71
+#  ↓ 2026-05-20 (00:36): top-k rank 2 = trial #115
+F_C3H8_fresh_kmol_h = 1647.5800
 
 
 # === 蒸留塔 recovery (None = 0.99 既定値、float = 上書き) ======================
@@ -97,8 +99,8 @@ F_C3H8_fresh_kmol_h = 1515.71
 #  None で 0.99 (旧 hardcode)、float (例 0.95-0.999) で上書き可能
 rec_LK_top_dist1 = None    # Dist1: C3H8 in top
 rec_HK_bot_dist1 = None    # Dist1: C4H10 in bottom
-rec_LK_top_dist2 = None    # Dist2: C2H6 in top
-rec_HK_bot_dist2 = None    # Dist2: C3H8 in bottom (PSA への C3 漏洩抑制)
+rec_LK_top_dist2 = 0.9896  # Dist2: C2H6 in top (BO trial #115)
+rec_HK_bot_dist2 = 0.9995  # Dist2: C3H8 in bottom (BO trial #115、PSA への C3 漏洩抑制)
 rec_LK_top_dist3 = None    # Dist3: C3H6 in top
 rec_HK_bot_dist3 = None    # Dist3: C3H8 in bottom (C3H6 純度に直結)
                            # 2026-05-19〜: None なら column3 ラッパ内で「製品純度 99.5 wt%

@@ -79,7 +79,7 @@ def _apply_trace_bypass(
     trace_comps:    tuple,
     threshold_frac: float,
     label:          str,
-) -> Tuple[Dict[str, float], Dict[str, float]]:
+) -> Tuple[Dict[str, float], Dict[str, float], float]:
     """入口流量から指定成分の微量 (= total の threshold_frac 未満) を抽出。
 
     Parameters
@@ -95,15 +95,23 @@ def _apply_trace_bypass(
 
     Returns
     -------
-    (cleaned_F, bypass_F)
-        cleaned_F: 微量分を除いた入口流量 (ユニットの design 計算へ)。
-        bypass_F : 除かれた微量分 (ユニットの出口に合算してマスバランス保持)。
+    (cleaned_F, bypass_F, max_excess_frac)
+        cleaned_F      : 微量分を除いた入口流量 (ユニットの design 計算へ)。
+        bypass_F       : 除かれた微量分 (ユニットの出口に合算してマスバランス保持)。
+        max_excess_frac: trace_comps の中で frac > threshold だった成分の
+                         (frac - threshold) の最大値 [-]。超過なしなら 0。
+                         BO objective の連続 penalty 化に runner.py で利用。
     """
+    # 設計判断 (2026-05-20、ユーザー方針): 閾値超過時の warning は出さない。
+    # 過去版は「PSA/Mem の多成分対応化を検討」と促していたが、多成分化は実施しない
+    # 方針確定 (理由: 1-2% 漏れは有効数字範囲で許容、多成分化はコスト対効果悪い)。
+    # max_excess_frac は将来 BO penalty 化する余地として戻り値に残す (現状未使用)。
     F_total = sum(max(F, 0.0) for F in F_in.values())
     cleaned: Dict[str, float] = dict(F_in)
     bypass:  Dict[str, float] = {c: 0.0 for c in F_in}
+    max_excess: float = 0.0
     if F_total <= 0:
-        return cleaned, bypass
+        return cleaned, bypass, max_excess
     for c in trace_comps:
         v = F_in.get(c, 0.0)
         if v <= 0:
@@ -114,14 +122,11 @@ def _apply_trace_bypass(
             cleaned[c] = 0.0
             bypass[c]  = v
         else:
-            # 閾値超え → モデル外なので警告 (= モデル簡略化前提が破れている)
-            warnings.warn(
-                f"{label} trace bypass: comp '{c}' は {frac*100:.2f}% で閾値 "
-                f"{threshold_frac*100:.1f}% 超過。簡略モデルの適用範囲外。"
-                f" PSA/Mem の多成分対応化 (TODO) を検討。",
-                UserWarning, stacklevel=2,
-            )
-    return cleaned, bypass
+            # 閾値超え: 物理値を残して通過させる (warning 出さない)
+            excess = frac - threshold_frac
+            if excess > max_excess:
+                max_excess = excess
+    return cleaned, bypass, max_excess
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +365,8 @@ def run_one_pass(
     # ---- Step 4: PSA ----
     # trace bypass (2026-05-19): PSA design モデルは C3 を扱えないため、入口の
     # C3 微量分 (≤ 1% of total) を design 計算から除き、後で offgas に合算する。
-    psa_in_cleaned, psa_bypass = _apply_trace_bypass(
+    # 2026-05-20: 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
+    psa_in_cleaned, psa_bypass, psa_trace_excess = _apply_trace_bypass(
         r2.top.F_in, _PSA_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='PSA',
     )
     psa_feed = PSAFeedStream(
@@ -389,7 +395,8 @@ def run_one_pass(
     # trace bypass (2026-05-19): Mem design モデルは C3H6/C3H8 二成分のみを扱う。
     # 上流 (Dist2 bot) に微量の non-C3 (H2/CH4/C2H4/C2H6) が混在する場合、
     # それを抽出して retentate (= recycle) に合算する。閾値超え時は warning。
-    mem_in_cleaned, mem_bypass = _apply_trace_bypass(
+    # 2026-05-20: 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
+    mem_in_cleaned, mem_bypass, mem_trace_excess = _apply_trace_bypass(
         mem_precool.outlet.F_in, _MEM_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='Mem',
     )
     mem_feed = MemFeedStream(
@@ -437,4 +444,6 @@ def run_one_pass(
         tear_dist3_new=tear_dist3_new, tear_mem_new=tear_mem_new,
         T_d3_new=T_d3_new, T_mem_new=T_mem_new,
         warnings_captured=warnings_captured,
+        trace_bypass_psa_excess=psa_trace_excess,
+        trace_bypass_mem_excess=mem_trace_excess,
     )
