@@ -50,12 +50,24 @@ SAMPLER     = 'tpe'          # 'tpe' | 'cmaes' | 'random'
 # ===========================================================================
 # § 2. ソルバ選択 (各塔独立、'fug' | 'rigorous' | 'sm')
 # ===========================================================================
-#   - BO ループは速度優先 → 全塔 FUG 推奨
+#   - BO ループは速度優先 → 全塔 FUG 推奨 (旧方針)
 #   - top-k 再評価は精度優先 → rigorous 推奨
 #   - 'sm' は近日実装予定。実装後は文字列を 'sm' に変えるだけで切替可
+#
+# 設計判断 (2026-05-20): Dist2 のみ BO ループでも rigorous に切替。
+#   FUG path では _split_streams が N_stages を流量計算に使わず、recovery 仕様
+#   から直接 split を決定する (= N が CAPEX しか影響しない)。これにより BO が
+#   常に N_dist2 下限 (=20) を選び、partial cond の C3H6 漏れが rigorous で
+#   発覚しても BO ループ中は見えない構造になっていた (main_20260520_124508
+#   BO best #246 = N=22 で top-10 全 rigorous infeasible が直接症状)。
+#   Dist2 は N=20-40 / R=5-10 の探索範囲で rigorous でも軽量 (数秒/eval) のため
+#   BO ループに組み込んでも全体時間は許容範囲。これで N が物理的に流量に効く
+#   ようになり、Dist2 厚化の経済合理性が BO に見えるようになる。
+#   Dist1/Dist3 は今のところ FUG 維持 (Dist1 は narrow-margin で FUG check 機能、
+#   Dist3 は N が大きいため rigorous は重い)。
 SOLVER_BO   = {
     'dist1': 'fug',
-    'dist2': 'fug',          # 設計判断 (2026-05-17): FUG path に Gilliland check 追加で narrow-margin 弾けるため戻す
+    'dist2': 'rigorous',     # 設計判断 (2026-05-20): FUG-rigorous gap の根源だったため切替
     'dist3': 'fug',
 }
 SOLVER_TOPK = {
@@ -110,7 +122,9 @@ SEARCH_SPACE = {
     # 必ず正方向 (P_H > P_dist2 = 5-7 bar) になるよう構造的に保証する。
     # 旧 5-9.5 bar だと P_dist2 (5-9.5) と重なり、50% で圧縮機逆向き penalty。
     'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),  # Pa 上限: Hua et al. 9.5 bar / 下限: P_dist2 上限 7 bar + 0.5 bar margin
-    'A_mem_m2':          (3.0e4,  3.0e5,  'log',    'float'),  # m² !仮置き (CAPEX 支配、log scale)
+    # 設計判断 (2026-05-20): A_mem 範囲を中央化。新 rigorous-feasible 3 件で 110k-138k に集中、
+    # 旧 (3e4, 3e5) では中央 (1.7e5) ≈ ほぼ infeasible 領域。中央 1.25e5 に置いて TPE 探索密度↑。
+    'A_mem_m2':          (5.0e4,  2.0e5,  'log',    'float'),  # m² 中央化 (rigorous-feas 中央 1.12e5)
 
     # ----- Dist1 (脱ブタン塔) -----
     'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (pump1 出口圧と同期)
@@ -121,14 +135,23 @@ SEARCH_SPACE = {
     # 設計判断 (2026-05-19): P_dist2 上限を 7 bar に引き下げ。Mem 圧縮機が
     # 必ず正方向 (P_H ≥ 7.5 > P_dist2 ≤ 7) になるよう構造的に保証する。
     # 旧 9.5 bar だと Mem P_H レンジと重複し 50% で penalty。
-    'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),  # Pa 上限: Mem P_H 下限 7.5 - 0.5 bar margin / 下限: !仮置き
-    'N_dist2':           (20,     40,     'linear', 'int'  ),  # -  !仮置き (下限: 旧10→20、rigorous で 99% recovery 物理達成可能領域 / 上限: 経験値)
+    # 設計判断 (2026-05-20): P_dist2 下限を 5.0 → 5.5 bar に引き上げ。新 rigorous-feasible
+    # 3 件はすべて 5.6-7.0 bar 範囲、5.0-5.5 bar は infeasible 領域だったため中央化。
+    'P_dist2_Pa':        (5.5e5,  7.0e5,  'linear', 'float'),  # Pa 中央化 (rigorous-feas は 5.6-7.0 bar)
+    # 設計判断 (2026-05-20): N_dist2 を (20, 40) → (30, 50) に再設定。
+    # 新 rigorous-feasible 3 件はすべて N=38-40 (上端)、Dist2 partial cond は
+    # 厳密分離に厚い塔が要求される (ユーザー直感も一致)。範囲を上端側に
+    # シフトして中央 40 に置く。N=50 は実機としては多めだが物理的に有意味。
+    'N_dist2':           (30,     50,     'linear', 'int'  ),  # -  中央化 (rigorous-feas は 38-40)
     'reflux_dist2':      (5.0,    10.0,   'linear', 'float'),  # -  下限: R_min ≈ 4.5 から R/R_min ≥ 1.1 で proxy_penalty 発火多発、下限 5 で margin 1.5× 確保
 
     # ----- Dist3 (C3 スプリッタ, narrow-α) -----
     'P_dist3_Pa':        (15.0e5, 25.0e5, 'linear', 'float'),  # Pa !仮置き (mem.P_dist と同期、冷却水凝縮可能下限近傍)
-    'N_dist3':           (120,    250,    'linear', 'int'  ),  # -  下限: N_min ≈ 60-80、N/N_min ≥ 1.3 確保 (proxy_penalty 回避) / 上限: !仮置き
-    'reflux_dist3':      (11.0,   20.0,   'linear', 'float'),  # -  下限: R_min ≈ 10 + margin / 上限: !仮置き
+    'N_dist3':           (80,    200,    'linear', 'int'  ),  # -  下限: N_min ≈ 60-80、N/N_min ≥ 1.3 確保 (proxy_penalty 回避) / 上限: !仮置き
+    # 設計判断 (2026-05-20): reflux_dist3 を (11, 20) → (14, 22) に中央化。
+    # 新 rigorous-feasible 3 件はすべて R=17.6-18.7 (上端寄り)。範囲中央 18 に
+    # 置くため上限を 22 に拡張、下限を 14 に引き上げ。
+    'reflux_dist3':      (14.0,   22.0,   'linear', 'float'),  # -  中央化 (rigorous-feas は 17.6-18.7)
 
     # ----- Fresh LPG (BO 直接指定、外側ループ skip) -----
     # 設計判断 (2026-05-17): yield 0.7-0.95 領域全体を探索可能な範囲に。
@@ -140,16 +163,22 @@ SEARCH_SPACE = {
     'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),  # kmol/h !仮置き (yield 想定からの逆算範囲、BO 結果見ながら要調整)
 
     # ----- 蒸留塔 recovery -----
-    # 設計判断 (2026-05-19 確定): Dist2 の C3 漏れを物理的に <1% に保証する
-    # ため recovery_HK_bot_dist2 の下限を 0.998 にタイトニング。BO は「0.01
-    # まで分離が保証された設計領域」内で経済最適を探す。残り 0.01 は
-    # PSA/Mem の trace bypass (= 1% 閾値) が吸収する。
+    # 設計判断 (2026-05-20): rec_HK_bot_dist2 の下限を 0.998 → 0.9995 に再タイト化。
+    # 根拠: main_20260520_003551 trials.csv 分析より、
+    #   - topk infeasible 3/3 (#32, #258, #208) は rec_HK_bot < 0.9995
+    #   - topk feasible    2/2 (#115, #231)        は rec_HK_bot ≥ 0.9995
+    #   - バケット 0.9995-0.9999 の中央 TAC は他バケット比 -25%
+    # 「鋭利な feasibility 境界」が 0.9995 にあり、下限引き上げで sweet spot
+    # 集中探索ができる。失う最小 TAC (#32 = 294.87) は実は infeasible なので実害なし。
+    # 補完施策: PSA/Mem trace bypass の閾値超過に連続 penalty (runner.py
+    # _TRACE_BYPASS_PENALTY_COEF_OKUYEN) を導入し、Dist2 の C3 漏れ自体に BO 中の
+    # シグナルを与える。recovery 制約 + 連続 penalty の二段構えで「漏れない設計」へ誘導。
     # rec_LK_top_dist2 は柔軟に 0.95-0.999 とし、BO に C2H6 のリサイクル比を
     # 経済性で選ばせる。
     # 'rec_LK_top_dist1':  (0.90, 0.999, 'linear', 'float'),
     # 'rec_HK_bot_dist1':  (0.90, 0.999, 'linear', 'float'),
-    'rec_LK_top_dist2':  (0.95, 0.999, 'linear', 'float'),   # C2H6 → top (柔軟)
-    'rec_HK_bot_dist2':  (0.998, 0.9999, 'linear', 'float'), # C3H8 → bot ≥ 99.8% で C3 漏れ <1% 保証
+    'rec_LK_top_dist2':  (0.95, 0.999, 'linear', 'float'),    # C2H6 → top (柔軟)
+    'rec_HK_bot_dist2':  (0.9995, 0.9999, 'linear', 'float'), # C3H8 → bot ≥ 99.95% で sweet spot 集中
     # 'rec_LK_top_dist3':  (0.90, 0.999, 'linear', 'float'),
     # 'rec_HK_bot_dist3':  (0.95, 0.999, 'linear', 'float'),
 }

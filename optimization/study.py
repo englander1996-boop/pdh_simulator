@@ -114,6 +114,7 @@ def run_optimization(
     show_progress_bar:   bool   = True,
     catch:               tuple  = (Exception,),
     timeout_sec:         Optional[float] = None,
+    callbacks:           Optional[list] = None,
 ) -> optuna.Study:
     """Optuna 最適化ループを実行。
 
@@ -143,5 +144,6 @@ def run_optimization(
         show_progress_bar=show_progress_bar,
         catch=catch,
         timeout=timeout_sec,
+        callbacks=callbacks,
     )
     return study

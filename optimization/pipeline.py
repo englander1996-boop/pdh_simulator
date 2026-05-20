@@ -249,6 +249,13 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     )
 
     # ---- BO ループ実行 (KeyboardInterrupt / 致命的例外でも部分結果を保存) ----
+    # 設計判断 (2026-05-20): Optuna 標準 logger を WARNING に絞り、自前 compact callback で
+    # 1 trial = 構造化 5 行表示 (status + vars 3 行 + progress/ETA) に置換。可読性向上。
+    import optuna as _optuna_for_log
+    _optuna_for_log.logging.set_verbosity(_optuna_for_log.logging.WARNING)
+    from optimization.callbacks import make_compact_callback
+    _compact_cb = make_compact_callback(n_trials_total=cfg.n_trials)
+
     print(f"[BO] {cfg.n_trials} trial を実行中 ...")
     t_start = datetime.now()
     bo_interrupted = False
@@ -257,7 +264,8 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
         run_optimization(
             study, objective,
             n_trials          = cfg.n_trials,
-            show_progress_bar = cfg.show_progress,
+            show_progress_bar = False,           # tqdm は自前 ETA と競合するため無効
+            callbacks         = [_compact_cb],
         )
     except KeyboardInterrupt:
         bo_interrupted = True
