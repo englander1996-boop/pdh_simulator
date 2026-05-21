@@ -230,7 +230,16 @@ def _compute_proxy_penalty(
     n_threshold = _PROXY_N_MARGIN_THRESHOLD_PARTIAL if is_partial else _PROXY_N_MARGIN_THRESHOLD_TOTAL
 
     # (a) C3 漏れ罰則 (partial cond のみ)
-    if is_partial:
+    # 設計判断 (2026-05-21): is_rigorous=True のときは leak 罰則をスキップ。
+    # 理由: rigorous F_top の C3 漏れ量は物理的真値で、PSA/Mem trace bypass の連続
+    # penalty (runner.py _TRACE_BYPASS_PENALTY_COEF_OKUYEN) が既にコスト化しているため
+    # ここで再度加算すると二重計上になる (実例: main_20260521_092409 trial 0 で
+    # proxy +287 億 + bypass +86 億 = 373 億の二重 penalty が warm-start を死なせていた)。
+    # FUG パスでは F_top が楽観値なので、proxy leak penalty で「物理的には漏れる」
+    # 警告を入れる意味があるが、rigorous は真値なので不要。
+    # margin 罰則 (b) は rigorous でも維持: R/R_min 近傍は CAPEX に反映されてはいるが
+    # 「操業的脆弱性」として追加コストを乗せる意義あり (係数は小さいので影響軽微)。
+    if is_partial and not is_rigorous:
         for c in ALWAYS_CONDENSABLE_COMPS:
             moved = F_top.get(c, 0.0)
             f_c = feed_F.get(c, 0.0)
@@ -377,6 +386,12 @@ class DistEquipment:
     # runner.py で soft_penalty にマージされ effective_TAC に反映される。
     proxy_penalty_okuyen:    float = 0.0    # 罰則合計 [億円/年]
     proxy_penalty_reason:    str   = ""     # 罰則発火理由 (デバッグ用)
+    # ---- infeasibility 連続シグナル (2026-05-20 追加、TPE constraints_func 用) ----
+    # FUG penalty の場合: Gilliland _N_needed_ を保持し、run_one_pass で N_shortfall を計算。
+    # Rigorous Wang-Henke 失敗の場合: 失敗時の dT_max [K] を保持し、tol からの距離を penalty 化。
+    # feasible=True (正常完了) のときは両方 0.0。
+    N_needed:                float = 0.0    # Gilliland で必要 N [-] (0 ⇒ 未計算)
+    dT_max_rigorous:         float = 0.0    # Wang-Henke 失敗時の最終 dT_max [K] (0 ⇒ 未発生)
 
 
 @dataclass
@@ -1165,11 +1180,25 @@ def simulate_distillation_column(
             )
         except Exception as e:
             if _strict:
-                raise RuntimeError(
+                # 設計判断 (2026-05-20): 旧版は RuntimeError を raise していたが、これにより
+                # run_one_pass で「Dist2 失敗 → 下流の PSA/Mem が ValueError で crash」する
+                # 経路があり、TPE constraints_func に dT_max 等の連続シグナルが伝わらなかった。
+                # 本版は penalty_result を返して `equipment.feasible=False` でシグナル化、
+                # `dT_max_rigorous` を抽出して run_one_pass で user_attr に格納する。
+                # 「silent FUG fallback はしない」(2026-05-19 発見1 の防止) はそのまま維持。
+                msg = str(e)
+                dT_max = _extract_dT_max(msg)
+                warnings.warn(
                     f"simulate_distillation_column: rigorous solver で例外 "
-                    f"({type(e).__name__}: {e})。"
-                    f" PDH_RIGOROUS_STRICT=0 で FUG にフォールバック可能。"
-                ) from e
+                    f"({type(e).__name__}: {e}) → penalty_result 返却"
+                    f" (dT_max={dT_max:.2f}K if extracted)。",
+                    UserWarning, stacklevel=2,
+                )
+                return _penalty_result(
+                    design,
+                    f"rigorous {type(e).__name__}: {msg[:200]}",
+                    dT_max_rigorous=dT_max,
+                )
             warnings.warn(
                 f"simulate_distillation_column: rigorous solver で例外 ({type(e).__name__}: {e})。"
                 f" FUG にフォールバック (PDH_RIGOROUS_STRICT=0)。",
@@ -1385,7 +1414,15 @@ def simulate_distillation_column(
                    f" N_min={N_min:.1f}) — recovery=0.99 物理的達成不可")
 
     if not feasible:
-        return _penalty_result(design, msg, N_min=N_min, R_min=R_min)
+        # N_needed は Gilliland branch で計算されていれば渡す (他 branch では 0)。
+        # ローカル変数 N_needed が存在しないケースに備えて locals() で安全取得。
+        _N_needed_for_penalty = locals().get('N_needed', 0.0)
+        if _N_needed_for_penalty == float('inf'):
+            _N_needed_for_penalty = 0.0   # ∞ は連続化できないので未計算扱い
+        return _penalty_result(
+            design, msg, N_min=N_min, R_min=R_min,
+            N_needed=_N_needed_for_penalty,
+        )
 
     # ---- Step 7: Kirkbride で推奨 N_feed ----
     N_feed_kirkbride = _kirkbride_feed_stage(
@@ -1591,9 +1628,34 @@ def simulate_distillation_column(
     return DistResult(top=top_stream, bottom=bottom_stream, equipment=equipment)
 
 
+_DT_MAX_RE = __import__('re').compile(r'dT_max=([\d.]+)\s*K')
+
+
+def _extract_dT_max(msg: str) -> float:
+    """Wang-Henke 失敗 RuntimeError message から dT_max [K] を抽出。
+
+    例: "Wang-Henke 収束失敗 (retry 後も): 収束失敗: max_iter=500, dT_max=56.280K (tol=0.05K)"
+    抽出できない (= 別種の RuntimeError、例: 冷媒選択失敗) 場合は 0.0 を返す。
+    """
+    m = _DT_MAX_RE.search(msg)
+    if m:
+        try:
+            return float(m.group(1))
+        except (ValueError, IndexError):
+            return 0.0
+    return 0.0
+
+
 def _penalty_result(design: DistDesignVars, msg: str,
-                    N_min: float = 0.0, R_min: float = 0.0) -> DistResult:
-    """infeasibility または計算失敗時のペナルティ結果。"""
+                    N_min: float = 0.0, R_min: float = 0.0,
+                    N_needed: float = 0.0,
+                    dT_max_rigorous: float = 0.0) -> DistResult:
+    """infeasibility または計算失敗時のペナルティ結果。
+
+    N_needed (Gilliland) / dT_max_rigorous (Wang-Henke) は TPE constraints_func 用の
+    連続シグナル。run_one_pass で N_shortfall / dT_shortfall を計算して trial.user_attrs
+    に格納する。未指定なら 0.0 (= 連続シグナルなし、binary penalty のみ)。
+    """
     warnings.warn(
         f"simulate_distillation_column: infeasible — {msg}",
         UserWarning, stacklevel=2,
@@ -1610,5 +1672,7 @@ def _penalty_result(design: DistDesignVars, msg: str,
         N_min=N_min, R_min=R_min,
         N_feed_kirkbride=0,
         feasible=False, message=msg,
+        N_needed=N_needed,
+        dT_max_rigorous=dT_max_rigorous,
     )
     return DistResult(top=zero_top, bottom=zero_bot, equipment=eq)

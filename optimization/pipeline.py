@@ -14,7 +14,7 @@ display_full_results) を出力する機能も追加。
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 
 from config.load import load_operating_config
 from optimization.search_space import (
@@ -45,6 +45,9 @@ class PipelineConfig:
     n_topk:      int             = 10
     seed:        int             = 42
     sampler:     str             = 'tpe'
+    # 設計判断 (2026-05-21): n_jobs=1 推奨 (penalty_scale が thread-local でない)。
+    # 並列化したい場合は n_jobs=2-4 程度。同時に N_TRIALS を増やすと実効サンプル数↑。
+    n_jobs:      int             = 1
 
     # § 2. ソルバ選択
     solver_bo:   Dict[str, str]  = field(default_factory=lambda: {
@@ -80,6 +83,13 @@ class PipelineConfig:
 
     # ベスト候補の詳細表示 (exp1 と同じ display_full_results)
     display_best_full:         bool = True
+
+    # 設計判断 (2026-05-21): warm-start 機能。BO 開始前に既知良設計の params を
+    # study.enqueue_trial() で先頭注入する。TPE が startup random サンプリングの
+    # 序盤で良い領域近傍を評価でき、後続 trial の探索効率が大幅向上する。
+    # 各 dict は SEARCH_SPACE のキーを含む params 辞書 (build_design に渡せる形)。
+    # 範囲外の値は Optuna が暗黙に補正 or 警告するため、bounds と整合した値を渡すこと。
+    warm_start_trials:         List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +249,7 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
         hi_dT_min_K           = cfg.hi_dT_min_K,
         strict_recovery_check = cfg.strict_recovery_bo,
         recovery_tolerance    = cfg.recovery_tolerance,
+        n_trials_total        = cfg.n_trials,        # adaptive penalty schedule の分母
     )
     study = create_study(
         study_name   = study_name,
@@ -247,6 +258,25 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
         n_startup    = cfg.n_startup,
         storage_url  = storage_url,
     )
+
+    # ---- warm-start: 既知良 trial の params を先頭注入 ----
+    # 設計判断 (2026-05-21): TPE は startup random サンプリングで feasibility を当てに
+    # 行くが、本問題は feasible 領域が極めて狭く (1% 以下)、運悪く 50 trial 全 infeasible
+    # で TPE が立ち上がれないケースが頻発した (例: 20260521_023614 で 122 trial 中 1 feas)。
+    # study.enqueue_trial() で過去 run の優秀 params を最初に強制評価することで、
+    # (a) feasibility の足場を確実に作る (b) TPE モデルが「これに近い領域は良い」と
+    # 学習できる、の 2 つの効果を得る。
+    if cfg.warm_start_trials:
+        n_enqueued = 0
+        for params in cfg.warm_start_trials:
+            # SEARCH_SPACE のキーだけ抽出 (余計なメタ情報は捨てる)
+            filtered = {k: v for k, v in params.items() if k in cfg.search_space}
+            try:
+                study.enqueue_trial(filtered, skip_if_exists=True)
+                n_enqueued += 1
+            except Exception as e:
+                print(f"[warm-start] enqueue 失敗: {type(e).__name__}: {e}")
+        print(f"[warm-start] {n_enqueued} trial を enqueue (注入順に最初の {n_enqueued} trial で評価される)")
 
     # ---- BO ループ実行 (KeyboardInterrupt / 致命的例外でも部分結果を保存) ----
     # 設計判断 (2026-05-20): Optuna 標準 logger を WARNING に絞り、自前 compact callback で
@@ -266,6 +296,7 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
             n_trials          = cfg.n_trials,
             show_progress_bar = False,           # tqdm は自前 ETA と競合するため無効
             callbacks         = [_compact_cb],
+            n_jobs            = cfg.n_jobs,
         )
     except KeyboardInterrupt:
         bo_interrupted = True

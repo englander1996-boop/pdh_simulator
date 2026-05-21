@@ -8,7 +8,7 @@ main.py から呼ぶ make_objective() が、設計変数の suggest → Flowshee
 後段の reporting で CSV/JSON に出力できるようにする。
 """
 
-from typing import Callable, Dict, Any
+from typing import Callable, Dict, Any, Optional
 
 from flowsheet import evaluate, FlowsheetResult
 from config.load import OperatingConfig
@@ -16,6 +16,7 @@ from config.load import OperatingConfig
 from optimization.search_space import (
     suggest_params, build_design, extract_F_fresh_override, VarSpec,
 )
+from optimization.penalty_scale import set_scale, default_schedule
 
 
 def make_objective(
@@ -29,6 +30,8 @@ def make_objective(
     strict_recovery_check:  bool  = False,
     recovery_tolerance:     float = 0.10,
     baseline:               Dict[str, Any] | None = None,
+    n_trials_total:         int = 300,
+    penalty_schedule:       Optional[Callable[[int, int], float]] = None,
 ) -> Callable:
     """Optuna study.optimize() に渡す objective 関数を生成して返す。
 
@@ -58,8 +61,18 @@ def make_objective(
         recovery_tolerance=recovery_tolerance,
         verbose=False,
     )
+    # adaptive penalty schedule (default は 3 段階 step、custom も渡せる)
+    _schedule = penalty_schedule if penalty_schedule is not None else default_schedule
 
     def objective(trial) -> float:
+        # 設計判断 (2026-05-21): trial 開始時に penalty scale を更新。
+        # 序盤 (0-30%): scale=0.3 で探索広げる
+        # 中盤 (30-70%): scale=1.0 標準
+        # 終盤 (70-100%): scale=3.0 で infeas 強制退出
+        scale = _schedule(trial.number, n_trials_total)
+        set_scale(scale)
+        trial.set_user_attr('penalty_scale', scale)
+
         params = suggest_params(trial, search_space)
         design = build_design(params, solver_assignment, baseline=baseline)
         F_fresh_override = extract_F_fresh_override(params, baseline=baseline)
@@ -120,3 +133,15 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
                 total_proxy += p
         if total_proxy > 0:
             trial.set_user_attr('proxy_penalty_total_okuyen', total_proxy)
+
+        # 設計判断 (2026-05-20): 蒸留塔 infeasibility の連続シグナルを user_attrs に格納。
+        # run_one_pass の _build_penalty_after_column が dist{1,2,3}_{N,dT}_shortfall を
+        # 一括計算済み。constraints_func (study.py) でこれを TPE に渡す。
+        # 正常完走時は 0.0、infeasible 時は連続値 (FUG: N 不足比、Rigorous: log(dT/tol))。
+        op = result.solver.one_pass
+        for col_idx in ('1', '2', '3'):
+            for kind in ('N', 'dT'):
+                key = f'dist{col_idx}_{kind}_shortfall'
+                v = op.get(key, 0.0) or 0.0
+                if v > 0:
+                    trial.set_user_attr(key, float(v))

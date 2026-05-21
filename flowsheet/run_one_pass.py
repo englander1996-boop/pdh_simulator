@@ -219,7 +219,107 @@ def _build_penalty_one_pass_result(
         tear_mem_new  ={'A': 0.0, 'B': 0.0},
         T_d3_new=298.15, T_mem_new=298.15,
         warnings_captured=[],
+        trace_bypass_psa_excess=0.0,
+        trace_bypass_mem_excess=0.0,
+        dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
+        dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
     )
+
+
+# ---------------------------------------------------------------------------
+# 蒸留塔 penalty 早期検出 (2026-05-20 追加)
+# ---------------------------------------------------------------------------
+# 設計判断: 旧版は r1/r2/r3 が penalty (CAPEX=1e9 sentinel, feasible=False) で
+# 全成分流量ゼロの top/bottom を返したあと下流の simulate_jt_expansion / PSA / Mem
+# に流れ、`ValueError: expansion_valve: 全成分流量がゼロです` で例外 crash していた
+# (BO #001 trial 等で多発)。runner.py は例外を catch するが、TPE constraints_func に
+# 渡る情報が「solver_failure 固定」になり連続シグナルが失われる。
+# 本ヘルパは塔 penalty を早期検出して solver に penalty_hit で抜けてもらう経路に
+# 変換し、同時に N_shortfall / dT_shortfall を計算して runner.py 経由で
+# trial.user_attrs に格納する (TPE が「あとどれだけ N/dT が足りない領域か」を学習)。
+_RIG_TOL_K = 0.05   # Wang-Henke 収束 tol (src/distillation_rigorous.py と同期)
+
+
+def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, float]:
+    """塔 penalty 結果から N_shortfall / dT_shortfall を計算。
+
+    col_key   : 'r1' | 'r2' | 'r3'
+    col_result: DistResult (equipment.N_needed / dT_max_rigorous を保持)
+    col_design: ColumnTunables (N_stages を持つ)
+    """
+    idx = col_key[-1]
+    out = {f'dist{idx}_N_shortfall': 0.0, f'dist{idx}_dT_shortfall': 0.0}
+    eq = getattr(col_result, 'equipment', None)
+    if eq is None:
+        return out
+    # FUG (Gilliland infeasible) → N_needed > 0
+    N_needed = getattr(eq, 'N_needed', 0.0) or 0.0
+    N_stages = max(int(getattr(col_design, 'N_stages', 0) or 0), 1)
+    if N_needed > 0:
+        out[f'dist{idx}_N_shortfall'] = max(0.0, (N_needed - N_stages) / N_stages)
+    # Rigorous (Wang-Henke 収束失敗) → dT_max_rigorous > 0
+    dT_max = getattr(eq, 'dT_max_rigorous', 0.0) or 0.0
+    if dT_max > 0:
+        # tol からの「比」で正規化 (tol=0.05K に対して 56K → shortfall=1120)。
+        # スケールが過大なので log 圧縮で 0-10 程度に抑える。
+        # 例: dT_max=56K → log10(56/0.05) ≈ log10(1120) ≈ 3.05
+        out[f'dist{idx}_dT_shortfall'] = math.log10(max(dT_max / _RIG_TOL_K, 1.0))
+    return out
+
+
+def _build_penalty_after_column(
+    failed_col_key: str,
+    design,
+    **upstream,
+) -> Dict:
+    """蒸留塔 penalty 時に「上流の有効ピース + 下流の stub」で one_pass dict を構築。
+
+    Parameters
+    ----------
+    failed_col_key : 'r1' | 'r2' | 'r3'
+    design         : FlowsheetDesignVars (N_stages 取得用)
+    upstream       : 既に計算済みの有効ピース (fresh, pump1, r1, ...) を kwargs で
+
+    Returns
+    -------
+    dict : run_one_pass の返却形と同じ key 構成。dist{1,2,3}_{N,dT}_shortfall を含む。
+    """
+    stub = _PenaltyResult()
+    zero_stream = ProcessStream(F_in=dict(_ZERO), T_in=298.15, P_in=1e5)
+    base = dict(
+        pump1=stub, r1=stub, dist1_top_rx=zero_stream,
+        fresh=stub,
+        reactor_inlet=zero_stream,
+        r_rx=stub, rx_out=zero_stream,
+        cooled=stub,
+        comp2a=stub, intercool=stub, comp2b=stub,
+        desuper=stub,
+        r2=stub,
+        r_psa=stub, mem_precool=stub, r_mem=stub, r3=stub,
+        tear_dist3_new={'A': 0.0, 'B': 0.0},
+        tear_mem_new  ={'A': 0.0, 'B': 0.0},
+        T_d3_new=298.15, T_mem_new=298.15,
+        warnings_captured=[],
+        trace_bypass_psa_excess=0.0,
+        trace_bypass_mem_excess=0.0,
+        dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
+        dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
+    )
+    base.update(upstream)
+    # solver の penalty_hit 検出経路 (r_psa/r_mem/r_rx) に乗せるため、failed が
+    # r1/r2/r3 でも r_psa の CAPEX を sentinel に設定。r_psa は stub (CAPEX_total=1e9)
+    # でデフォルト sentinel になっているため追加処理不要。
+
+    # shortfall 計算
+    failed_col_design = {
+        'r1': design.dist1, 'r2': design.dist2, 'r3': design.dist3,
+    }.get(failed_col_key)
+    if failed_col_design is not None:
+        col_result = upstream.get(failed_col_key)
+        if col_result is not None:
+            shortfalls = _compute_dist_shortfalls(failed_col_key, col_result, failed_col_design)
+            base.update(shortfalls)
+    return base
 
 
 def run_one_pass(
@@ -274,6 +374,18 @@ def run_one_pass(
     pump1 = simulate_pump(fresh, P_out_target=design.dist1.P_col)
     with _capture_warnings("Dist1", warnings_captured):
         r1 = simulate_column1(pump1.outlet, tunables=design.dist1)
+
+    # 設計判断 (2026-05-20): Dist1 FUG が _penalty_result (Gilliland infeasible 等) を
+    # 返したとき、r1.top.F_in は全成分ゼロ → 下流 simulate_jt_expansion が
+    # `ValueError: 全成分流量がゼロ` で crash する経路があった (BO trial #0,1,9,12,...で多発)。
+    # 早期に penalty 経路に分岐し、shortfall を TPE 用 user_attr に格納する。
+    if not getattr(r1.equipment, 'feasible', True):
+        result = _build_penalty_after_column(
+            'r1', design,
+            fresh=fresh, pump1=pump1, r1=r1,
+        )
+        result['warnings_captured'] = warnings_captured
+        return result
 
     # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
     # 設計判断 (2026-05-08): 旧版は P を書き換えるだけで T を維持していたが
@@ -362,6 +474,21 @@ def run_one_pass(
                                     process_phase=StreamPhase.GAS)
         r2        = simulate_column2(desuper.outlet, tunables=design.dist2)
 
+    # 設計判断 (2026-05-20): Dist2 rigorous (Wang-Henke) 収束失敗時 → penalty_result。
+    # 下流 PSA / Mem は r2.top / r2.bottom がゼロ流量で組成計算が破綻するため早期 return。
+    # dT_max_rigorous が equipment に格納されているので shortfall を TPE に伝える。
+    if not getattr(r2.equipment, 'feasible', True):
+        result = _build_penalty_after_column(
+            'r2', design,
+            fresh=fresh, pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
+            reactor_inlet=reactor_inlet, r_rx=r_rx, rx_out=rx_out,
+            cooled=cooled,
+            comp2a=comp2a, intercool=intercool, comp2b=comp2b,
+            desuper=desuper, r2=r2,
+        )
+        result['warnings_captured'] = warnings_captured
+        return result
+
     # ---- Step 4: PSA ----
     # trace bypass (2026-05-19): PSA design モデルは C3 を扱えないため、入口の
     # C3 微量分 (≤ 1% of total) を design 計算から除き、後で offgas に合算する。
@@ -420,6 +547,23 @@ def run_one_pass(
     with _capture_warnings("Dist3", warnings_captured):
         r3 = simulate_column3(mem_to_dist3, tunables=design.dist3)
 
+    # 設計判断 (2026-05-20): Dist3 penalty 早期検出。Dist3 失敗時は tear_dist3 が
+    # ゼロ確定するので次反復で recycle_dist3 expansion が ValueError を再発する。
+    if not getattr(r3.equipment, 'feasible', True):
+        result = _build_penalty_after_column(
+            'r3', design,
+            fresh=fresh, pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
+            reactor_inlet=reactor_inlet, r_rx=r_rx, rx_out=rx_out,
+            cooled=cooled,
+            comp2a=comp2a, intercool=intercool, comp2b=comp2b,
+            desuper=desuper, r2=r2,
+            r_psa=r_psa, mem_precool=mem_precool, r_mem=r_mem, r3=r3,
+        )
+        result['warnings_captured'] = warnings_captured
+        result['trace_bypass_psa_excess'] = psa_trace_excess
+        result['trace_bypass_mem_excess'] = mem_trace_excess
+        return result
+
     # ---- tear stream の更新値 ----
     tear_dist3_new = {
         'A': r3.bottom.F_in.get('A', 0.0),
@@ -446,4 +590,7 @@ def run_one_pass(
         warnings_captured=warnings_captured,
         trace_bypass_psa_excess=psa_trace_excess,
         trace_bypass_mem_excess=mem_trace_excess,
+        # 正常完走時は全 0 (= TPE constraints_func で feasible 領域シグナル)
+        dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
+        dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
     )

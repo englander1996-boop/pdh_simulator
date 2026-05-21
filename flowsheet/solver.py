@@ -147,10 +147,32 @@ def run_recycle_convergence(
     converged   = False
     penalty_hit = False
     guard_hit   = False
+    timeout_hit = False
     diff        = 0.0
     it          = 0
 
+    # 設計判断 (2026-05-21): per-trial time budget。BO ログ分析で「production_short
+    # で 7 trial が 5h (run 全体の 80%) を占有」が判明。原因は rigorous Dist2 が重く、
+    # max_iter=100 まで recycle iter が回って production 未達で終わるケース。
+    # 60s で early abort して BO に「この領域は too slow = avoid」を伝える方が効率良い。
+    import os, time
+    _TIME_BUDGET_SEC = float(os.environ.get('PDH_TRIAL_TIME_BUDGET_SEC', '60'))
+    _t_iter_start = time.time()
+
     for it in range(1, s.max_iter + 1):
+        # 時間予算オーバー → solver-level penalty で早期終了
+        if time.time() - _t_iter_start > _TIME_BUDGET_SEC:
+            if verbose:
+                print(f"  {it:4d} | --- 時間予算 {_TIME_BUDGET_SEC:.0f}s 超過 → solver-level abort ---")
+            timeout_hit = True
+            # 既存 results が無ければダミーで埋める (penalty_hit と同等扱い)
+            if results is None:
+                from flowsheet.run_one_pass import _build_penalty_after_column
+                results = _build_penalty_after_column(
+                    'r1', design,
+                    fresh=None, pump1=None, r1=None,
+                )
+            break
         results = run_one_pass(
             state.tear_dist3, state.tear_mem,
             state.T_d3, state.T_mem,
@@ -158,15 +180,26 @@ def run_recycle_convergence(
             design, config,
         )
 
+        # 蒸留塔 (r1/r2/r3) の CAPEX も sentinel 値 (_PENALTY=1e9) を取り得る:
+        # FUG Gilliland infeasible や Wang-Henke 収束失敗で _penalty_result が返ったとき。
+        # 2026-05-20 追加: run_one_pass 側で塔 penalty 早期検出を入れたため、ここで
+        # 塔 CAPEX を penalty_hit に含めると Dist3-only 失敗 (PSA/Mem は正常) でも
+        # 正しく solver-level failure として扱える。
+        def _col_capex(key: str) -> float:
+            eq = getattr(results.get(key), 'equipment', None)
+            return getattr(eq, 'CAPEX', 0.0) if eq is not None else 0.0
         if (results['r_psa'].equipment.CAPEX_total >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
             results['r_mem'].equipment.CAPEX_total >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
-            results['r_rx'].equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN):
+            results['r_rx'].equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
+            _col_capex('r1') >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
+            _col_capex('r2') >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
+            _col_capex('r3') >= PENALTY_CAPEX_THRESHOLD_OKUYEN):
             # 設計判断 (2026-05-17): swing reactor の SV check 違反等で
             # Reactor_CAPEX = 1e9 (_PENALTY_CAPEX) になるケースも penalty_hit と扱う。
             # 旧版は PSA/Mem のみ check していたため、reactor 起因 penalty が下流の
             # compressor で「P_in=0」例外を引き起こしてた。
             if verbose:
-                print(f"  {it:4d} | --- Reactor/PSA/Mem ペナルティ発火 → 設計変数の見直しが必要 ---")
+                print(f"  {it:4d} | --- Reactor/PSA/Mem/Dist ペナルティ発火 → 設計変数の見直しが必要 ---")
             penalty_hit = True
             break
 
@@ -218,8 +251,10 @@ def run_recycle_convergence(
     if verbose and not (converged or penalty_hit or guard_hit):
         print(f"  → 内側未収束 ({s.max_iter} 回打ち切り、最終状態で集計)")
 
+    # 設計判断 (2026-05-21): timeout_hit は penalty_hit に集約 (runner.py への伝達)。
+    # 失敗理由は failure_reason 経由で別扱いするため、ここでは bool フラグだけ統合する。
     return results, InnerStatus(
-        converged=converged, penalty_hit=penalty_hit,
+        converged=converged, penalty_hit=(penalty_hit or timeout_hit),
         guard_hit=guard_hit, n_iter=it, final_diff=diff,
     )
 
