@@ -56,7 +56,15 @@ class SpecComplianceResult:
 
     c3h6_violation_pp:       float   # %pt (>0 のとき不足)
     h2_violation_pp:         float   # %pt
-    production_violation_pp: float   # %pt (target に対する不足率 × 100)
+    production_violation_pp: float   # %pt (target に対する不足率/超過率 × 100、両方とも正値)
+    # 設計判断 (2026-05-21): 旧版は production violation を符号なし 1 つの値で持っていたが
+    # 「下限不足」と「上限超過」で BO が動かすべき方向が逆 (F_fresh を上げる/下げる) なので、
+    # TPE が区別できるよう direction を追加 ('low' | 'high' | 'ok')。
+    # production_under_pp / production_over_pp として連続シグナル化し、runner.py が
+    # user_attrs に格納 → constraints_func で別エントリとして TPE に渡す。
+    production_direction:    str     # 'low' (下限不足) | 'high' (上限超過) | 'ok'
+    production_under_pp:     float   # 下限不足 [%pt] (direction='low' のときのみ > 0)
+    production_over_pp:      float   # 上限超過 [%pt] (direction='high' のときのみ > 0)
 
     @property
     def all_pass(self) -> bool:
@@ -111,10 +119,19 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
     h2_violation_pp   = max(0.0, (spec.h2_min_molfrac  - h2_mol)  * 100.0)
     if production_pass:
         production_violation_pp = 0.0
+        production_direction    = 'ok'
+        production_under_pp     = 0.0
+        production_over_pp      = 0.0
     elif production_kmol_h < threshold_low:
         production_violation_pp = (threshold_low - production_kmol_h) / target_kmol_h * 100.0
+        production_direction    = 'low'
+        production_under_pp     = production_violation_pp
+        production_over_pp      = 0.0
     else:  # overshoot
         production_violation_pp = (production_kmol_h - threshold_high) / target_kmol_h * 100.0
+        production_direction    = 'high'
+        production_under_pp     = 0.0
+        production_over_pp      = production_violation_pp
 
     return SpecComplianceResult(
         c3h6_purity_wtfrac     =c3h6_wt,
@@ -127,4 +144,7 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
         c3h6_violation_pp      =c3h6_violation_pp,
         h2_violation_pp        =h2_violation_pp,
         production_violation_pp=production_violation_pp,
+        production_direction   =production_direction,
+        production_under_pp    =production_under_pp,
+        production_over_pp     =production_over_pp,
     )

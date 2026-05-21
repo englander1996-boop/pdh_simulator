@@ -31,10 +31,18 @@ class _PhaseSwitchSampler(optuna.samplers.BaseSampler):
     QMC は constraints 非対応だが、phase1 中も failure_reason は記録され、
     phase2 突入時に TPE が全 trial 履歴 (= phase1 結果含む) から学習する。
     """
-    def __init__(self, phase1_sampler, phase2_sampler, switch_at_n_trials: int):
+    def __init__(self, phase1_sampler, phase2_sampler, switch_at_n_trials: int,
+                 constraints_func: Optional[Callable] = None,
+                 n_constraints: int = 0):
         self._s1 = phase1_sampler
         self._s2 = phase2_sampler
         self._switch_at = switch_at_n_trials
+        # 設計判断 (2026-05-21): QMC phase で constraint が記録されないため、TPE が
+        # phase 切替時に全 trial を「constraint 欠落」として警告する spam が
+        # study.py:51 から大量発生していた。after_trial で phase1 完了 trial に対し
+        # constraints_func を実行して system_attrs にダミー constraint を埋め込む。
+        self._constraints_func = constraints_func
+        self._n_constraints    = n_constraints
 
     def _active(self, study):
         n_complete = sum(1 for t in study.trials
@@ -62,6 +70,26 @@ class _PhaseSwitchSampler(optuna.samplers.BaseSampler):
             pass
 
     def after_trial(self, study, trial, state, values):
+        # 設計判断 (2026-05-21): QMC phase でも constraints を system_attrs に格納する。
+        # TPE は trial.system_attrs[_CONSTRAINTS_KEY] を見て constraint が無い trial を
+        # warning + lower priority 扱いするため、QMC trial に対しても同じ constraints_func
+        # を実行して保存する必要がある。Optuna は内部的に '_constraints' を使用する。
+        # active sampler の after_trial を呼ぶ前に self が constraints を格納すれば、
+        # 次回以降の sampling で警告が出なくなる。
+        if (self._constraints_func is not None
+                and state == optuna.trial.TrialState.COMPLETE):
+            try:
+                cons = self._constraints_func(trial)
+                # Optuna ≥3.0 で TPE が読むキー名 (内部 API)。
+                # constraint 値が存在することだけ示せれば良い。
+                # 設計判断 (2026-05-21): Optuna 内部の _CONSTRAINTS_KEY = "constraints"
+                # (optuna/samplers/_base.py)。これを system_attrs に格納すると TPE の
+                # constraint 欠落警告が抑制される。
+                study._storage.set_trial_system_attr(
+                    trial._trial_id, 'constraints', list(cons),
+                )
+            except Exception:
+                pass
         try:
             self._active(study).after_trial(study, trial, state, values)
         except AttributeError:
@@ -83,12 +111,23 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
       [5] dist2_dT_shortfall         : Dist2 Wang-Henke 収束不足 (= log10(dT_max/tol))
       [6] dist1_dT_shortfall         : Dist1 rigorous 不足 (FUG 運用時は 0)
       [7] dist3_dT_shortfall         : Dist3 rigorous 不足 (FUG 運用時は 0)
+      [8] psa_t_abs_shortfall        : PSA 吸着時間 < _T_ABS_MIN の log10 比 (2026-05-21 追加)
+      [9] psa_u_0_shortfall          : PSA 空塔速度 > _U0_MAX の log10 比 (2026-05-21 追加)
+      [10] psa_feed_shortfall        : PSA feed 異常 (no_non_C3/no_CH4) で 1.0 (2026-05-21 追加)
+      [11] reactor_sv_shortfall      : Reactor SV 範囲外への log10 比 (2026-05-21 追加)
+      [12] reactor_other_shortfall   : Reactor その他 penalty (sim_failure 等) で 1.0 (2026-05-21 追加)
+      [13] production_under_pp       : 生産量下限不足 [%pt] (2026-05-21 追加、F_fresh ↑ シグナル)
+      [14] production_over_pp        : 生産量上限超過 [%pt] (2026-05-21 追加、F_fresh ↓ シグナル)
 
     設計判断 (2026-05-20): 旧版は [proxy, feas_flag] の 2 制約のみで、ValueError
     (Dist1 FUG 全ゼロ)・Wang-Henke 失敗 (Dist2) 等の異種 infeasibility が同じ
     binary 信号に潰されていた → TPE が「方向」を学習できなかった。本版は塔別に
     N 不足 / dT 不足の **連続値** を追加し、infeasible 領域内でも勾配が立つように
     する (例: Dist1 N=16 で不足比 0.06、N=10 で 0.5 → TPE は 0.06 を相対的に優先)。
+
+    設計判断 (2026-05-21): PSA silent _penalty_result() 経路 (t_abs<MIN, u_0>MAX 等)
+    を連続値化。main_20260521_131507 で 300/300 trial が PSA silent penalty で stuck し、
+    BO が「L/D を上げれば feasible に出る」を学習できなかった問題への対処。
 
     TPE は constraint 違反 trial を「達成不可能と判断するための情報」として使う。
     n_startup_trials 後の TPE モデルに非線形な選好を入れられる。
@@ -102,7 +141,15 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     d1_dT = trial.user_attrs.get('dist1_dT_shortfall', 0.0)
     d2_dT = trial.user_attrs.get('dist2_dT_shortfall', 0.0)
     d3_dT = trial.user_attrs.get('dist3_dT_shortfall', 0.0)
-    return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT]
+    psa_t = trial.user_attrs.get('psa_t_abs_shortfall', 0.0)
+    psa_u = trial.user_attrs.get('psa_u_0_shortfall', 0.0)
+    psa_f = trial.user_attrs.get('psa_feed_shortfall', 0.0)
+    rx_sv = trial.user_attrs.get('reactor_sv_shortfall', 0.0)
+    rx_ot = trial.user_attrs.get('reactor_other_shortfall', 0.0)
+    prod_under = trial.user_attrs.get('production_under_pp', 0.0)
+    prod_over  = trial.user_attrs.get('production_over_pp', 0.0)
+    return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
+            psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over]
 
 
 def make_sampler(
@@ -153,6 +200,9 @@ def make_sampler(
                     phase1_sampler=qmc,
                     phase2_sampler=tpe,
                     switch_at_n_trials=n_startup,
+                    # 設計判断 (2026-05-21): QMC trial にも constraints を埋め込み、
+                    # TPE 切替後の「Trial X does not have constraint values」spam を抑制。
+                    constraints_func=cf,
                 )
             except Exception as e:
                 # QMCSampler が使えない optuna 旧版なら TPE 単体にフォールバック

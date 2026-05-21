@@ -276,6 +276,15 @@ class PSAEquipmentData:
     H2_loss_purge_kmolh:           float = float('nan')  # パージ損失 [kmol/h]
     # 吸着材交換 OPEX !仮置き (ADSORBENT_LIFETIME_YEARS に依存)
     OPEX_adsorbent_okuyen_per_year: float = float('nan')  # 吸着材年間交換費 [億円/年]
+    # ---- penalty 診断 (2026-05-21 追加、BO の TPE constraints_func 用) ----
+    # 設計判断: silent _penalty_result() 経路が BO に「方向のシグナル」を渡せず
+    # 全 trial が無方向で死ぬ問題を解消するための診断フィールド。
+    # penalty 発火時に「どの条件で死んだか」「actual 値」を保持し、run_one_pass が
+    # log10(MIN/actual) 等の連続 shortfall を計算して TPE に渡せるようにする。
+    # 通常完走時は penalty_reason='' のままで識別する (CAPEX_total < threshold で判定)。
+    penalty_reason:    str   = ''     # '' | 't_abs_below_min' | 'u_0_above_max' | 'no_non_C3_feed' | 'no_CH4_feed' | 'breakthrough_no_converge' | 'mask_lt_2'
+    t_abs_actual_s:    float = 0.0    # penalty 発火時の CSS 補正後 t_abs [s] (0 なら未計算)
+    u_0_actual:        float = 0.0    # penalty 発火時の空塔速度 [m/s] (0 なら未計算)
 
 
 @dataclass
@@ -295,14 +304,38 @@ class PSASimulationResult:
 _PENALTY = 1e9
 
 
-def _penalty_result() -> PSASimulationResult:
-    """計算不能な条件のときに返すペナルティ結果。"""
+def _penalty_result(
+    reason:         str   = '',
+    t_abs_actual:   float = 0.0,
+    u_0_actual:     float = 0.0,
+) -> PSASimulationResult:
+    """計算不能な条件のときに返すペナルティ結果。
+
+    Parameters
+    ----------
+    reason : str
+        発火条件のラベル ('t_abs_below_min' 等)。BO の TPE constraints_func で
+        連続 shortfall を計算するために run_one_pass が読み取る。
+    t_abs_actual : float
+        CSS 補正後の実 t_abs [s]。t_abs_below_min 経路でのみ意味を持つ。
+    u_0_actual : float
+        実空塔速度 [m/s]。u_0_above_max 経路でのみ意味を持つ。
+
+    設計判断 (2026-05-21): 旧版は引数なしの silent penalty で、BO は「どこを突けば
+    feasible に出るか」のシグナルを得られず stuck していた (main_20260521_131507
+    で 300/300 trial 全滅)。本版は理由ラベル + 実値を equipment に格納して
+    run_one_pass で psa_t_abs_shortfall を計算 → TPE constraints_func で
+    「t_abs MIN への接近度」を学習させる。
+    """
     zero = {k: 0.0 for k in ['A', 'B', 'C', 'D', 'E', 'F']}
     eq = PSAEquipmentData(
         N_abs_parallel=0, N_cycle_sets=0, N_total_columns=0,
         t_abs_sec=0.0, t_des_sec=0.0, u_0=0.0,
         W_adsorbent_kg=0.0, Q_preheat_kW=0.0,
         CAPEX_total=_PENALTY,
+        penalty_reason=reason,
+        t_abs_actual_s=t_abs_actual,
+        u_0_actual=u_0_actual,
     )
     return PSASimulationResult(
         product=dict(zero), offgas=dict(zero),
@@ -555,17 +588,31 @@ def simulate_psa_system(
     )
 
     if F_non_C3_mol_s <= 0.0:
-        return _penalty_result()
+        warnings.warn(
+            f"PSA penalty: F_non_C3_mol_s={F_non_C3_mol_s:.3e} ≤ 0 (上流 Dist2 で非 C3 がほぼ流れていない)。"
+            f" feed.F_in keys: {[k for k,v in feed.F_in.items() if v > 0]}。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='no_non_C3_feed')
 
     u_0 = F_non_C3_mol_s * Z * R * fixed.T_abs / (feed.P_in * A_col)  # [m/s]
 
     # 空塔速度が上限超過: LSODA が極めて小さいタイムステップを要求しフリーズする
     if u_0 > _U0_MAX:
-        return _penalty_result()
+        warnings.warn(
+            f"PSA penalty: u_0={u_0:.3f}m/s > _U0_MAX={_U0_MAX} (D_col={D_col:.2f}m が小さい / 流量が大きい)。"
+            f" D_col を大きく or 流量を減らす方向に探索を誘導。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='u_0_above_max', u_0_actual=u_0)
 
     # CH4 濃度がゼロの場合は破過検知不能
     if C_feed_ads[0] <= 0.0:
-        return _penalty_result()
+        warnings.warn(
+            f"PSA penalty: C_CH4={C_feed_ads[0]:.3e} mol/m³ ≤ 0 (上流から CH4 が流れていない)。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='no_CH4_feed')
 
     # -------------------------------------------------------------------------
     # 3. 吸着 PDE
@@ -626,7 +673,16 @@ def simulate_psa_system(
 
     # CSS補正後 t_abs が極小の場合: scale 発散防止のためペナルティを返す
     if t_abs < _T_ABS_MIN:
-        return _penalty_result()
+        # 設計判断 (2026-05-21): 旧版は silent return で BO が「どこへ逃げれば良いか」
+        # 学習できなかった。warning + 連続 shortfall (run_one_pass で計算) で TPE に
+        # 「あと何倍 L/D を増やせば feasible に出るか」のシグナルを渡す。
+        warnings.warn(
+            f"PSA penalty: t_abs={t_abs:.1f}s (CSS 補正後) < _T_ABS_MIN={_T_ABS_MIN}s"
+            f" (D_col={D_col:.2f}m, L_bed={L_bed:.2f}m, desorption_target={design.desorption_target:.3f},"
+            f" u_0={u_0:.3f}m/s)。L_bed を増やすか D_col を増やすか desorption_target を上げる方向に探索を誘導。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='t_abs_below_min', t_abs_actual=t_abs, u_0_actual=u_0)
 
     if not converged:
         warnings.warn(
@@ -638,7 +694,7 @@ def simulate_psa_system(
             f" CAPEX_total=1e9 億円 (penalty sentinel) を返却。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(reason='breakthrough_no_converge', u_0_actual=u_0)
 
     # -------------------------------------------------------------------------
     # 4. 脱着時間
@@ -691,7 +747,12 @@ def simulate_psa_system(
     # sol_t / C_outlet_t は _run_adsorption から受け取った生データ
     _mask = sol_t <= t_abs
     if _mask.sum() < 2:
-        return _penalty_result()
+        warnings.warn(
+            f"PSA penalty: sol_t <= t_abs を満たす点が {_mask.sum()} 個 (< 2)。"
+            f" t_abs={t_abs:.1f}s, sol_t.size={sol_t.size}, sol_t[-1]={sol_t[-1]:.1f}s。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='mask_lt_2', t_abs_actual=t_abs, u_0_actual=u_0)
     _t_trunc = sol_t[_mask]
     _C_trunc = C_outlet_t[:, _mask]
     # t_abs が sol_t の最後のサンプル点より後にある場合、線形補間で端点を追加

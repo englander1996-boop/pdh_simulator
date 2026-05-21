@@ -119,6 +119,17 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         trial.set_user_attr('h2_purity_molfrac',  result.specs.h2_purity_molfrac)
         trial.set_user_attr('production_kmol_h',  result.specs.production_kmol_h)
         trial.set_user_attr('target_kmol_h',      result.specs.target_kmol_h)
+        # 設計判断 (2026-05-21): production violation の方向を TPE に伝える。
+        # 旧版は production_violation_pp 単一値で under/over を区別できず、TPE が
+        # F_fresh を上下どちらに動かせば良いか学べなかった (main_20260521_160951
+        # でソフト fail 6 件中 3 件 over・3 件 under の混在で TPE 混乱)。
+        # 別シグナルで提供することで TPE が「under は F_fresh ↑」「over は F_fresh ↓」
+        # を独立に学習可能になる。
+        trial.set_user_attr('production_direction', result.specs.production_direction)
+        if result.specs.production_under_pp > 0:
+            trial.set_user_attr('production_under_pp', float(result.specs.production_under_pp))
+        if result.specs.production_over_pp > 0:
+            trial.set_user_attr('production_over_pp', float(result.specs.production_over_pp))
 
     # rigorous プロキシ罰則の内訳 (Phase A デバッグ用)
     if result.solver is not None and result.solver.one_pass:
@@ -145,3 +156,19 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
                 v = op.get(key, 0.0) or 0.0
                 if v > 0:
                     trial.set_user_attr(key, float(v))
+
+        # 設計判断 (2026-05-21): PSA silent penalty 経路の連続シグナル。
+        # psa_system.py で _T_ABS_MIN/_U0_MAX 等を理由ラベル付きで返す改修と対応。
+        # run_one_pass._compute_psa_shortfall が以下 3 キーを一括計算済み。
+        for psa_key in ('psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall'):
+            v = op.get(psa_key, 0.0) or 0.0
+            if v > 0:
+                trial.set_user_attr(psa_key, float(v))
+
+        # 設計判断 (2026-05-21): Reactor SV silent penalty も同パターンで連続シグナル化。
+        # swing.py の SV 範囲外チェックで penalty_reason='sv_out_of_range' を埋め、
+        # run_one_pass._compute_reactor_shortfall が log10 比で reactor_sv_shortfall を生成。
+        for rx_key in ('reactor_sv_shortfall', 'reactor_other_shortfall'):
+            v = op.get(rx_key, 0.0) or 0.0
+            if v > 0:
+                trial.set_user_attr(rx_key, float(v))

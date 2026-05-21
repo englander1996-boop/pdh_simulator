@@ -238,6 +238,105 @@ def _build_penalty_one_pass_result(
 # 変換し、同時に N_shortfall / dT_shortfall を計算して runner.py 経由で
 # trial.user_attrs に格納する (TPE が「あとどれだけ N/dT が足りない領域か」を学習)。
 _RIG_TOL_K = 0.05   # Wang-Henke 収束 tol (src/distillation_rigorous.py と同期)
+# PSA penalty 連続シグナルの基準 (psa_system.py の _T_ABS_MIN, _U0_MAX と同期)
+_PSA_T_ABS_MIN_S = 60.0
+_PSA_U0_MAX_MS   = 1.0
+# Reactor SV penalty 連続シグナルの基準 (swing.py の FixedParams.SV_{min,max}_m_per_s と同期)
+_REACTOR_SV_MIN_MS = 0.5
+_REACTOR_SV_MAX_MS = 3.0
+
+
+def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
+    """Reactor penalty 経路から TPE constraints_func 用の連続 shortfall を計算。
+
+    Returns
+    -------
+    dict
+        - 'reactor_sv_shortfall' [-] : SV 範囲外への log10 距離。
+          SV < min → log10(SV_MIN / SV)、SV > max → log10(SV / SV_MAX)、範囲内 → 0。
+        - 'reactor_other_shortfall' [-] : SV 以外の penalty (input_invalid, sim_failure,
+          volume_zero, capex_exception) で 1.0、正常完走で 0。
+
+    設計判断 (2026-05-21): PSA shortfall と同じパターン。SV < min なら D を小さく or
+    並列数を増やす方向、SV > max なら D を大きく or 並列数を減らす方向に TPE が
+    学習できるよう正負を log10 比で連続化。
+    """
+    out = {
+        'reactor_sv_shortfall':    0.0,
+        'reactor_other_shortfall': 0.0,
+    }
+    eq = getattr(r_rx, 'equipment', None)
+    if eq is None:
+        return out
+    reason = getattr(eq, 'penalty_reason', '') or ''
+    if reason == '':
+        return out  # 正常完走
+    if reason == 'sv_out_of_range':
+        sv = getattr(eq, 'SV_actual', 0.0) or 0.0
+        if sv > 0 and sv < _REACTOR_SV_MIN_MS:
+            out['reactor_sv_shortfall'] = math.log10(max(_REACTOR_SV_MIN_MS / sv, 1.0))
+        elif sv > _REACTOR_SV_MAX_MS:
+            out['reactor_sv_shortfall'] = math.log10(max(sv / _REACTOR_SV_MAX_MS, 1.0))
+        else:
+            out['reactor_sv_shortfall'] = 1.0  # 想定外 (SV=0 等)
+    else:
+        # input_invalid / sim_failure / volume_zero / capex_exception
+        out['reactor_other_shortfall'] = 1.0
+    return out
+
+
+def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
+    """PSA penalty 経路から TPE constraints_func 用の連続 shortfall を計算。
+
+    Returns
+    -------
+    dict
+        - 'psa_t_abs_shortfall' [-] : log10(_T_ABS_MIN / t_abs_actual)。
+          t_abs_below_min 経路でのみ > 0 (例: t_abs=37s → log10(60/37)≈0.21)。
+          mask_lt_2 でも t_abs_actual が伝わるので 0 になりうる。
+        - 'psa_u_0_shortfall'  [-] : log10(u_0_actual / _U0_MAX)。
+          u_0_above_max 経路でのみ > 0 (例: u_0=1.5m/s → log10(1.5/1.0)≈0.18)。
+        - 'psa_feed_shortfall' [-] : feed 異常 (no_non_C3_feed / no_CH4_feed) で 1.0。
+          これらは上流 (Dist2 rigorous) が異常組成を返した場合に発火する稀ケース。
+
+    設計判断 (2026-05-21): silent _penalty_result() の代替シグナル。BO の TPE
+    constraints_func で feasible 境界への接近度を学習させる目的。正常完走時は
+    すべて 0.0 を返す (penalty_reason='')。
+    """
+    out = {
+        'psa_t_abs_shortfall': 0.0,
+        'psa_u_0_shortfall':   0.0,
+        'psa_feed_shortfall':  0.0,
+    }
+    eq = getattr(r_psa, 'equipment', None)
+    if eq is None:
+        return out
+    reason = getattr(eq, 'penalty_reason', '') or ''
+    if reason == '':
+        return out  # 正常完走
+
+    t_abs = getattr(eq, 't_abs_actual_s', 0.0) or 0.0
+    u_0   = getattr(eq, 'u_0_actual',     0.0) or 0.0
+
+    if reason == 't_abs_below_min' and t_abs > 0:
+        out['psa_t_abs_shortfall'] = math.log10(max(_PSA_T_ABS_MIN_S / t_abs, 1.0))
+    elif reason == 'u_0_above_max' and u_0 > 0:
+        out['psa_u_0_shortfall'] = math.log10(max(u_0 / _PSA_U0_MAX_MS, 1.0))
+    elif reason in ('no_non_C3_feed', 'no_CH4_feed'):
+        out['psa_feed_shortfall'] = 1.0
+    elif reason == 'breakthrough_no_converge':
+        # 物理的には t_abs > t_ads_max (= 7200s) → 「破過遅すぎ」= 設計過大
+        # BO 視点では desorption_target を下げる or L を下げる方向。
+        # 連続シグナルは作りにくいので t_abs_shortfall に弱い負方向 (= -0.5) を入れる
+        # ... よりは別エントリで 1.0 を入れて TPE に「ここは避ける」のみ伝える。
+        out['psa_t_abs_shortfall'] = 1.0
+    elif reason == 'mask_lt_2':
+        # 通常は t_abs_below_min と同じ症状の派生
+        if t_abs > 0:
+            out['psa_t_abs_shortfall'] = math.log10(max(_PSA_T_ABS_MIN_S / t_abs, 1.0))
+        else:
+            out['psa_t_abs_shortfall'] = 1.0
+    return out
 
 
 def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, float]:
@@ -433,11 +532,17 @@ def run_one_pass(
     # 検査まで到達できない。早期に「penalty 状態で zero 流」のダミーを返して下流の
     # 全装置を penalty 結果でスキップする。solver 側で Reactor_CAPEX >=
     # PENALTY_CAPEX_THRESHOLD_OKUYEN をもって penalty_hit と判定する。
+    # 設計判断 (2026-05-21): Reactor SV penalty 経路の連続シグナルを抽出。
+    # 旧版は silent _penalty_result() で BO が「D を上下どちらに動かせば良いか」
+    # 分からなかった。reactor_sv_shortfall を user_attr → constraints_func に渡す。
+    reactor_shortfalls = _compute_reactor_shortfall(r_rx)
     if r_rx.equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
-        return _build_penalty_one_pass_result(
+        result = _build_penalty_one_pass_result(
             r_rx, reactor_inlet, dist1_top_rx, recycle_dist3, recycle_mem,
             r1=r1, fresh=fresh, pump1=pump1,
         )
+        result.update(reactor_shortfalls)
+        return result
 
     rx_out = ProcessStream(
         F_in=r_rx.effluent.F_out_avg,
@@ -487,6 +592,8 @@ def run_one_pass(
             desuper=desuper, r2=r2,
         )
         result['warnings_captured'] = warnings_captured
+        # Reactor が成功していても shortfall フィールドは正常値 0 で伝播 (key 必須)
+        result.update(reactor_shortfalls)
         return result
 
     # ---- Step 4: PSA ----
@@ -501,6 +608,11 @@ def run_one_pass(
     )
     with _capture_warnings("PSA", warnings_captured):
         r_psa = simulate_psa_system(design.psa, psa_feed, PSAFixedParams())
+    # 設計判断 (2026-05-21): PSA silent penalty 経路に対する連続 shortfall を抽出。
+    # solver.py:191 が CAPEX sentinel で penalty_hit を判定するが、その情報のみだと
+    # BO は「どう逃げれば良いか」分からない。psa_t_abs_shortfall 等を計算して
+    # one_pass dict に積み、objective.py 経由で TPE constraints_func に届ける。
+    psa_shortfalls = _compute_psa_shortfall(r_psa)
     # bypass 分を offgas に合算 (マスバランス保持)。r_psa.offgas は Dict[str,float]。
     if any(v > 0 for v in psa_bypass.values()):
         for c, v in psa_bypass.items():
@@ -562,6 +674,9 @@ def run_one_pass(
         result['warnings_captured'] = warnings_captured
         result['trace_bypass_psa_excess'] = psa_trace_excess
         result['trace_bypass_mem_excess'] = mem_trace_excess
+        # PSA shortfall も伝播 (Dist3 失敗経路でも PSA penalty 情報を残す)
+        result.update(psa_shortfalls)
+        result.update(reactor_shortfalls)
         return result
 
     # ---- tear stream の更新値 ----
@@ -593,4 +708,8 @@ def run_one_pass(
         # 正常完走時は全 0 (= TPE constraints_func で feasible 領域シグナル)
         dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
         dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
+        # PSA shortfall (正常完走時は全 0、penalty 経路でのみ > 0)
+        **psa_shortfalls,
+        # Reactor shortfall (正常完走時は全 0、SV 範囲外等の penalty 経路でのみ > 0)
+        **reactor_shortfalls,
     )
