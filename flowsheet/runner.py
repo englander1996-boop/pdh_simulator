@@ -81,12 +81,17 @@ _COLUMN_RECOVERY_SPECS = {
 # 連続 penalty 係数 [億円/年・per fraction-超過]。
 #  目的: 旧 (warning only) では BO は「PSA に C3H6 を多量に流す」設計を無自覚に選好し、
 #        BO ベスト trial (例: #32) が rigorous 再評価で死ぬ原因になっていた。
-#  選定根拠: 既存 proxy_penalty (rigorous で発火) のスケールに合わせる。例えば
-#        B 漏れ 1.03% (excess 0.03%pt = 0.0003) → +1.5 億円 → coef ≈ 5000 億円/fraction。
-#        1%pt (= 0.01) 超過で 50 億円。spec 違反 (~10-50 億円) と同オーダー。
-#  これにより BO は「閾値超え領域 = ペナルティ加算」を学習し、Dist2 設計を
-#  自動的に詰める方向に誘導される。
-_TRACE_BYPASS_PENALTY_COEF_OKUYEN = 5000.0
+#
+# 設計判断 (2026-05-21): 5000 → 1000 に引き下げ。
+#  経緯: 旧 5000 は「proxy_penalty (rigorous で発火) のスケールに合わせる」と決められた
+#        値だが、(a) proxy_penalty の rigorous leak 部分を 2026-05-21 にスキップ化した
+#        (二重計上回避) ため、本 penalty が単独で「C3 漏れコスト」を担うようになり、
+#        (b) 1pp 超過で 50 億円は実コスト (PSA 増床数億 + C3 売り損 数億 = 10-20 億)
+#        に対し 5-10 倍過大。warm-start trial 247 で TAC 167 領域の良設計が 86 億の
+#        bypass で infeas 化していた (main_20260521_092409 #0,#2,#3 が TAC 250-280)。
+#  新値: 1000 億円/fraction → 1pp 超過で 10 億、5pp で 50 億。spec 違反 (1pp で 100 億)
+#        より弱く、実コスト (10-20 億) に近い水準。
+_TRACE_BYPASS_PENALTY_COEF_OKUYEN = 1000.0
 
 
 def evaluate(
@@ -267,8 +272,13 @@ def evaluate(
         total_violation_pp += specs.production_violation_pp
         n_violations += 1
 
-    soft_penalty = (n_violations * pen.spec_base_okuyen
-                    + total_violation_pp * pen.spec_coef_okuyen)
+    # 設計判断 (2026-05-21): adaptive penalty scale。
+    # 序盤は係数を弱めて探索を広げ、終盤は強化して infeasible 領域から強制退出。
+    # 詳細は optimization/penalty_scale.py。
+    from optimization.penalty_scale import get_scale as _pscale
+    _scale = _pscale()
+    soft_penalty = (n_violations * pen.spec_base_okuyen * _scale
+                    + total_violation_pp * pen.spec_coef_okuyen * _scale)
 
     # ---- (b') rigorous プロキシ罰則 (2026-05-19 Phase A) ----
     # 各蒸留塔の equipment.proxy_penalty_okuyen を合算して soft_penalty にマージ。
@@ -289,9 +299,10 @@ def evaluate(
             if reason:
                 proxy_reasons.append(f"{col_key}: {reason}")
     if proxy_penalty_total > 0:
-        soft_penalty += proxy_penalty_total
+        scaled_proxy = proxy_penalty_total * _scale
+        soft_penalty += scaled_proxy
         failures.append(
-            f"rigorous プロキシ罰則 +{proxy_penalty_total:.1f} 億円/年 ({' | '.join(proxy_reasons)})"
+            f"rigorous プロキシ罰則 +{scaled_proxy:.1f} 億円/年 ({' | '.join(proxy_reasons)})"
         )
 
     # ---- (b'') PSA/Mem trace bypass 連続 penalty (2026-05-20) ----
@@ -303,7 +314,7 @@ def evaluate(
     mem_excess = one_pass_dict.get('trace_bypass_mem_excess', 0.0) or 0.0
     trace_bypass_excess_total = psa_excess + mem_excess
     if trace_bypass_excess_total > 0:
-        bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN
+        bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN * _scale
         soft_penalty += bypass_penalty
         failures.append(
             f"PSA/Mem trace bypass 閾値超過 +{bypass_penalty:.1f} 億円/年 "
