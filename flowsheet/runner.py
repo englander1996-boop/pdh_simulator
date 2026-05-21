@@ -263,12 +263,30 @@ def evaluate(
         total_violation_pp += specs.h2_violation_pp
         n_violations += 1
     if not specs.production_pass:
-        failures.append(
-            f"生産量 {specs.production_kmol_h:.2f} < target × "
-            f"{1.0 - config.spec.production_min_relative:.3f} = "
-            f"{specs.target_kmol_h * (1.0 - config.spec.production_min_relative):.2f} kmol/h "
-            f"(違反 {specs.production_violation_pp:.3f}pp)"
-        )
+        # 設計判断 (2026-05-21): 旧版は下限フォーマット固定でメッセージ生成していたため、
+        # 上限超過時に「生産量 1252 < 1176」のような数値矛盾表示になっていた
+        # (main_20260521_160951 で発見)。direction で分岐して正確に表示する。
+        if specs.production_direction == 'low':
+            threshold_low_kmolh = specs.target_kmol_h * (1.0 - config.spec.production_min_relative)
+            failures.append(
+                f"生産量不足 {specs.production_kmol_h:.2f} < 下限 "
+                f"target × {1.0 - config.spec.production_min_relative:.3f} = "
+                f"{threshold_low_kmolh:.2f} kmol/h "
+                f"(違反 {specs.production_under_pp:.3f}pp)"
+            )
+        elif specs.production_direction == 'high':
+            threshold_high_kmolh = specs.target_kmol_h * (1.0 + config.spec.production_max_relative)
+            failures.append(
+                f"生産量超過 {specs.production_kmol_h:.2f} > 上限 "
+                f"target × {1.0 + config.spec.production_max_relative:.3f} = "
+                f"{threshold_high_kmolh:.2f} kmol/h "
+                f"(超過 {specs.production_over_pp:.3f}pp)"
+            )
+        else:  # 'ok' なのに pass=False ということは無いはず (ガード)
+            failures.append(
+                f"生産量 {specs.production_kmol_h:.2f} (target {specs.target_kmol_h:.2f}) "
+                f"direction={specs.production_direction!r}"
+            )
         total_violation_pp += specs.production_violation_pp
         n_violations += 1
 
@@ -386,7 +404,13 @@ def evaluate(
         eff_econ = economics_hi
     else:
         eff_econ = economics
-    effective_TAC = eff_econ.TAC - eff_econ.total_revenue + soft_penalty
+    # 設計判断 (2026-05-21): 純 TAC 最小化に変更 (旧: TAC - revenue + penalty)。
+    # ユーザー指示「赤字はいい、TAC を最小化したい」に従い、revenue 項を除去。
+    # production 制約は spec の下限ペナルティで担保される (n_violations × spec_base +
+    # violation_pp × spec_coef × scale)。revenue を BO 評価から外すことで、
+    # 「装置小型化 → TAC ↓」の方向に純粋にバイアスがかかり、production 下限を満たす
+    # 最も安い設計に収束する想定。
+    effective_TAC = eff_econ.TAC + soft_penalty
 
     # run_one_pass で捕捉した warning を取り出す (silent fallback 追跡用)
     one_pass = solver_result.one_pass or {}

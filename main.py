@@ -34,6 +34,15 @@ try:
 except Exception:
     pass
 
+# 設計判断 (2026-05-21): per-trial 時間予算を 60s → 120s に引き上げ。
+# 旧 60s では rigorous Dist2 + recycle iter が回るボーダーラインの trial が
+# わずかなオーバーヘッドで timeout 打ち切り → CAPEX 扱いになり、本来 soft fail
+# (生産量未達等) として TPE に方向シグナルが渡るはずの trial を取りこぼしていた
+# (例: main_20260521_160951 trial 3 は 55.1s で完走 (TAC=390.81) → 同 params の
+# 173003 trial 3 は 68.7s で timeout → CAPEX hit に劣化)。
+# setdefault なのでユーザーが環境変数で別途上書き可能。
+os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '120')
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 

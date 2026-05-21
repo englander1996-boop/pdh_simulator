@@ -234,6 +234,13 @@ class EquipmentCost:
     N_reactors_total:      int    # 総反応器基数
     Catalyst_Weight_Total: float  # システム全体触媒総量 [kg]
     Reactor_CAPEX:         float  # 全基分建設コスト合計 [億円]
+    # ---- penalty 診断 (2026-05-21 追加、BO の TPE constraints_func 用) ----
+    # 設計判断: silent _penalty_result() 経路が BO に方向シグナルを渡せず stuck していた
+    # (main_20260521_154027 で SV 違反 trial 多発、D_reactor を上下どちらに動かすか分からない)。
+    # PSA と同じパターンで penalty_reason + SV_actual を保持し、run_one_pass で
+    # reactor_sv_shortfall を計算して TPE に渡す。正常完走時は penalty_reason='' のまま。
+    penalty_reason:   str   = ''     # '' | 'sv_out_of_range' | 'input_invalid' | 'sim_failure' | 'volume_zero' | 'capex_exception'
+    SV_actual:        float = 0.0    # SV 違反時の実 SV [m/s] (0 なら未計算)
 
 
 @dataclass
@@ -258,8 +265,25 @@ class SimulationResult:
 _PENALTY_CAPEX: float = 1e9  # [億円] 最適化への無効シグナル
 
 
-def _penalty_result() -> SimulationResult:
-    """計算不能条件のときに返すペナルティ SimulationResult。"""
+def _penalty_result(
+    reason:    str   = '',
+    SV_actual: float = 0.0,
+) -> SimulationResult:
+    """計算不能条件のときに返すペナルティ SimulationResult。
+
+    Parameters
+    ----------
+    reason : str
+        発火条件のラベル ('sv_out_of_range' 等)。BO 用 TPE constraints_func で
+        連続 shortfall を計算するために run_one_pass が読み取る。
+    SV_actual : float
+        実 SV [m/s]。sv_out_of_range 経路でのみ意味を持つ。
+
+    設計判断 (2026-05-21): PSA と同じパターン。旧版は引数なし silent penalty で
+    BO は「D_reactor を上下どちらに動かせば良いか」分からなかった。本版は
+    SV_actual を equipment に格納して run_one_pass で reactor_sv_shortfall を
+    計算 → TPE constraints_func で「SV 範囲への接近度」を学習させる。
+    """
     return SimulationResult(
         effluent=EffluentStream(
             F_out_avg={c: 0.0 for c in _COMPS},
@@ -274,6 +298,8 @@ def _penalty_result() -> SimulationResult:
             N_reactors_total=0,
             Catalyst_Weight_Total=0.0,
             Reactor_CAPEX=_PENALTY_CAPEX,
+            penalty_reason=reason,
+            SV_actual=SV_actual,
         ),
         performance=PerformanceMetrics(
             Conversion=0.0,
@@ -443,13 +469,13 @@ def simulate_swing_reactor_system(
     """
     # ---- 入力バリデーション ----
     if design.t_cyc <= 0 or design.z_cat <= 0 or design.D <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='input_invalid')
     if design.T_in <= 0 or feed.T_feed <= 0 or feed.P_in <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='input_invalid')
     if any(v < 0 for v in feed.F_in.values()):
-        return _penalty_result()
+        return _penalty_result(reason='input_invalid')
     if sum(feed.F_in.values()) <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='input_invalid')
 
     # ---- 時間方向サンプリングと空間積分 ----
     if n_time_samples < 2:
@@ -460,7 +486,7 @@ def simulate_swing_reactor_system(
         )
         F_out, T_out = _simulate_one_time(design, feed, fixed, 0.0)
         if F_out is None:
-            return _penalty_result()
+            return _penalty_result(reason='sim_failure')
         F_out_avg_kmolh = {comp: float(F_out[i]) * 3600.0 / 1000.0
                            for i, comp in enumerate(_COMPS)}
         T_out_avg = T_out
@@ -471,7 +497,7 @@ def simulate_swing_reactor_system(
         for t in t_samples:
             F_out, T_out = _simulate_one_time(design, feed, fixed, float(t))
             if F_out is None:
-                return _penalty_result()
+                return _penalty_result(reason='sim_failure')
             F_out_list.append(F_out)
             T_out_list.append(T_out)
 
@@ -515,6 +541,9 @@ def simulate_swing_reactor_system(
     SV_m_per_s = Q_vol_m3_s / (A_cross * N_parallel) if A_cross > 0 else 0.0
     if not (fixed.SV_min_m_per_s <= SV_m_per_s <= fixed.SV_max_m_per_s):
         # 範囲外: infeasible として返す
+        # 設計判断 (2026-05-21): SV_actual を equipment に積んで run_one_pass の
+        # _compute_reactor_shortfall で連続シグナル化。SV < min なら「D 小か N_parallel↑」、
+        # SV > max なら「D 大か N_parallel↓」を TPE に伝える。
         warnings.warn(
             f"swing reactor: SV={SV_m_per_s:.2f} m/s が範囲 "
             f"[{fixed.SV_min_m_per_s}, {fixed.SV_max_m_per_s}] m/s 外 "
@@ -522,7 +551,7 @@ def simulate_swing_reactor_system(
             f"P_in={feed.P_in/1e5:.2f}bar) — infeasible 化",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(reason='sv_out_of_range', SV_actual=SV_m_per_s)
 
     N_swing_sets = math.ceil(fixed.t_regen / design.t_cyc) + 1
     N_reactors_total = N_parallel * N_swing_sets
@@ -535,7 +564,7 @@ def simulate_swing_reactor_system(
     catalyst_weight_total = V_cat_total * N_swing_sets * fixed.rho_b  # [kg]
 
     if V_vessel_actual <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='volume_zero')
 
     # CAPEX: Bare Module Cost法による推算（縦型プロセス容器）
     try:
