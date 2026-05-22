@@ -327,6 +327,13 @@ def evaluate(
     # run_one_pass の _apply_trace_bypass が検出した「閾値超過分」を effective_TAC に
     # 加算。proxy_penalty は rigorous でしか発火しないため BO (FUG) では見えなかった
     # 「Dist2 が C3H6 を PSA に漏らす設計」を BO の探索段階で penalty として伝達する。
+    #
+    # 設計判断 (2026-05-22 改良 2): trace_bypass は failures.append しない (= is_feasible
+    # を False にしない)。経済影響は連続罰金で十分カバー (1pp 超過 ≈ +10 億円)。
+    # 旧版は罰金 + binary feasibility 失敗の二重打撃で、main_20260522_094436 で
+    # TPE が trace bypass borderline (TAC=1028 等) に張り付いた結果、当該クラスタが
+    # top-k 評価対象から弾かれる構造になっていた。罰金だけ残し feasibility は許容。
+    # PSA モデル精度劣化リスクは罰金で吸収する (1pp 超過 = 10 億円 ≈ PSA 増床コスト相当)。
     one_pass_dict = solver_result.one_pass or {}
     psa_excess = one_pass_dict.get('trace_bypass_psa_excess', 0.0) or 0.0
     mem_excess = one_pass_dict.get('trace_bypass_mem_excess', 0.0) or 0.0
@@ -334,10 +341,9 @@ def evaluate(
     if trace_bypass_excess_total > 0:
         bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN * _scale
         soft_penalty += bypass_penalty
-        failures.append(
-            f"PSA/Mem trace bypass 閾値超過 +{bypass_penalty:.1f} 億円/年 "
-            f"(PSA: +{psa_excess*100:.2f}pp, Mem: +{mem_excess*100:.2f}pp)"
-        )
+        # 注: failures.append は意図的に呼ばない。is_feasible は他の真の spec 違反
+        # (純度・生産量) のみで判定する。trace_bypass の情報は user_attr に積んで
+        # TPE constraints_func に流す (objective.py)。
 
     # ---- HI (post-processing) ----
     # 設計判断 (2026-05-09): apply_hi=True のときのみ pinch targeting を実行し、

@@ -130,9 +130,12 @@ SEARCH_SPACE = {
 
     # ----- 膜 (P_L は 1 atm 固定、P_dist は Dist3 と同期) -----
     'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),  # Pa
-    # 設計判断 (2026-05-21 D-plan revert): A_mem を b1712d1 と同じ (3e4, 3e5) log に戻す。
-    # 124508 best (trial 247, TAC=167.74) は A_mem=2.84e5、5/20 縮小の上限 2.0e5 で切られてた。
-    'A_mem_m2':          (3.0e4,  3.0e5,  'log',    'float'),  # m² (124508 best は 2.84e5)
+    # 設計判断 (2026-05-22 E-plan): A_mem 下限を 3e4 → 5e4 に引上げ。
+    # 根拠: main_20260522_005631 forensic 解析で A_mem ∈ [3e4, 5e4) の 42 trial が
+    #   97.6% (41 件) PSA/Mem CAPEX sentinel hit。膜 ODE が小面積で発散 or 透過量
+    #   不足で Dist3 starvation 経路に入って silent penalty 化していた。
+    # 履歴 best (TAC=167.74, A_mem=2.84e5) は新範囲内、TAC=641 安全装置 (A_mem=6.39e4) も維持。
+    'A_mem_m2':          (5.0e4,  3.0e5,  'log',    'float'),  # m² (124508 best は 2.84e5)
 
     # ----- Dist1 (脱ブタン塔) -----
     'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),  # Pa
@@ -143,13 +146,24 @@ SEARCH_SPACE = {
     # 設計判断 (2026-05-21 D-plan revert): P_dist2 を b1712d1 (5.0, 7.0)e5 に戻す。
     # 124508 best は P_dist2=5.41e5、5/20 縮小の下限 5.5e5 で切られてた。
     'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),  # Pa (124508 best は 5.41e5)
-    # 設計判断 (2026-05-21 D-plan revert): N_dist2 を b1712d1 (20, 40) に戻す。
-    # 124508 best は N=22、5/20 縮小の下限 30 で切られてた。
-    'N_dist2':           (20,     40,     'linear', 'int'  ),  # - (124508 best は 22)
+    # 設計判断 (2026-05-22 改良 3): N_dist2 上限を 40 → 50 に拡張。
+    # 根拠: main_20260522_094436 で trace bypass borderline trial 群が全て
+    # N_dist2 ∈ [35, 40] (上限張り付き) + reflux_dist2 ≈ 10.0 (上限張り付き) だった。
+    # TPE は Dist2 を物理限界まで詰めても C3H6 漏れ 1% 閾値を切れない状態。
+    # N=40→50 拡張で C3H6 漏れを更に抑える余地を与える。Wang-Henke 計算時間は
+    # N に対し ~線形なので +25% 程度の per-trial 増加見込み。
+    # 履歴 best (N=22) は範囲内、下限 20 は維持。
+    'N_dist2':           (20,     50,     'linear', 'int'  ),  # - (124508 best は 22)
     'reflux_dist2':      (6.0,    10.0,   'linear', 'float'),  # -  維持 (Wang-Henke 収束、yield 中立)
 
     # ----- Dist3 (C3 スプリッタ, narrow-α) -----
-    'P_dist3_Pa':        (15.0e5, 25.0e5, 'linear', 'float'),  # Pa
+    # 設計判断 (2026-05-22 E-plan): P_dist3 下限を 15e5 → 16e5 に引上げ。
+    # 根拠: main_20260522_005631 forensic 解析で P_dist3 ∈ [15, 16) bar の 110 trial が
+    #   100% PSA/Mem CAPEX sentinel hit (= 完全な dead zone)。Mem 製品冷却器の Case A
+    #   制約 (bp_perm ≤ T_cold_out=40°C で温度クロス → 冷却水で凝縮不可) が 15 bar 付近で
+    #   組成依存に発火。16 bar 以上でも 79% hard だが 17 bar 帯では 60% に下がる。
+    # 履歴 best (TAC=167.74, P_dist3=16.72 bar) は新範囲内で保全。
+    'P_dist3_Pa':        (16.0e5, 25.0e5, 'linear', 'float'),  # Pa
     # 設計判断 (2026-05-21 D-plan): N_dist3 下限を 80 に。124508 best (TAC=167.74) は N=93。
     'N_dist3':           (80,    250,    'linear', 'int'  ),  # - (124508 best は 93)
     # 設計判断 (2026-05-21 D-plan revert): reflux_dist3 を b1712d1 (11, 20) に戻す。

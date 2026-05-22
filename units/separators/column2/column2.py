@@ -74,6 +74,12 @@ def simulate_column2(
     質量保存が塔内で自然に閉じるよう、LK = 最も重い軽質成分 (C2H6) を選定。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
+
+    # HYSYS バックエンド経路 (special.py 用)。
+    if t.solver_method == 'hysys':
+        from units.vle.hysys.provider import solve_column2_via_hysys
+        return solve_column2_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
+
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
     rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99
     design = DistDesignVars(

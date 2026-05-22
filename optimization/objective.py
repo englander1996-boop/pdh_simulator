@@ -172,3 +172,26 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
             v = op.get(rx_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(rx_key, float(v))
+
+        # 設計判断 (2026-05-22): Mem silent penalty 経路を連続シグナル化。
+        # membrane_system.py の 16 個の _penalty_result() に penalty_reason ラベルを付け、
+        # run_one_pass._compute_mem_shortfall が ph/bp/phase/other の 4 種に分類。
+        # 旧 BO ログ (main_20260522_005631) では 240/300 trial が無方向で死んでおり、
+        # うち 176 件は shortfall attr が一切無い完全 silent だった。本シグナルで
+        # 「P_H 不足」「Dist3 圧力不足」「Dist2 圧力過大 (露点高)」を独立に学習可能化。
+        for mem_key in ('mem_ph_shortfall', 'mem_bp_shortfall',
+                        'mem_phase_shortfall', 'mem_other_shortfall'):
+            v = op.get(mem_key, 0.0) or 0.0
+            if v > 0:
+                trial.set_user_attr(mem_key, float(v))
+
+        # 設計判断 (2026-05-22 改良 2): trace_bypass の excess を連続シグナル化。
+        # main_20260522_094436 で TPE が trace bypass borderline (TAC=1028 等) に
+        # 16 trial 中 8 件はまり込んだ → user_attr に出してなくて binary 「is_feasible=False」
+        # としてしか TPE が認識できなかった。connect to constraints_func で TPE が
+        # 「あとどれだけ漏れを減らせば良いか」の連続勾配を持てるように。
+        # 単位: 閾値 (=1%) 超過分の fraction (例: 0.013 = 1.3pp 超過 = 0.3pp over)
+        for tb_key in ('trace_bypass_psa_excess', 'trace_bypass_mem_excess'):
+            v = op.get(tb_key, 0.0) or 0.0
+            if v > 0:
+                trial.set_user_attr(tb_key, float(v))

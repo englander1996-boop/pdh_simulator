@@ -489,11 +489,16 @@ def show_tac_summary(result, C3H6_product: float) -> None:
     sign_word = "黒字" if final_econ.profit >= 0 else "赤字"
     print(f"  ▶ 最終 Profit ({final_label})    : {final_econ.profit:+9.3f} 億円/年"
           f"  ({sign_word})")
-    penalty_amount = result.effective_TAC - (final_econ.TAC - final_econ.total_revenue)
+    # 設計判断 (2026-05-22): 旧表示は `effective_TAC = TAC − Revenue + ペナルティ` の
+    # 旧式を前提に `penalty_amount = effective_TAC - (TAC - Revenue)` で逆算していたが、
+    # flowsheet/runner.py:413 で 2026-05-21 に純 TAC 最小化 (`eff_econ.TAC + soft_penalty`)
+    # に変更済 → 旧式逆算では Revenue 項が紛れ込んだ過大値 (例: 27 億の実 penalty が
+    # 839 億として表示) になっていた。現コード式に合わせて単純差分にする。
+    penalty_amount = result.effective_TAC - final_econ.TAC
     if penalty_amount > 0.001:
         print(f"  + spec 違反ペナルティ        : {penalty_amount:+9.3f} 億円/年")
     print(f"  ▶ effective_TAC (最適化器)   : {result.effective_TAC:+9.3f} 億円/年"
-          f"  (= TAC − Revenue + ペナルティ)")
+          f"  (= TAC + ペナルティ)")
     print()
     if C3H6_product > 0:
         print(f"  C3H6 年間生産量              : {econ.annual_kg_C3H6/1000.0:.0f} ton/年")

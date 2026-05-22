@@ -118,6 +118,14 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
       [12] reactor_other_shortfall   : Reactor その他 penalty (sim_failure 等) で 1.0 (2026-05-21 追加)
       [13] production_under_pp       : 生産量下限不足 [%pt] (2026-05-21 追加、F_fresh ↑ シグナル)
       [14] production_over_pp        : 生産量上限超過 [%pt] (2026-05-21 追加、F_fresh ↓ シグナル)
+      [15] mem_ph_shortfall          : Mem P_H ≤ feed.P_in の log10 比 (2026-05-22 追加、P_H↑/Dist2P↓)
+      [16] mem_bp_shortfall          : Mem 透過 bp ≤ 冷却水出口の log10 比 (2026-05-22 追加、P_dist3↑)
+      [17] mem_phase_shortfall       : Mem ガス feed のはずが T_in < 露点 (2026-05-22 追加、Dist2 P↓)
+      [18] mem_other_shortfall       : Mem その他 penalty (ODE/comp/cond 失敗等) で 1.0 (2026-05-22 追加)
+      [19] trace_bypass_psa_excess   : PSA trace bypass 閾値超過分 [fraction] (2026-05-22 改良2 追加、
+                                       TPE が borderline 滞留から離れる方向シグナル: Dist2 厚化/分離強化)
+      [20] trace_bypass_mem_excess   : Mem trace bypass 閾値超過分 [fraction] (2026-05-22 改良2 追加、
+                                       同上、Mem 経路の非 C3 混入率)
 
     設計判断 (2026-05-20): 旧版は [proxy, feas_flag] の 2 制約のみで、ValueError
     (Dist1 FUG 全ゼロ)・Wang-Henke 失敗 (Dist2) 等の異種 infeasibility が同じ
@@ -148,8 +156,15 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     rx_ot = trial.user_attrs.get('reactor_other_shortfall', 0.0)
     prod_under = trial.user_attrs.get('production_under_pp', 0.0)
     prod_over  = trial.user_attrs.get('production_over_pp', 0.0)
+    mem_ph    = trial.user_attrs.get('mem_ph_shortfall',    0.0)
+    mem_bp    = trial.user_attrs.get('mem_bp_shortfall',    0.0)
+    mem_phase = trial.user_attrs.get('mem_phase_shortfall', 0.0)
+    mem_other = trial.user_attrs.get('mem_other_shortfall', 0.0)
+    tb_psa    = trial.user_attrs.get('trace_bypass_psa_excess', 0.0)
+    tb_mem    = trial.user_attrs.get('trace_bypass_mem_excess', 0.0)
     return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
-            psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over]
+            psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over,
+            mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem]
 
 
 def make_sampler(
