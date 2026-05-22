@@ -58,6 +58,14 @@ def simulate_column1(
       LK='A' (C3H8), HK='Z' (C4H10), recovery 0.99/0.99, K_method='pr', q=1.0
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
+
+    # HYSYS バックエンド経路 (special.py 用)。tunables.solver_method == 'hysys' のとき
+    # provider 側で HSC ファイルを選択し、Column1Adapter で実行 → DistResult 返却。
+    # LK/HK/recovery は HYSYS では使われないので以下の組立はスキップする。
+    if t.solver_method == 'hysys':
+        from units.vle.hysys.provider import solve_column1_via_hysys
+        return solve_column1_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
+
     # tunables.recovery_* が None なら 0.99 (既定)、float ならその値を採用 (BO 用)
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
     rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99

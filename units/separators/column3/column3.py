@@ -103,6 +103,12 @@ def simulate_column3(
     float 明示なら尊重 (BO で振りたいときの後方互換、要注意: 過剰な高値は overspec を再発させる)。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
+
+    # HYSYS バックエンド経路 (special.py 用)。
+    if t.solver_method == 'hysys':
+        from units.vle.hysys.provider import solve_column3_via_hysys
+        return solve_column3_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
+
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
     if t.recovery_HK_bot is not None:
         rec_HK_bot = t.recovery_HK_bot

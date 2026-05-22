@@ -115,7 +115,7 @@ class ColumnTunables:
     N_stages:      int      # 理論段数
     N_feed:        int      # フィード段位置 (rigorous/sm では Kirkbride 推奨を自動採用、本値は無視。FUG では post-hoc 出力のみ)
     reflux_ratio:  float    # 還流比 R = L/D
-    solver_method: str = 'fug'   # 'fug' | 'rigorous' | 'sm'
+    solver_method: str = 'fug'   # 'fug' | 'rigorous' | 'sm' | 'hysys'
     # 設計判断 (2026-05-14): recovery を BO で振れるよう field 化。
     # None → column1/2/3.py ラッパの既定値 (0.99) を採用 (後方互換)。
     # float (e.g., 0.95〜0.999) → ラッパ既定値を上書き。
@@ -127,6 +127,18 @@ class ColumnTunables:
     # 主に Dist2 partial cond で HYSYS の D 値と整合を取るデバッグ用。
     # 値が物理的に不適 (D > F_total など) なら solver 側で _failure_result を返す。
     D_override: Optional[float] = None
+    # ---- HYSYS バックエンド用追加 (solver_method='hysys' のときのみ参照) ----
+    # 設計判断 (2026-05-22): HYSYS の段数別 HSC ファイル + 主スペック書込み運用。
+    # special.py の探索変数は lhs_column*.py の DOE 群 (P_col, feed_flow, 主スペック,
+    # feed_stage, N_stages) と一致させる。
+    #   hysys_spec_value: 塔ごとの主スペック値
+    #     column1: Comp Fraction - 2 [-]
+    #     column2: Reflux Ratio [-]
+    #     column3: Draw Rate [kgmol/s]
+    #   hysys_feed_stage: HYSYS の SpecifyFeedLocation に渡す段番号 (1始まり)
+    # main の FUG/rigorous 経路では None のままで OK (後方互換)。
+    hysys_spec_value: Optional[float] = None
+    hysys_feed_stage: Optional[int] = None
 
 
 # 分流 (partial condenser) で凝縮させない成分セット

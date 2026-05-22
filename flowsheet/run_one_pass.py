@@ -14,6 +14,7 @@ PDH プロセスの 1 パス計算 (リサイクル収束の 1 反復に相当)�
 """
 
 import math
+import os
 import warnings
 from typing import Dict, Tuple
 
@@ -72,6 +73,30 @@ _TRACE_BYPASS_FRAC = 0.01    # 入口総モル流量に対する微量判定閾�
 # BO は探索範囲を制約することで <1% 領域を探すよう誘導 (search_space.py を見直し)。
 _PSA_TRACE_COMPS = ('A', 'B')                # PSA で許容しない: C3H8, C3H6
 _MEM_TRACE_COMPS = ('C', 'D', 'E', 'F')      # Mem で許容しない: H2, CH4, C2H4, C2H6
+
+
+# 設計判断 (2026-05-22): iter ごとにどのユニットで penalty が出たかを stderr/stdout に
+# 出すロガー。環境変数 PDH_PER_UNIT_LOG=1 で有効化。BO ループで巨大ログにならないよう
+# デフォルト OFF。
+_PER_UNIT_LOG = os.environ.get('PDH_PER_UNIT_LOG', '0') == '1'
+
+def _log_unit_failure(unit_name: str, equipment) -> None:
+    """ユニットの penalty 発火を stderr に1行で出す (PDH_PER_UNIT_LOG=1 時のみ)。"""
+    if not _PER_UNIT_LOG:
+        return
+    import sys as _sys
+    feasible = getattr(equipment, 'feasible', None)
+    capex = getattr(equipment, 'CAPEX', None)
+    capex_total = getattr(equipment, 'CAPEX_total', None)
+    reactor_capex = getattr(equipment, 'Reactor_CAPEX', None)
+    msg = (getattr(equipment, 'message', '') or
+           getattr(equipment, 'penalty_reason', '') or '')
+    _sys.stderr.write(
+        f"[PENALTY] {unit_name}: feasible={feasible} "
+        f"CAPEX={capex} CAPEX_total={capex_total} R_CAPEX={reactor_capex}"
+        f" msg={str(msg)[:150]}\n"
+    )
+    _sys.stderr.flush()
 
 
 def _apply_trace_bypass(
@@ -223,6 +248,9 @@ def _build_penalty_one_pass_result(
         trace_bypass_mem_excess=0.0,
         dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
         dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
+        # Mem shortfall (Reactor 失敗で Mem 未到達 = 0 で伝播)
+        mem_ph_shortfall=0.0, mem_bp_shortfall=0.0,
+        mem_phase_shortfall=0.0, mem_other_shortfall=0.0,
     )
 
 
@@ -244,6 +272,11 @@ _PSA_U0_MAX_MS   = 1.0
 # Reactor SV penalty 連続シグナルの基準 (swing.py の FixedParams.SV_{min,max}_m_per_s と同期)
 _REACTOR_SV_MIN_MS = 0.5
 _REACTOR_SV_MAX_MS = 3.0
+# Mem penalty 連続シグナル用の安全マージン (2026-05-22)
+#   ph_le_pfeed:  P_H が feed.P_in に何倍近いか → log10 比
+#   bp_le_cold:   bp が cold_out に何 K 不足か → 対数比 (T 単位)
+#   vapor_cond:   T_in が T_dew に何 K 不足か → 対数比
+_MEM_T_MARGIN_K = 5.0   # bp - cold_out / T_in - dew で「健全」とみなす最小マージン
 
 
 def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
@@ -339,6 +372,76 @@ def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
     return out
 
 
+def _compute_mem_shortfall(r_mem) -> Dict[str, float]:
+    """Mem penalty 経路から TPE constraints_func 用の連続 shortfall を計算。
+
+    Returns
+    -------
+    dict
+        - 'mem_ph_shortfall'    [-] : P_H が feed.P_in に対し不足している log10 比。
+              ph_le_pfeed 経路で `log10(feed.P_in / P_H)` > 0 → BO に「P_H を上げる
+              or Dist2 圧力を下げる」シグナル。ph_le_pl は P_L=1atm 固定運用上ほぼ
+              発火しないが、念のため 1.0 を入れる (search bounds で防げる領域)。
+        - 'mem_bp_shortfall'    [-] : 透過ガス泡点が冷却水出口温度を下回る不足比。
+              bp_le_cold_out 経路で `log10((T_cold_out + margin) / T_bp_perm)` > 0
+              → BO に「P_dist3 を上げる or 透過組成を C3H6 純度寄りにする」シグナル。
+        - 'mem_phase_shortfall' [-] : ガスフィード前提に対し T_in が露点を下回る不足比。
+              vapor_condensed 経路で `log10(T_dew / T_in)` > 0 → BO に「Dist2 圧力を
+              下げる (= 露点を下げる)」シグナル。T_in は config 固定なので露点側を動かす。
+        - 'mem_other_shortfall' [-] : 上記以外の numerical 失敗 (vap/ode/comp/cond
+              exception, nan, invalid_input, neg_feed 等) で 1.0、正常完走で 0。
+
+    設計判断 (2026-05-22): PSA / Reactor で先行導入したパターンに揃える。
+    silent _penalty_result() 経路 (membrane_system.py の 16 箇所) が BO に方向を
+    渡せず、main_20260522_005631 で 80% の trial が PSA/Mem CAPEX sentinel hit で
+    無方向に死んでいた問題への対処。Mem feed は Dist2 塔底 → mem_precool で
+    config.temperature.mem_feed_K (= 323.15K 固定) まで加熱されてから入るので、
+    露点・bp 関連の shortfall は実質的に Dist2 圧力 / Dist3 圧力を動かすシグナル
+    として効く。
+    """
+    out = {
+        'mem_ph_shortfall':    0.0,
+        'mem_bp_shortfall':    0.0,
+        'mem_phase_shortfall': 0.0,
+        'mem_other_shortfall': 0.0,
+    }
+    eq = getattr(r_mem, 'equipment', None)
+    if eq is None:
+        return out
+    reason = getattr(eq, 'penalty_reason', '') or ''
+    if reason == '':
+        return out  # 正常完走
+
+    P_H        = getattr(eq, 'P_H_actual_Pa',      0.0) or 0.0
+    P_feed     = getattr(eq, 'P_feed_actual_Pa',   0.0) or 0.0
+    T_dew      = getattr(eq, 'T_dew_actual_K',     0.0) or 0.0
+    T_feed     = getattr(eq, 'T_feed_actual_K',    0.0) or 0.0
+    T_bp       = getattr(eq, 'T_bp_perm_actual_K', 0.0) or 0.0
+    T_cold_out = getattr(eq, 'T_cold_out_actual_K',0.0) or 0.0
+
+    if reason == 'ph_le_pfeed' and P_H > 0 and P_feed > 0:
+        out['mem_ph_shortfall'] = math.log10(max(P_feed / P_H, 1.0))
+    elif reason == 'ph_le_pl':
+        # P_L=1atm 固定運用ではほぼ発火しないが、search bounds が壊れた場合の保険
+        out['mem_ph_shortfall'] = 1.0
+    elif reason == 'bp_le_cold_out' and T_bp > 0 and T_cold_out > 0:
+        # 「マージン込みで bp が cold_out + margin を下回る分」を log10 で連続化
+        target = T_cold_out + _MEM_T_MARGIN_K
+        out['mem_bp_shortfall'] = math.log10(max(target / T_bp, 1.0))
+    elif reason == 'vapor_condensed' and T_dew > 0 and T_feed > 0:
+        # T_in < T_dew → log10(T_dew / T_in)。Dist2 P を下げる方向のシグナル
+        out['mem_phase_shortfall'] = math.log10(max(T_dew / T_feed, 1.0))
+    elif reason == 'liquid_vaporized' and T_dew > 0 and T_feed > 0:
+        # 本 run では vapor_feed=True なので発火しないが、対称性のため入れる
+        out['mem_phase_shortfall'] = math.log10(max(T_feed / T_dew, 1.0))
+    else:
+        # invalid_input / invalid_design / pdist_le_pl / neg_feed / zero_feed /
+        # dew_nan / vap_exception / vap_nan / feed_comp_exception / ode_failure /
+        # prod_comp_exception / cond_exception / cond_nan
+        out['mem_other_shortfall'] = 1.0
+    return out
+
+
 def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, float]:
     """塔 penalty 結果から N_shortfall / dT_shortfall を計算。
 
@@ -403,6 +506,9 @@ def _build_penalty_after_column(
         trace_bypass_mem_excess=0.0,
         dist1_N_shortfall=0.0, dist2_N_shortfall=0.0, dist3_N_shortfall=0.0,
         dist1_dT_shortfall=0.0, dist2_dT_shortfall=0.0, dist3_dT_shortfall=0.0,
+        # Mem shortfall (上流失敗時の既定値、Mem に到達できなかった = 0 で伝播)
+        mem_ph_shortfall=0.0, mem_bp_shortfall=0.0,
+        mem_phase_shortfall=0.0, mem_other_shortfall=0.0,
     )
     base.update(upstream)
     # solver の penalty_hit 検出経路 (r_psa/r_mem/r_rx) に乗せるため、failed が
@@ -479,6 +585,7 @@ def run_one_pass(
     # `ValueError: 全成分流量がゼロ` で crash する経路があった (BO trial #0,1,9,12,...で多発)。
     # 早期に penalty 経路に分岐し、shortfall を TPE 用 user_attr に格納する。
     if not getattr(r1.equipment, 'feasible', True):
+        _log_unit_failure('Dist1 (r1)', r1.equipment)
         result = _build_penalty_after_column(
             'r1', design,
             fresh=fresh, pump1=pump1, r1=r1,
@@ -537,6 +644,7 @@ def run_one_pass(
     # 分からなかった。reactor_sv_shortfall を user_attr → constraints_func に渡す。
     reactor_shortfalls = _compute_reactor_shortfall(r_rx)
     if r_rx.equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
+        _log_unit_failure('Reactor (r_rx)', r_rx.equipment)
         result = _build_penalty_one_pass_result(
             r_rx, reactor_inlet, dist1_top_rx, recycle_dist3, recycle_mem,
             r1=r1, fresh=fresh, pump1=pump1,
@@ -583,6 +691,7 @@ def run_one_pass(
     # 下流 PSA / Mem は r2.top / r2.bottom がゼロ流量で組成計算が破綻するため早期 return。
     # dT_max_rigorous が equipment に格納されているので shortfall を TPE に伝える。
     if not getattr(r2.equipment, 'feasible', True):
+        _log_unit_failure('Dist2 (r2)', r2.equipment)
         result = _build_penalty_after_column(
             'r2', design,
             fresh=fresh, pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
@@ -608,6 +717,9 @@ def run_one_pass(
     )
     with _capture_warnings("PSA", warnings_captured):
         r_psa = simulate_psa_system(design.psa, psa_feed, PSAFixedParams())
+    # PSA penalty を log (PDH_PER_UNIT_LOG=1 時のみ stderr)
+    if getattr(r_psa.equipment, 'CAPEX_total', 0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
+        _log_unit_failure('PSA (r_psa)', r_psa.equipment)
     # 設計判断 (2026-05-21): PSA silent penalty 経路に対する連続 shortfall を抽出。
     # solver.py:191 が CAPEX sentinel で penalty_hit を判定するが、その情報のみだと
     # BO は「どう逃げれば良いか」分からない。psa_t_abs_shortfall 等を計算して
@@ -646,6 +758,15 @@ def run_one_pass(
     )
     with _capture_warnings("Mem", warnings_captured):
         r_mem = simulate_membrane_system(design.mem, mem_feed, MemFixedParams(vapor_feed=True))
+    # Mem penalty を log (PDH_PER_UNIT_LOG=1 時のみ stderr)
+    if getattr(r_mem.equipment, 'CAPEX_total', 0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
+        _log_unit_failure('Mem (r_mem)', r_mem.equipment)
+    # 設計判断 (2026-05-22): Mem silent penalty 経路に対する連続 shortfall を抽出。
+    # solver.py:191 が CAPEX sentinel で penalty_hit を判定するが、その情報のみだと
+    # BO は「どう逃げれば良いか」分からない。mem_ph_shortfall / mem_bp_shortfall /
+    # mem_phase_shortfall / mem_other_shortfall を one_pass dict に積み、
+    # objective.py 経由で TPE constraints_func に届ける。
+    mem_shortfalls = _compute_mem_shortfall(r_mem)
     # mem_bypass は recycle に合算 (= reactor 入口 mixer で扱われる)。tear_mem 構造は
     # 'A', 'B' しか持たないので、bypass 分は別チャネルで管理し reactor_inlet 直前で合流。
     # mem_bypass を後段で reactor_inlet に注入するため一旦保持。
@@ -662,6 +783,7 @@ def run_one_pass(
     # 設計判断 (2026-05-20): Dist3 penalty 早期検出。Dist3 失敗時は tear_dist3 が
     # ゼロ確定するので次反復で recycle_dist3 expansion が ValueError を再発する。
     if not getattr(r3.equipment, 'feasible', True):
+        _log_unit_failure('Dist3 (r3)', r3.equipment)
         result = _build_penalty_after_column(
             'r3', design,
             fresh=fresh, pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
@@ -674,9 +796,10 @@ def run_one_pass(
         result['warnings_captured'] = warnings_captured
         result['trace_bypass_psa_excess'] = psa_trace_excess
         result['trace_bypass_mem_excess'] = mem_trace_excess
-        # PSA shortfall も伝播 (Dist3 失敗経路でも PSA penalty 情報を残す)
+        # PSA / Reactor / Mem shortfall も伝播 (Dist3 失敗経路でも上流 penalty 情報を残す)
         result.update(psa_shortfalls)
         result.update(reactor_shortfalls)
+        result.update(mem_shortfalls)
         return result
 
     # ---- tear stream の更新値 ----
@@ -712,4 +835,6 @@ def run_one_pass(
         **psa_shortfalls,
         # Reactor shortfall (正常完走時は全 0、SV 範囲外等の penalty 経路でのみ > 0)
         **reactor_shortfalls,
+        # Mem shortfall (正常完走時は全 0、ph/bp/phase/other の penalty 経路で > 0)
+        **mem_shortfalls,
     )

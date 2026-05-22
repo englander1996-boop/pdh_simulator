@@ -27,14 +27,14 @@ SEARCH_SPACE = {
     'L_psa_bed_m':       (15.0,   30.0,   'linear', 'float'),
     'desorption_target': (0.15,   0.40,   'linear', 'float'),
     'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),
-    'A_mem_m2':          (3.0e4,  3.0e5,  'log',    'float'),
+    'A_mem_m2':          (5.0e4,  3.0e5,  'log',    'float'),  # 2026-05-22 E-plan
     'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),
     'N_dist1':           (16,     30,     'linear', 'int'),
     'reflux_dist1':      (1.5,    3.0,    'linear', 'float'),
     'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),
-    'N_dist2':           (20,     40,     'linear', 'int'),
+    'N_dist2':           (20,     50,     'linear', 'int'),  # 2026-05-22 改良 3
     'reflux_dist2':      (6.0,    10.0,   'linear', 'float'),
-    'P_dist3_Pa':        (15.0e5, 25.0e5, 'linear', 'float'),
+    'P_dist3_Pa':        (16.0e5, 25.0e5, 'linear', 'float'),  # 2026-05-22 E-plan
     'N_dist3':           (80,    250,    'linear', 'int'),
     'reflux_dist3':      (11.0,   20.0,   'linear', 'float'),
     'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),

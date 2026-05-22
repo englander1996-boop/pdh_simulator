@@ -62,6 +62,51 @@ P_L_FIXED_PA = 1.0e5
 _N_FEED_PLACEHOLDER = 1
 
 
+# ---------------------------------------------------------------------------
+# 依存サンプリング (2026-05-22 E-plan)
+# ---------------------------------------------------------------------------
+# 設計判断: 物理的に必須の不等式 (例: P_H > feed.P_in = design.dist2.P_col) を
+# search bounds 越しに保証する仕組み。Mem の silent penalty 経路 ph_le_pfeed を
+# 物理的に発生不可にできる。
+#
+# 実装方式: post-clip
+#   - Optuna の suggest_float は静的 bounds (low, high) を持ち、TPE の KDE/Sobol の
+#     基準としてそのまま使用 (分布変更警告を避ける)。
+#   - suggest 直後に依存値以下なら静かに max(suggested, dep_low) でクリップ。
+#   - TPE 視点では「同じ bounds で動き続ける」ため学習が安定。クリップは
+#     constraint_func の代替ではないが、ハード fail を確実に防ぐ最後の門番。
+#
+# 現状の SEARCH_SPACE (P_H_min=7.5e5, P_dist2_max=7.0e5, margin=0.5e5) では
+# 既に P_H ≥ P_dist2 + margin が常に成立しているため、本機構は実質 no-op。
+# 将来 P_dist2 上限を 8e5 等に広げたり P_H 下限を 6e5 に下げたら自動で発火する保険。
+#
+# margin の根拠: フィード圧縮機が有意な仕事をする最低圧縮比 ~1.07 を
+# P_dist2=7bar の場合に 0.5 bar = 50 kPa として確保。
+_DEPENDENT_MIN_MARGIN_PA = {
+    # key: P_H_Pa の依存先 'P_dist2_Pa', 必要マージン 0.5 bar
+    'P_H_Pa': ('P_dist2_Pa', 5.0e4),
+}
+
+
+def _apply_dependent_lows(params: Dict[str, Any]) -> Dict[str, Any]:
+    """suggest 後の params に対し、依存サンプリングのクリップを適用する。
+
+    例: P_H_Pa が P_dist2_Pa + 0.5bar を下回っていれば持ち上げる。
+    依存先が params に無い (SEARCH_SPACE から除外されている = baseline 固定値) 場合は
+    DEFAULT_BASELINE を参照、それも無ければ 0 として扱う (実質 no-op)。
+    """
+    for target_key, (dep_key, margin_pa) in _DEPENDENT_MIN_MARGIN_PA.items():
+        if target_key not in params:
+            continue
+        dep_value = params.get(dep_key)
+        if dep_value is None:
+            dep_value = DEFAULT_BASELINE.get(dep_key, 0.0)
+        floor = float(dep_value) + float(margin_pa)
+        if params[target_key] < floor:
+            params[target_key] = floor
+    return params
+
+
 # exp1 baseline 値 (suggest 対象外のキーを補完するため)
 DEFAULT_BASELINE: Dict[str, Any] = {
     # 反応器
@@ -145,6 +190,8 @@ def suggest_params(trial, search_space: Dict[str, VarSpec]) -> Dict[str, Any]:
     -------
     dict
         変数名 → suggest 値の辞書。SEARCH_SPACE に無い変数は含まれない。
+        suggest 直後に `_apply_dependent_lows` で物理依存の下限クリップを適用する
+        (詳細は _DEPENDENT_MIN_MARGIN_PA のコメント参照)。
     """
     params: Dict[str, Any] = {}
     for name, spec in search_space.items():
@@ -159,6 +206,8 @@ def suggest_params(trial, search_space: Dict[str, VarSpec]) -> Dict[str, Any]:
             )
         else:
             raise ValueError(f"未知の type {vtype!r} (許容: 'int' | 'float')")
+    # 依存サンプリングのクリップ (2026-05-22 E-plan)
+    _apply_dependent_lows(params)
     return params
 
 

@@ -89,14 +89,14 @@ SEARCH = {
     'param_L_psa_bed_m':          (15.0,   30.0),
     'param_desorption_target':    (0.15,   0.40),
     'param_P_H_Pa':               (7.5e5,  9.5e5),
-    'param_A_mem_m2':             (3.0e4,  3.0e5),
+    'param_A_mem_m2':             (5.0e4,  3.0e5),  # 2026-05-22 E-plan で下限引上げ
     'param_P_dist1_Pa':           (12e5,   25e5),
     'param_N_dist1':              (16,     30),
     'param_reflux_dist1':         (1.3,    3.0),
     'param_P_dist2_Pa':           (5e5,    7e5),
-    'param_N_dist2':              (20,     40),
+    'param_N_dist2':              (20,     50),  # 2026-05-22 改良 3 で上限拡張
     'param_reflux_dist2':         (5.0,    10.0),
-    'param_P_dist3_Pa':           (15e5,   25e5),
+    'param_P_dist3_Pa':           (16e5,   25e5),  # 2026-05-22 E-plan で下限引上げ
     'param_N_dist3':              (80,     200),
     'param_reflux_dist3':         (11.0,   20.0),
     'param_F_C3H8_fresh_kmol_h':  (1200.0, 1700.0),

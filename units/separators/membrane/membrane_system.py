@@ -286,6 +286,37 @@ class MemEquipmentData:
     # Q_cond_kW = Q_cond_sensible_kW + Q_cond_latent_kW (互換性のため両方保持)。
     Q_cond_sensible_kW: float = 0.0   # ガス顕熱 [kW] (T_cond_in → T_cond_out)
     Q_cond_latent_kW:   float = 0.0   # 凝縮潜熱 [kW] (T_cond_out で凝縮)
+    # ---- penalty 診断 (2026-05-22 追加、BO の TPE constraints_func 用) ----
+    # 設計判断: PSA / Reactor と同じパターン (psa_system.py:279-287 参照)。
+    # silent _penalty_result() 経路が BO に「方向のシグナル」を渡せず 80% の trial が
+    # 無方向で死ぬ問題への対処。penalty 発火時に「どの条件で死んだか」「actual 値」を
+    # 保持し、run_one_pass._compute_mem_shortfall が log10(actual/limit) 等の連続
+    # shortfall を計算して TPE 構成制約に流す。通常完走時は penalty_reason='' のまま。
+    # 理由ラベル:
+    #   ''                     正常完走 (CAPEX_total < threshold)
+    #   'invalid_input'        feed.P_in/T_in/P_dist が非正値 (上流バグ系、本来到達不可)
+    #   'ph_le_pl'             P_H ≤ P_L (search bounds で防げる)
+    #   'invalid_design'       A_mem/P_H/P_L が非正値
+    #   'pdist_le_pl'          P_dist ≤ P_L (search bounds で防げる)
+    #   'ph_le_pfeed'          P_H ≤ feed.P_in (Mem feed comp が減圧方向) — BO actionable
+    #   'neg_feed'/'zero_feed' feed 流量が負/ゼロ (上流 Dist2 が異常組成)
+    #   'dew_nan'              feed 露点計算失敗 (組成異常)
+    #   'liquid_vaporized'     vapor_feed=False かつ T_in ≥ T_dew (本 run では vapor_feed=True なので発火しない)
+    #   'vapor_condensed'      vapor_feed=True かつ T_in < T_dew — BO actionable (Dist2 P 高すぎ)
+    #   'vap_exception'/'vap_nan'  気化器計算失敗 (vapor_feed=False 経路、本 run では発火しない)
+    #   'feed_comp_exception'  フィード圧縮機計算失敗 (compress_isentropic が ValueError)
+    #   'ode_failure'          膜 ODE 積分失敗
+    #   'prod_comp_exception'  製品圧縮機計算失敗
+    #   'cond_exception'/'cond_nan'  製品冷却器 LMTD クロス等
+    #   'bp_le_cold_out'       透過ガス泡点 ≤ 冷却水出口温度 — BO actionable (P_dist3 低すぎ)
+    penalty_reason:    str   = ''
+    # actionable 経路の実値 (連続 shortfall 計算用、0.0 = 未計測)
+    P_H_actual_Pa:     float = 0.0    # ph_le_pfeed / ph_le_pl で実 P_H [Pa]
+    P_feed_actual_Pa:  float = 0.0    # ph_le_pfeed で実 feed.P_in [Pa]
+    T_dew_actual_K:    float = 0.0    # vapor_condensed で feed 露点 [K]
+    T_feed_actual_K:   float = 0.0    # vapor_condensed で feed.T_in [K]
+    T_bp_perm_actual_K:float = 0.0    # bp_le_cold_out で透過ガス泡点 [K]
+    T_cold_out_actual_K:float = 0.0   # bp_le_cold_out で冷却水出口温度 [K]
 
 
 @dataclass
@@ -306,8 +337,34 @@ class MemSimulationResult:
 _PENALTY = 1e9
 
 
-def _penalty_result() -> MemSimulationResult:
-    """計算不能な条件のときに返すペナルティ結果。"""
+def _penalty_result(
+    reason:              str   = '',
+    P_H_actual:          float = 0.0,
+    P_feed_actual:       float = 0.0,
+    T_dew_actual:        float = 0.0,
+    T_feed_actual:       float = 0.0,
+    T_bp_perm_actual:    float = 0.0,
+    T_cold_out_actual:   float = 0.0,
+) -> MemSimulationResult:
+    """計算不能な条件のときに返すペナルティ結果。
+
+    Parameters
+    ----------
+    reason : str
+        発火条件のラベル。MemEquipmentData の penalty_reason に格納し、
+        run_one_pass._compute_mem_shortfall が連続 shortfall を計算する際に参照。
+    P_H_actual, P_feed_actual : float
+        ph_le_pfeed / ph_le_pl 経路で実 P_H・実 feed.P_in を保持。
+    T_dew_actual, T_feed_actual : float
+        vapor_condensed 経路で feed 露点・feed.T_in を保持。
+    T_bp_perm_actual, T_cold_out_actual : float
+        bp_le_cold_out 経路で透過ガス泡点・冷却水出口温度を保持。
+
+    設計判断 (2026-05-22): 旧版は引数なしの silent penalty で、BO は「どの方向に
+    動かせば feasible に出るか」のシグナルを得られず 80% の trial が無方向で死んでいた。
+    PSA / Reactor で先に導入したパターン (psa_system.py:_penalty_result) を Mem にも
+    展開する。
+    """
     zero_stream = MemRetentateStream(0.0, 0.0, 0.0, 0.0)
     zero_prod   = MemProductStream(0.0, 0.0, 0.0, 0.0)
     eq = MemEquipmentData(
@@ -317,6 +374,13 @@ def _penalty_result() -> MemSimulationResult:
         W_prod_kW=0.0, Pg_prod=0.0,
         A_cond=0.0, Pg_cond=0.0, Q_cond_kW=0.0,
         CAPEX_total=_PENALTY,
+        penalty_reason=reason,
+        P_H_actual_Pa=P_H_actual,
+        P_feed_actual_Pa=P_feed_actual,
+        T_dew_actual_K=T_dew_actual,
+        T_feed_actual_K=T_feed_actual,
+        T_bp_perm_actual_K=T_bp_perm_actual,
+        T_cold_out_actual_K=T_cold_out_actual,
     )
     return MemSimulationResult(zero_stream, zero_prod, eq, 0.0, 0.0, 0.0)
 
@@ -573,12 +637,14 @@ def simulate_membrane_system(
     # ---- 入力バリデーション ----
     # ID-08: 非正値チェック
     if feed.P_in <= 0 or feed.T_in <= 0 or design.P_dist <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='invalid_input')
     if design.P_H <= design.P_L:
         warnings.warn("P_H <= P_L: 膜の駆動力がありません。", UserWarning, stacklevel=2)
-        return _penalty_result()
+        return _penalty_result(
+            reason='ph_le_pl', P_H_actual=design.P_H, P_feed_actual=design.P_L,
+        )
     if design.A_mem <= 0 or design.P_H <= 0 or design.P_L <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='invalid_design')
     # ID-04: 製品圧縮機が減圧方向になる
     if design.P_dist <= design.P_L:
         warnings.warn(
@@ -586,7 +652,7 @@ def simulate_membrane_system(
             " 製品圧縮機が減圧方向になります。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(reason='pdist_le_pl')
     # ID-05: フィード圧縮機が減圧方向になる
     if design.P_H <= feed.P_in:
         warnings.warn(
@@ -594,13 +660,15 @@ def simulate_membrane_system(
             " フィード圧縮機が減圧方向になります。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(
+            reason='ph_le_pfeed', P_H_actual=design.P_H, P_feed_actual=feed.P_in,
+        )
     if feed.F_C3H6 < 0 or feed.F_C3H8 < 0:
-        return _penalty_result()
+        return _penalty_result(reason='neg_feed')
 
     F_total_feed = feed.F_C3H6 + feed.F_C3H8
     if F_total_feed <= 0:
-        return _penalty_result()
+        return _penalty_result(reason='zero_feed')
 
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
 
@@ -608,21 +676,27 @@ def simulate_membrane_system(
     # dew_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except は不要
     T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
     if math.isnan(T_dew_feed):
-        return _penalty_result()
+        return _penalty_result(reason='dew_nan')
     if not fixed.vapor_feed and feed.T_in >= T_dew_feed:
         warnings.warn(
             f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
             " 液相フィードを前提とするモデル(vapor_feed=False)と矛盾します。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(
+            reason='liquid_vaporized',
+            T_dew_actual=T_dew_feed, T_feed_actual=feed.T_in,
+        )
     if fixed.vapor_feed and feed.T_in < T_dew_feed:
         warnings.warn(
             f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 未満です。"
             " ガス相フィードを前提とするモデル(vapor_feed=True)と矛盾します。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(
+            reason='vapor_condensed',
+            T_dew_actual=T_dew_feed, T_feed_actual=feed.T_in,
+        )
 
     # mol/s 換算（内部計算用）
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
@@ -642,10 +716,10 @@ def simulate_membrane_system(
         except ImportError:
             raise
         except Exception:
-            return _penalty_result()
+            return _penalty_result(reason='vap_exception')
         # ID-10: Q_vap_kW だけでなく A_vap も nan チェック（LMTD 温度クロス時に nan になる）
         if math.isnan(Q_vap_kW) or math.isnan(A_vap):
-            return _penalty_result()
+            return _penalty_result(reason='vap_nan')
 
     # ---- ユニット 2: フィード圧縮機 ----
     try:
@@ -657,7 +731,7 @@ def simulate_membrane_system(
     except ImportError:
         raise
     except Exception:
-        return _penalty_result()
+        return _penalty_result(reason='feed_comp_exception')
     W_feed_kW = F_feed_mols * W_feed_per_mol / 1e3   # [kW]
 
     # ---- ユニット 3: 膜モジュール ----
@@ -670,7 +744,7 @@ def simulate_membrane_system(
         Q_A_SI, fixed.alpha,
     )
     if F_ret_C3H6_mols is None:
-        return _penalty_result()
+        return _penalty_result(reason='ode_failure')
 
     # 非透過・透過流量（mol/s）
     F_ret_C3H6_mols = max(F_ret_C3H6_mols, 0.0)
@@ -696,7 +770,7 @@ def simulate_membrane_system(
     except ImportError:
         raise
     except Exception:
-        return _penalty_result()
+        return _penalty_result(reason='prod_comp_exception')
     W_prod_kW = F_perm_total_mols * W_prod_per_mol / 1e3   # [kW]
 
     # ---- ユニット 5: 製品冷却器 ----
@@ -709,10 +783,10 @@ def simulate_membrane_system(
     except ImportError:
         raise
     except Exception:
-        return _penalty_result()
+        return _penalty_result(reason='cond_exception')
     # ID-09/10: Q_cond_kW または A_cond が nan（圧縮機出口が泡点以下・LMTD クロス）
     if math.isnan(Q_cond_kW) or math.isnan(A_cond):
-        return _penalty_result()
+        return _penalty_result(reason='cond_nan')
 
     # Case A 制約: 製品の泡点が冷却水出口温度を下回ると温度クロスが発生し
     # 冷却水では凝縮できない。冷媒は使用しない設計判断のため、この条件は
@@ -723,7 +797,10 @@ def simulate_membrane_system(
             f"{fixed.T_cold_out - 273.15:.1f}°C 以下です（P_dist が低すぎます）。",
             UserWarning, stacklevel=2,
         )
-        return _penalty_result()
+        return _penalty_result(
+            reason='bp_le_cold_out',
+            T_bp_perm_actual=T_bp_perm, T_cold_out_actual=fixed.T_cold_out,
+        )
 
     # ---- kmol/h 換算（出力用）----
     to_kmolh = 3600.0 / 1000.0
