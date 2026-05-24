@@ -59,6 +59,22 @@ class FlowsheetResult:
     # を catch_warnings(record=True) に置換した。本フィールドで BO ログから fallback
     # 発火を追跡可能。空リストなら全装置が warning なく動作。
     warnings_captured: list = None                 # _CapturedWarning のリスト
+    # ---- 観測ラベル (2026-05-22 L1 強化) ----
+    # 設計判断: failure_reason は人間可読の長文字列だが、live ログ・CSV groupby 用に
+    # 「どの段階で詰まったか」を categorical 1 列で持つ。値:
+    #   'success'                    : feasible 完走
+    #   'r1' / 'r_rx' / 'r2'
+    #     / 'r_psa' / 'r_mem' / 'r3' : run_one_pass 内の penalty 経路
+    #   'timeout'                    : solver per-trial 時間予算超過
+    #   'solver_inner_diverge'       : 内側 (recycle) 未収束
+    #   'solver_outer_diverge'       : 外側 (生産量調整) 未収束
+    #   'solver_guard'               : リサイクル暴走ガード発火
+    #   'strict_recovery_<col>_<lk_or_hk>' : strict recovery check 違反
+    #   'spec_production_under/over' : 生産量未達/超過
+    #   'spec_c3h6_purity'           : C3H6 純度不足
+    #   'spec_h2_purity'             : H2 純度不足
+    #   'exception:<UnitName>'       : solve_flowsheet 内で未処理例外 (装置名は best-effort)
+    failure_unit: str = ""
 
     @property
     def is_feasible(self) -> bool:
@@ -92,6 +108,45 @@ _COLUMN_RECOVERY_SPECS = {
 #  新値: 1000 億円/fraction → 1pp 超過で 10 億、5pp で 50 億。spec 違反 (1pp で 100 億)
 #        より弱く、実コスト (10-20 億) に近い水準。
 _TRACE_BYPASS_PENALTY_COEF_OKUYEN = 1000.0
+
+
+# 設計判断 (2026-05-22 forensic, 施策 1c): solver-level failure の TAC を連続化。
+# 旧版は pen.solver_failure_okuyen (= 10000 億円) 固定 → silent infeas 同士の TAC が
+# 同値になり、TPE は infeas 内序列を constraint_func の violation sum だけに頼る。
+# 本連続化で「shortfall 総和が小さい infeas (=feas に近い可能性)」は低い TAC、
+# 「大量 shortfall (=明確に違反)」は高い TAC で順位付け。
+# TPE は constraint_func と TAC の両方を見て feas 方向を学習する想定。
+#
+# マップ: silent_base + raw_total × coef、上限 solver_failure_okuyen
+# silent_base = 0.5 × solver_failure (= 5000 億) で「silent infeas は中間 TAC」を表現
+# coef は raw_total ≈ 25 で上限 hit するよう調整 (= shortfall 多いほど早く 10000 へ)
+_SILENT_BASE_FRAC          = 0.5    # silent infeas の TAC = solver_failure × この比率
+_SHORTFALL_TAC_COEF_OKUYEN = 200.0  # raw_total 1 単位あたりの TAC 加算
+
+# raw_total に集計する shortfall キー (one_pass dict の key)
+_SHORTFALL_KEYS_FOR_TAC = (
+    'dist1_N_shortfall', 'dist2_N_shortfall', 'dist3_N_shortfall',
+    'dist1_dT_shortfall', 'dist2_dT_shortfall', 'dist3_dT_shortfall',
+    'psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall',
+    'reactor_sv_shortfall', 'reactor_other_shortfall',
+    'mem_ph_shortfall', 'mem_bp_shortfall',
+    'mem_phase_shortfall', 'mem_other_shortfall',
+    'trace_bypass_psa_excess', 'trace_bypass_mem_excess',
+)
+
+
+def _compute_solver_fail_TAC(solver_failure_ceiling: float,
+                              one_pass: Optional[dict]) -> float:
+    """solver-level failure の連続化 TAC を計算する (施策 1c)。
+
+    one_pass が None (= solve_flowsheet 例外経路) なら ceiling 固定。
+    """
+    if one_pass is None:
+        return float(solver_failure_ceiling)
+    raw_total = sum(float(one_pass.get(k, 0.0) or 0.0) for k in _SHORTFALL_KEYS_FOR_TAC)
+    silent_base = solver_failure_ceiling * _SILENT_BASE_FRAC
+    fail_TAC = silent_base + raw_total * _SHORTFALL_TAC_COEF_OKUYEN
+    return min(fail_TAC, float(solver_failure_ceiling))
 
 
 def evaluate(
@@ -144,36 +199,58 @@ def evaluate(
             F_C3H8_override=F_C3H8_override,
         )
     except Exception as e:
+        # 観測ラベル (2026-05-22): 例外メッセージから装置名を best-effort で抽出。
+        # 既知パターン: "[Dist1] ...", "PSA: ...", "membrane ...", "Comp2/Dist2 ..."
+        exc_msg = f"{type(e).__name__}: {e}"
+        unit_guess = _guess_unit_from_exception(exc_msg)
         return FlowsheetResult(
             solver=None, economics=None, specs=None,
+            # 例外経路は one_pass=None なので連続化は不可、ceiling 固定
             effective_TAC=pen.solver_failure_okuyen,
-            failure_reason=f"solve_flowsheet で未処理例外: {type(e).__name__}: {e}",
+            failure_reason=f"solve_flowsheet で未処理例外: {exc_msg}",
+            failure_unit=f"exception:{unit_guess}",
         )
 
-    # ---- (a) solver-level 失敗 → ハード打ち切り ----
-    # 設計判断: 結果の数値が信頼できない場合 (発散・暴走・未収束) は固定値で打ち切る。
-    # 連続ペナルティを与えても情報量がなく、最適化器を惑わすだけのため。
+    # ---- (a) solver-level 失敗 → ハード打ち切り (施策 1c で TAC 連続化) ----
+    # 設計判断: 結果の数値が信頼できない場合 (発散・暴走・未収束) は失敗扱い。
+    # 旧版は固定 9999/10000 億円。本版は one_pass の shortfall 総和に応じて
+    # silent_base (= 5000) 〜 ceiling (= 10000) の幅で連続化、TPE が infeas 内序列を
+    # 学習しやすくする (詳細は _compute_solver_fail_TAC 参照)。
+    # 観測ラベル (2026-05-22): penalty_hit の場合は run_one_pass が埋めた first_failed_unit
+    # を優先使用 (= 'r_psa' / 'r_mem' / 'r_rx' / 'r1' / 'r2' / 'r3' / 'timeout' を区別)。
     s = solver_result.inner_status
+    one_pass_dict = solver_result.one_pass or {}
+    solver_fail_TAC = _compute_solver_fail_TAC(pen.solver_failure_okuyen, one_pass_dict)
     if s.penalty_hit:
+        unit_from_one_pass = one_pass_dict.get('first_failed_unit', '') or 'solver_penalty'
         return FlowsheetResult(
             solver=solver_result, economics=None, specs=None,
-            effective_TAC=pen.solver_failure_okuyen,
+            effective_TAC=solver_fail_TAC,
             failure_reason="solver-level: PSA/Mem CAPEX ペナルティ発火",
+            failure_unit=unit_from_one_pass,
         )
     if s.guard_hit:
         return FlowsheetResult(
             solver=solver_result, economics=None, specs=None,
-            effective_TAC=pen.solver_failure_okuyen,
+            effective_TAC=solver_fail_TAC,
             failure_reason="solver-level: リサイクル暴走ガード発火",
+            failure_unit="solver_guard",
         )
     if not s.converged or not solver_result.outer_status.converged:
+        if not s.converged and not solver_result.outer_status.converged:
+            fu = "solver_inner_outer_diverge"
+        elif not s.converged:
+            fu = "solver_inner_diverge"
+        else:
+            fu = "solver_outer_diverge"
         return FlowsheetResult(
             solver=solver_result, economics=None, specs=None,
-            effective_TAC=pen.solver_failure_okuyen,
+            effective_TAC=solver_fail_TAC,
             failure_reason=(
                 f"solver-level: 内側{'未' if not s.converged else ''}収束 / "
                 f"外側{'未' if not solver_result.outer_status.converged else ''}収束"
             ),
+            failure_unit=fu,
         )
 
     # ---- (a') strict recovery check (BO で rigorous 使用時の追加検査) ----
@@ -199,12 +276,13 @@ def evaluate(
                 if abs(lk_rec - spec['rec_LK_top']) > recovery_tolerance:
                     return FlowsheetResult(
                         solver=solver_result, economics=None, specs=None,
-                        effective_TAC=pen.solver_failure_okuyen,
+                        effective_TAC=solver_fail_TAC,
                         failure_reason=(
                             f"strict recovery check: {spec['name']} LK ({spec['LK']}) "
                             f"recovery={lk_rec:.3f} vs spec {spec['rec_LK_top']:.3f} "
                             f"(差 > {recovery_tolerance*100:.0f}%)"
                         ),
+                        failure_unit=f"strict_recovery_{col_key}_lk",
                     )
             else:
                 _warnings.warn(
@@ -218,11 +296,12 @@ def evaluate(
                 if abs(hk_rec - spec['rec_HK_bot']) > recovery_tolerance:
                     return FlowsheetResult(
                         solver=solver_result, economics=None, specs=None,
-                        effective_TAC=pen.solver_failure_okuyen,
+                        effective_TAC=solver_fail_TAC,
                         failure_reason=(
                             f"strict recovery check: {spec['name']} HK ({spec['HK']}) "
                             f"bot recovery={hk_rec:.3f} vs spec {spec['rec_HK_bot']:.3f}"
                         ),
+                        failure_unit=f"strict_recovery_{col_key}_hk",
                     )
             elif feed_HK <= 1e-3 and not spec['partial_cond']:
                 _warnings.warn(
@@ -422,6 +501,29 @@ def evaluate(
     one_pass = solver_result.one_pass or {}
     warnings_captured = one_pass.get('warnings_captured', []) or []
 
+    # 観測ラベル (2026-05-22): solver は完走したので spec 違反の種別を確定する。
+    #   - 全 spec pass → 'success'
+    #   - 違反あり → 主要違反 1 件で代表 (優先度: production > c3h6_purity > h2_purity)。
+    #     複数違反時はカウントは別途 user_attrs に出すので、ここでは「最初に当てる方向」だけ。
+    if not failures:
+        failure_unit = 'success'
+    elif not specs.production_pass:
+        if specs.production_direction == 'low':
+            failure_unit = 'spec_production_under'
+        elif specs.production_direction == 'high':
+            failure_unit = 'spec_production_over'
+        else:
+            failure_unit = 'spec_production'
+    elif not specs.c3h6_pass:
+        failure_unit = 'spec_c3h6_purity'
+    elif not specs.h2_pass:
+        failure_unit = 'spec_h2_purity'
+    else:
+        # proxy / trace_bypass のみで failures が立つことはあるが、これらは soft で
+        # is_feasible に影響しない (runner.py 内設計判断 2026-05-22 改良 2)。
+        # ガード: ここに来たら spec 以外の何か。
+        failure_unit = 'spec_other'
+
     return FlowsheetResult(
         solver=solver_result,
         economics=economics,
@@ -433,4 +535,33 @@ def evaluate(
         economics_synth=economics_synth,
         hen_result=hen_result,
         warnings_captured=warnings_captured,
+        failure_unit=failure_unit,
     )
+
+
+def _guess_unit_from_exception(exc_msg: str) -> str:
+    """例外メッセージから装置名を best-effort で抽出。
+
+    既知パターン:
+      - "[Dist1] ...", "[Comp2/Dist2] ..." の角括弧プレフィクス (_capture_warnings の source)
+      - "expansion_valve: ...", "simulate_pump: ..." の関数名プレフィクス
+      - "PSA", "membrane", "psa_system", "membrane_system" などキーワード
+      - "swing", "reactor" などキーワード
+    マッチしなければ 'unknown'。
+    """
+    msg_lower = exc_msg.lower()
+    for kw, label in (
+        ('dist1', 'Dist1'), ('column1', 'Dist1'),
+        ('dist2', 'Dist2'), ('column2', 'Dist2'),
+        ('dist3', 'Dist3'), ('column3', 'Dist3'),
+        ('psa', 'PSA'),
+        ('membrane', 'Mem'), ('mem_system', 'Mem'),
+        ('swing', 'Reactor'), ('reactor', 'Reactor'),
+        ('expansion_valve', 'ExpansionValve'),
+        ('compress', 'Compressor'),
+        ('cooler', 'Cooler'),
+        ('pump', 'Pump'),
+    ):
+        if kw in msg_lower:
+            return label
+    return 'unknown'

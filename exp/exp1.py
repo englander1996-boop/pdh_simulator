@@ -18,6 +18,11 @@ simulation モジュールに移譲しているので、本ファイルは「い
 import os
 import sys
 
+# 設計判断 (2026-05-24): exp1 は 3 塔とも rigorous で実行するため、既定 60s 予算では
+# リサイクル iter 数回で打ち切られる (例: 5/24 #282 再現で 4 iter 経過時点で abort)。
+# main.py の BO 予算 120s より長めに 600s を確保。
+os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '600')
+
 # Windows コンソール (cp932) でも記号を表示
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -40,72 +45,72 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # === 反応器 (Swing) ============================================================
-#  ↓ 2026-05-20 (00:36 run): main_20260520_003551 BO 完了。
-#    BO ベスト trial #32 (TAC_bo=294.87) は rigorous 再評価で strict-recovery 違反
-#    (Dist2 LK recovery=0.877 vs spec 0.99) → infeasible (TAC_re=10000)。
-#    実用ベストは top-k rank 2 = trial #115 (rigorous でも feasible):
-#      TAC_re (Stage 2 後) = 331.68 億円/年、C3H6 純度 99.78 wt% ✓、
-#      H2 純度 99.99 mol% ✓、生産量 1193 kmol/h (target 1188 達成)。
-#    出力先: outputs/main_20260520_003551/
-T_in_K        = 955.6260    # K       入口温度
-z_cat_m       = 21.0550     # m       触媒層長さ
-t_cyc_min     = 14.2111     # min     1 サイクル運転時間
-D_reactor_m   = 8.4363      # m       反応器内径
+#  ↓ 2026-05-24 run: main_20260524_001733 BO 完了 (300 trial、feas 112)。
+#    BO ベスト trial #282: effective_TAC=978.54 (BO/HI), top-k 再評価で 994.73 (Stage2 後)。
+#    rigorous 再評価でも feasible 維持、C3H6 純度 99.77 wt% ✓、H2 純度 100.00 mol% ✓、
+#    生産量 1129.5 kmol/h (target 1188、片側 spec ≥1176 ぎりぎり満たし)。
+#    出力先: outputs/main_20260524_001733/
+#    変更点 (5/20 → 5/24): rec_LK_top_dist3 / rec_HK_bot_dist3 が BO 変数化、
+#                          目的関数 effective_TAC = TAC のみ (revenue 除去、5/21 指示)。
+T_in_K        = 927.8081    # K       入口温度
+z_cat_m       = 24.9056     # m       触媒層長さ
+t_cyc_min     = 19.2032     # min     1 サイクル運転時間
+D_reactor_m   = 8.0795      # m       反応器内径
 
 
 # === PSA (Dist2 塔頂から H2 回収) ==============================================
-D_psa_col_m       = 3.3187    # m       塔径
-L_psa_bed_m       = 25.6086   # m       吸着層高さ
-desorption_target = 0.2805    # -
+D_psa_col_m       = 4.9535    # m       塔径
+L_psa_bed_m       = 23.5832   # m       吸着層高さ
+desorption_target = 0.3728    # -
 
 
 # === 膜分離 (Dist2 塔底から C3H6/C3H8 を分離) ===================================
-P_H_Pa     = 7.5403e5    # Pa      膜供給側圧力
+P_H_Pa     = 8.7451e5    # Pa      膜供給側圧力
 P_L_Pa     = 1.0e5       # Pa      透過側圧力 (大気圧固定)
-A_mem_m2   = 1.2085e5    # m²      総膜面積
+A_mem_m2   = 1.4530e5    # m²      総膜面積
 
 
 # === Dist1 (脱ブタン塔: C3 ←→ C4 分離) =========================================
 #  N_feed は探索対象外 (rigorous/sm では core 側 Kirkbride 推奨を自動採用、本値無視)。
 #  参考表示は results.equipment.N_feed_kirkbride を見ること (2026-05-19 改訂)。
-P_dist1_Pa     = 20.3468e5   # Pa      操作圧力
-N_dist1        = 29          # -       理論段数
-reflux_dist1   = 2.1669      # -       還流比
+P_dist1_Pa     = 16.3263e5   # Pa      操作圧力
+N_dist1        = 22          # -       理論段数
+reflux_dist1   = 2.3130      # -       還流比
 
 
 # === Dist2 (脱エタン塔: 軽質ガス ←→ C3) ========================================
-P_dist2_Pa     = 5.1724e5    # Pa      操作圧力
-N_dist2        = 35          # -       理論段数
-reflux_dist2   = 9.5533      # -       還流比
+P_dist2_Pa     = 5.5843e5    # Pa      操作圧力
+N_dist2        = 38          # -       理論段数
+reflux_dist2   = 8.0627      # -       還流比
 
 
 # === Dist3 (C3 スプリッタ: C3H6 製品精製) ======================================
-#  ↑ 2026-05-19: 動的 recovery_HK_bot 導入 (column3.py で純度 spec から逆算)
-#    旧版は recovery=0.99 hardcode + Gilliland check で N=174 強制 (純度 100% overspec)
-#    現版は spec 99.5 wt% に対応する rec_HK_bot ≒ 0.63 を動的計算、BO が N=100 (下限) を選択
-P_dist3_Pa     = 22.8693e5   # Pa      操作圧力 (= mem.P_dist と同期)
-N_dist3        = 91          # -       理論段数
-reflux_dist3   = 18.5171     # -       還流比
+#  ↑ 2026-05-23: rec_LK_top_dist3 / rec_HK_bot_dist3 を BO 変数化
+#    (ハードコード 0.99 / 動的逆算 を撤廃、TPE が purity ぎりぎり設計を探索可能化)
+P_dist3_Pa     = 17.4284e5   # Pa      操作圧力 (= mem.P_dist と同期)
+N_dist3        = 121         # -       理論段数
+reflux_dist3   = 10.1054     # -       還流比
 
 
 # === Fresh LPG (BO 直接指定、外側ループ skip) ==================================
-#  ↓ 2026-05-20 (00:36): top-k rank 2 = trial #115
-F_C3H8_fresh_kmol_h = 1647.5800
+#  ↓ 2026-05-24 BO trial #282
+F_C3H8_fresh_kmol_h = 1425.0807
 
 
 # === 蒸留塔 recovery (None = 0.99 既定値、float = 上書き) ======================
 #  recovery_LK_top: 軽質キーが塔頂で回収される割合 (high = 損失↓ 但し N/R 大に)
 #  recovery_HK_bot: 重質キーが塔底で回収される割合 (high = 純度↑ 但し N/R 大に)
 #  None で 0.99 (旧 hardcode)、float (例 0.95-0.999) で上書き可能
-rec_LK_top_dist1 = None    # Dist1: C3H8 in top
-rec_HK_bot_dist1 = None    # Dist1: C4H10 in bottom
-rec_LK_top_dist2 = 0.9896  # Dist2: C2H6 in top (BO trial #115)
-rec_HK_bot_dist2 = 0.9995  # Dist2: C3H8 in bottom (BO trial #115、PSA への C3 漏洩抑制)
-rec_LK_top_dist3 = None    # Dist3: C3H6 in top
-rec_HK_bot_dist3 = None    # Dist3: C3H8 in bottom (C3H6 純度に直結)
-                           # 2026-05-19〜: None なら column3 ラッパ内で「製品純度 99.5 wt%
-                           # spec から動的逆算」(units/separators/column3/column3.py)。
-                           # float 指定すれば明示値で動く (overspec を意図的に作るときのみ)。
+rec_LK_top_dist1 = None      # Dist1: C3H8 in top
+rec_HK_bot_dist1 = None      # Dist1: C4H10 in bottom
+rec_LK_top_dist2 = 0.9675    # Dist2: C2H6 in top (BO trial #282)
+rec_HK_bot_dist2 = 0.9986    # Dist2: C3H8 in bottom (BO trial #282、PSA への C3 漏洩抑制)
+rec_LK_top_dist3 = 0.9859    # Dist3: C3H6 in top (BO trial #282、5/23 変数化)
+rec_HK_bot_dist3 = 0.9838    # Dist3: C3H8 in bottom (BO trial #282、C3H6 純度に直結)
+                             # 旧版コメント (~5/19) では None で「製品純度 99.5 wt% spec から
+                             # 動的逆算」だったが、2026-05-23 forensic で BO 変数化済み
+                             # (search_space.py:296-307)。BO が purity ぎりぎり設計を
+                             # 探索できるよう float で明示。
 
 
 # ===========================================================================

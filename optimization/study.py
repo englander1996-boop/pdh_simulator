@@ -126,6 +126,7 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
                                        TPE が borderline 滞留から離れる方向シグナル: Dist2 厚化/分離強化)
       [20] trace_bypass_mem_excess   : Mem trace bypass 閾値超過分 [fraction] (2026-05-22 改良2 追加、
                                        同上、Mem 経路の非 C3 混入率)
+      [21] unknown_failure           : is_feasible=False かつ全 shortfall=0 で 1.0 (silent infeas 保険)
 
     設計判断 (2026-05-20): 旧版は [proxy, feas_flag] の 2 制約のみで、ValueError
     (Dist1 FUG 全ゼロ)・Wang-Henke 失敗 (Dist2) 等の異種 infeasibility が同じ
@@ -140,31 +141,75 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     TPE は constraint 違反 trial を「達成不可能と判断するための情報」として使う。
     n_startup_trials 後の TPE モデルに非線形な選好を入れられる。
     """
-    proxy = trial.user_attrs.get('proxy_penalty_total_okuyen', 0.0)
+    # 設計判断 (2026-05-22 forensic, 施策 1b): constraint 値域を「marginal violation で 1.0」に正規化。
+    # 旧版は raw 値をそのまま使っており、scale 差が大きいと TPE 内のランキングが歪む:
+    #   - production_pp: 0-15 (大、median violation ~3.6)
+    #   - mem_bp_shortfall: 0-0.008 (小、median ~0.007)
+    #   - proxy: 0-200 [億円] (極大、median ~30)
+    #   - reactor_sv: 0-0.36 (小)
+    # raw 値で TPE が constraint 違反量を sum すると proxy + prod_pp が他を圧倒し、
+    # 個別装置の方向シグナル (mem_bp 等) が埋もれる。
+    # 各 scale を「典型的な marginal 違反」が ~1.0 に揃うよう係数を掛ける。
+    # 既に O(1) スケールのもの (d_N, log10 系) はスルー。
+    proxy_raw = trial.user_attrs.get('proxy_penalty_total_okuyen', 0.0)
+    proxy = proxy_raw * 0.1                                                    # 10 億円 = 1.0
     is_feasible = trial.user_attrs.get('is_feasible', True)
     feas_violation = 0.0 if is_feasible else 1.0
-    d1_N  = trial.user_attrs.get('dist1_N_shortfall', 0.0)
+    d1_N  = trial.user_attrs.get('dist1_N_shortfall', 0.0)                     # 0-1, 既に O(1)
     d2_N  = trial.user_attrs.get('dist2_N_shortfall', 0.0)
     d3_N  = trial.user_attrs.get('dist3_N_shortfall', 0.0)
-    d1_dT = trial.user_attrs.get('dist1_dT_shortfall', 0.0)
+    d1_dT = trial.user_attrs.get('dist1_dT_shortfall', 0.0)                    # log10 ratio, 既に O(1)
     d2_dT = trial.user_attrs.get('dist2_dT_shortfall', 0.0)
     d3_dT = trial.user_attrs.get('dist3_dT_shortfall', 0.0)
-    psa_t = trial.user_attrs.get('psa_t_abs_shortfall', 0.0)
+    psa_t = trial.user_attrs.get('psa_t_abs_shortfall', 0.0)                   # log10, 既に O(1)
     psa_u = trial.user_attrs.get('psa_u_0_shortfall', 0.0)
-    psa_f = trial.user_attrs.get('psa_feed_shortfall', 0.0)
-    rx_sv = trial.user_attrs.get('reactor_sv_shortfall', 0.0)
-    rx_ot = trial.user_attrs.get('reactor_other_shortfall', 0.0)
-    prod_under = trial.user_attrs.get('production_under_pp', 0.0)
-    prod_over  = trial.user_attrs.get('production_over_pp', 0.0)
-    mem_ph    = trial.user_attrs.get('mem_ph_shortfall',    0.0)
-    mem_bp    = trial.user_attrs.get('mem_bp_shortfall',    0.0)
-    mem_phase = trial.user_attrs.get('mem_phase_shortfall', 0.0)
-    mem_other = trial.user_attrs.get('mem_other_shortfall', 0.0)
-    tb_psa    = trial.user_attrs.get('trace_bypass_psa_excess', 0.0)
-    tb_mem    = trial.user_attrs.get('trace_bypass_mem_excess', 0.0)
+    psa_f = trial.user_attrs.get('psa_feed_shortfall', 0.0)                    # binary
+    rx_sv_raw = trial.user_attrs.get('reactor_sv_shortfall', 0.0)
+    # 設計判断 (2026-05-23 forensic, main_20260523_172800): 倍率 5.0 → 20.0 に拡大。
+    # 根拠: 172800 run の r_rx fail trial (16件) の reactor_sv_shortfall raw 値は 0.02-0.13、
+    #   ×5 後でも 0.1-0.6 で、他の constraint 信号 (prod_pp 1.0, proxy 1.0, d_N O(1)) と
+    #   比べて弱信号。これが「D_reactor を bounds で絞ったら r_rx が増えた」(165334→172800
+    #   で r_rx 11→16) の構造的説明: 旧 bounds では TPE が「D=9.5-10.0 = SV 安全帯」を
+    #   弱信号でも学習できていたが、新 bounds で安全帯を切られると弱信号では D=7.5 への
+    #   張付きを振り払えなかった。bounds で切るのではなく constraint で学習させるという
+    #   撤退判断 (5/23) と整合させるため、SV 信号自体を強化する。
+    # ×20 後の典型値: 0.4-2.6 で他信号と同水準。期待: r_rx 11 件 → 5-7 件 (172800 撤退後ベース)。
+    rx_sv = rx_sv_raw * 20.0                                                   # log10 ratio が小さいため強拡大
+    rx_ot = trial.user_attrs.get('reactor_other_shortfall', 0.0)               # binary
+    prod_under_raw = trial.user_attrs.get('production_under_pp', 0.0)
+    prod_under = prod_under_raw * 0.2                                          # 5 pp = 1.0
+    prod_over_raw  = trial.user_attrs.get('production_over_pp', 0.0)
+    prod_over  = prod_over_raw * 0.2
+    mem_ph    = trial.user_attrs.get('mem_ph_shortfall',    0.0)               # log10 ratio, O(1)
+    mem_bp_raw = trial.user_attrs.get('mem_bp_shortfall',    0.0)
+    mem_bp    = mem_bp_raw * 50.0                                              # 0.02 = 1.0 (T_bp gap ~5K 相当)
+    mem_phase = trial.user_attrs.get('mem_phase_shortfall', 0.0)               # log10, O(1)
+    mem_other = trial.user_attrs.get('mem_other_shortfall', 0.0)               # binary
+    tb_psa_raw = trial.user_attrs.get('trace_bypass_psa_excess', 0.0)
+    tb_psa    = tb_psa_raw * 100.0                                             # 1% 超過 = 1.0
+    tb_mem_raw = trial.user_attrs.get('trace_bypass_mem_excess', 0.0)
+    tb_mem    = tb_mem_raw * 100.0
+    # 設計判断 (2026-05-22 forensic, 施策 1a): silent constraint plug。
+    # is_feasible=False かつ全 shortfall=0 (= 完全 silent infeas) なる trial は、
+    # 旧版だと constraints_func が全要素 0 を返し、TPE は「constraint 上は feas」と
+    # 誤判定し得る。is_feasible=False 単独だけが伝わる状態は学習素材として弱い。
+    # 214750 run forensic で 50/130=38% が silent → unknown_failure_penalty=1.0 で
+    # 「ここは原因不明だが infeas」を TPE に最低限伝える。
+    # 観測強化コード (2026-05-22) で大半の silent は failure_unit + 個別 shortfall で
+    # 解消するが、未知 / timeout / exception 経路の保険として残す。
+    # raw 値で判定 (normalize 後の値だと小さい raw 値が「silent」誤判定するため)
+    raw_total = (
+        proxy_raw + d1_N + d2_N + d3_N + d1_dT + d2_dT + d3_dT +
+        psa_t + psa_u + psa_f + rx_sv_raw + rx_ot +
+        prod_under_raw + prod_over_raw +
+        mem_ph + mem_bp_raw + mem_phase + mem_other +
+        tb_psa_raw + tb_mem_raw
+    )
+    unknown_failure = 1.0 if (not is_feasible and raw_total == 0.0) else 0.0
     return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
             psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over,
-            mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem]
+            mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem,
+            unknown_failure]
 
 
 def make_sampler(
@@ -199,10 +244,29 @@ def make_sampler(
         # 21 次元空間で pure random は coverage 偏り発生 → 狭い feasible 領域を見逃しがち。
         # Sobol 低乖離点列で序盤 100 trial を網羅的サンプリング、TPE が「とにかく feasible
         # を 1 つでも掴む」確率を底上げする。
+        # 設計判断 (2026-05-23 forensic, main_20260523_190747): multivariate=True と
+        # n_ei_candidates=200 を追加 (施策 P + Q)。
+        # 背景: 190747 run の 35 trial 時点で TPE phase が「A_mem=1e5 帯 + N_d3=117 + R_d3=13.85」
+        # の局所最適に張り付き、QMC で見つかった best #18 (A_mem=2.84e5, N_d3=107, R_d3=10.94,
+        # TAC=1007.35) を捨てて TAC=1068-1100 帯に集中。
+        # feasible 9件中 #18 と #3 が「A_mem 大 ↔ N_d3 小 ↔ R_d3 小」の負相関を示しており、
+        # 物理的に「Mem 大→C3 損失少→Dist3 薄くて良い」という設計の自由度がある。
+        # 旧 TPE は各変数を独立 KDE で扱うため、この変数間相関を学習できなかった。
+        #
+        # 施策 P (multivariate=True): Parzen estimator を多変量化、A_mem×N_d3×R_d3 の
+        # 相関構造を学習させる。学習素材 (feasible) 9 件は最低ライン、TPE が #18 系統を
+        # 「高 A_mem パターン」として認識できる土台を作る。
+        # 副作用: 計算やや重い (1 trial 中 ~10ms 増)、過学習リスク (feasible 少時)。
+        #
+        # 施策 Q (n_ei_candidates=200): 各 trial で 200 候補から最良 EI を選ぶ (デフォルト 24)。
+        # 24 だと候補が直近成功領域に集中しがち、exploitation 偏重を緩和。
+        # 副作用: best 収束ペースが緩む可能性 (exploration 強化のトレードオフ)。
         tpe = optuna.samplers.TPESampler(
             seed=seed,
             n_startup_trials=n_startup,
             constraints_func=cf,
+            multivariate=True,                  # 施策 P (変数間相関学習)
+            n_ei_candidates=200,                # 施策 Q (exploration 強化、デフォルト 24)
         )
         if n_startup > 0:
             try:

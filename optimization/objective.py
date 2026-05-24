@@ -97,6 +97,12 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
     """Trial.user_attrs に診断情報を格納。Reporting で CSV カラムとして抽出できる。"""
     trial.set_user_attr('failure_reason', result.failure_reason)
     trial.set_user_attr('is_feasible', result.is_feasible)
+    # 設計判断 (2026-05-22 L1 観測強化): failure_unit (categorical) を保存。
+    # callbacks.py が live 表示・tally に使う。CSV groupby 用にも便利。
+    # 値の定義は flowsheet/runner.py の FlowsheetResult 内コメント参照。
+    fu = getattr(result, 'failure_unit', '') or ''
+    if fu:
+        trial.set_user_attr('failure_unit', fu)
 
     if result.economics is not None:
         trial.set_user_attr('TAC_okuyen',     result.economics.TAC)
@@ -195,3 +201,52 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
             v = op.get(tb_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(tb_key, float(v))
+
+        # 設計判断 (2026-05-22 L1 観測強化): 装置別の penalty_reason (categorical 文字列) と
+        # key actual 値を user_attr に保存。failure_unit (= "どの装置で詰まったか") に対し、
+        # こちらは「その装置内のどのラベルか」「実値はいくつか」のサブ情報。
+        # 例: failure_unit='r_mem' に対し mem_penalty_reason='bp_le_cold_out',
+        # mem_T_bp_perm_actual_K=305.2, mem_T_cold_out_actual_K=313.0。
+        # callbacks.py が「Mem.bp_le_cold_out (T_bp=305<313)」のような live 表示に使う。
+        # run_one_pass の _extract_unit_diagnostics が one_pass dict に書き込み済み。
+        # 0 / '' は default 値なので保存スキップ (CSV を肥大化させない)。
+        # str 系
+        for str_key in ('first_failed_unit',
+                        'reactor_penalty_reason', 'psa_penalty_reason', 'mem_penalty_reason',
+                        'r1_penalty_msg', 'r2_penalty_msg', 'r3_penalty_msg'):
+            v = op.get(str_key, '') or ''
+            if v:
+                trial.set_user_attr(str_key, str(v))
+        # float 系
+        for num_key in (
+            'reactor_SV_actual_m_s',
+            'psa_t_abs_actual_s', 'psa_u_0_actual_m_s',
+            'mem_P_H_actual_Pa', 'mem_P_feed_actual_Pa',
+            'mem_T_dew_actual_K', 'mem_T_feed_actual_K',
+            'mem_T_bp_perm_actual_K', 'mem_T_cold_out_actual_K',
+            'r1_N_needed', 'r1_dT_max_K',
+            'r2_N_needed', 'r2_dT_max_K',
+            'r3_N_needed', 'r3_dT_max_K',
+        ):
+            v = op.get(num_key, 0.0) or 0.0
+            if v > 0:
+                trial.set_user_attr(num_key, float(v))
+
+    # 設計判断 (2026-05-22 L1 観測強化): warning ソース別カウント。
+    # run_one_pass が _capture_warnings 経由で全 warning を集約済み (silent fallback
+    # 検出用)。1 trial の warning 総数 + source 別カウントを保存し、「Dist2 で
+    # 5 warning が出てる trial が増えている」のようなパターンを CSV で追える形に。
+    wc = result.warnings_captured or []
+    if wc:
+        trial.set_user_attr('warnings_count_total', len(wc))
+        # source 別カウント (例: "Dist1=2 PSA=1 Mem=3" の形式文字列で保存)
+        from collections import Counter
+        src_counter: Counter = Counter()
+        for w in wc:
+            src = getattr(w, 'source', 'unknown') or 'unknown'
+            src_counter[src] += 1
+        if src_counter:
+            trial.set_user_attr(
+                'warnings_count_by_source',
+                ' '.join(f"{k}={v}" for k, v in src_counter.most_common()),
+            )

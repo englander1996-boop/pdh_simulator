@@ -50,7 +50,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # § 1. 最適化ハイパラ
 # ===========================================================================
 N_TRIALS    = 300            # Optuna 試行回数 (FUG なら ~15 分目安)
-N_STARTUP   = 50             # TPE startup 数 (Sobol QMC で広域カバレッジ → TPE 切替)
+# 設計判断 (2026-05-22 forensic, 施策 3b): 50 → 25 に縮小。
+# 旧 50 は「QMC で広域 1/6 を網羅 → TPE 起動」の意図だったが、214750 run で 50 trial
+# 全部 feas=0 のまま消費 (= QMC は constraints_func を使わない)。25 に下げて TPE を
+# 早期起動、QMC で得た shortfall 情報を TPE が早く活用する。
+# 設計判断 (2026-05-23 forensic, main_20260523_190747, 施策 R): 25 → 50 に拡大。
+# 旧 25 への縮小判断は 214750 時点 (feas 率 0%) の状況、現状は施策 A/B/C/E/F で
+# 190747 run feas 率 26% (9/35) に改善済み。QMC 50 trial なら feasible ~13 件期待。
+# 真の狙い: QMC 25 trial では A_mem 上限近傍 (>2e5) の Sobol 点が 1-2 件しか出ず、
+# TPE が「A_mem 大」を学習素材不足で異常値扱いしていた (190747 best #18 A_mem=2.84e5 を
+# TPE が再現できず TAC 1007→1068+ に劣化した構造的原因)。
+# 50 trial に拡張で A_mem ∈ [2e5, 3e5] の feasible が 3-5 件期待、TPE 起動時の素材確保。
+# 副作用: best 収束が QMC 段階の長期化でやや遅れる (TPE 学習開始が trial 50 から)。
+N_STARTUP   = 50             # TPE startup 数 (旧 25→50、A_mem 高領域の Sobol 素材確保)
 N_TOPK      = 10             # top-k 再評価候補数
 SEED        = 42             # 乱数シード (再現用)
 SAMPLER     = 'tpe'          # 'tpe' | 'cmaes' | 'random'
@@ -118,15 +130,36 @@ SEARCH_SPACE = {
     # best が 167→641 に劣化」が判明。124508 run (best=167.74) と同等の b1712d1
     # bounds + N_dist3 下限 80 (124508 best は N=93) に巻き戻し、過去 top feas を
     # warm-start で先頭注入する戦略へ移行。
-    'T_in_K':            (900.0,  970.0,  'linear', 'float'),  # K
+    # 設計判断 (2026-05-23 forensic, main_20260523_085918): 上限 970→940K に縮小。
+    # 085918 で TPE が高 T_in (940-970K) に 95% 集中 + F×D clip で実 F=927 (= F_min 1380 を
+    # 大幅に下回る) → spec_production_under 50 件の主因に。
+    # 高 T_in dead zone を物理的に切って TPE を低 T_in 領域 (880-920K = 黄金帯) へ強制誘導。
+    # 黄金帯エビデンス: QMC で T_in<920K の 4 件が TAC 1054-1333 (#12, #26, #30, #5)。
+    # 旧 970K 上限は「過去 best 940K 等を含める」目的だったが、085918 forensic で
+    # 高 T_in は production 維持できないと判明、上限切り詰めが正解。
+    'T_in_K':            (880.0,  940.0,  'linear', 'float'),  # K (上限 970→940, 高 T_in dead zone 排除)
     'z_cat_m':           (15.0,   40.0,   'linear', 'float'),  # m
     't_cyc_min':         (12.0,   25.0,   'linear', 'float'),  # min
-    'D_reactor_m':       (7.0,    10.0,   'linear', 'float'),  # m
+    # 設計判断 (2026-05-23 forensic, main_20260523_172800 撤退): bounds 縮小 (7.5, 9.5) は失敗。
+    # 試行: 165334 で r_rx=4件 (D≤7.6 / D=9.81) を切るため (7.0,10.0)→(7.5,9.5) に縮小。
+    # 結果: 172800 trial 0-44 で r_rx=13件に悪化 (3.25倍)。TPE が新下限 D=7.5-8.2 に張り付き、
+    #   小 V_cat 象限 (z_cat=15-22m, t_cyc=12-15min) と組み合わさり SV>3 を連発。
+    #   旧 bounds の「D=9.5-10.0 = SV 安全帯」を切ったことで TPE の逃げ場が消えた。
+    # 教訓: bounds で切るより constraint (reactor_sv_shortfall) で学習させるべき罠。
+    #   F×D SV カップリング廃止 (5/23 085918) と同じく「過剰介入」のパターン。
+    # 撤退: 旧 (7.0, 10.0) に巻き戻し、SV violation は constraints_func の信号に委ねる。
+    'D_reactor_m':       (7.0,    10.0,   'linear', 'float'),  # m (撤退、SV は constraint 側で学習)
 
     # ----- PSA -----
-    'D_psa_col_m':       (2.5,    5.0,    'linear', 'float'),  # m
-    'L_psa_bed_m':       (15.0,   30.0,   'linear', 'float'),  # m
-    'desorption_target': (0.15,   0.40,   'linear', 'float'),  # -
+    # 設計判断 (2026-05-23 forensic, main_20260523_001237): PSA bounds 縮小。
+    # 根拠: 45 trial run の直近 20 trial で r_psa.t_abs_below_min が 12 件 (60%)、
+    # TPE が「D_psa≈3.2 + L≈22 + des≈0.23」の局所最適に張り付き、PSA 規模が
+    # 物理的に足りない領域から抜けられなかった (#43/#44 でほぼ同じ params 再試行)。
+    # feas 2 件は L≥17 + des≥0.22。下限を「既知 feas の下限 + 余裕」に上げ、
+    # 規模不足ゾーンを物理的に削除する。
+    'D_psa_col_m':       (2.9,    5.0,    'linear', 'float'),  # m (下限 2.5 → 2.9, feas #15 の 2.97 を救う)
+    'L_psa_bed_m':       (22.0,   30.0,   'linear', 'float'),  # m (下限 15 → 22, feas #15 の 25.3 内側)
+    'desorption_target': (0.22,   0.40,   'linear', 'float'),  # - (下限 0.15 → 0.22, feas 2件は 0.23-0.24)
 
     # ----- 膜 (P_L は 1 atm 固定、P_dist は Dist3 と同期) -----
     'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),  # Pa
@@ -138,40 +171,88 @@ SEARCH_SPACE = {
     'A_mem_m2':          (5.0e4,  3.0e5,  'log',    'float'),  # m² (124508 best は 2.84e5)
 
     # ----- Dist1 (脱ブタン塔) -----
-    'P_dist1_Pa':        (12.0e5, 25.0e5, 'linear', 'float'),  # Pa
-    'N_dist1':           (16,     30,     'linear', 'int'  ),  # -
-    'reflux_dist1':      (1.5,    3.0,    'linear', 'float'),  # -  維持 (dist1_N_shortfall 中央 R=1.68、yield 中立)
+    # 設計判断 (2026-05-23 forensic, main_20260523_165334 trial 0-38):
+    # r1 fail 12件 (= 全体 31%) は「P_dist1 ∈ [20.5, 25.0] bar × R_dist1 ∈ [1.55, 2.17]」
+    # の組合せに全件集中。高 P → α 縮小 → R_min↑ → 与えた R が R_min ぎりぎり →
+    # Gilliland N_needed = 26-37 が爆発、N_dist1 上限 30 で届かない罠。
+    # 物理的解釈: 「P↑したら R↑も必要」という相関が独立 suggest に反映されない構造。
+    # 過去 best (124508 P=20.5/R=2.20, 050049 P=12.6/R=1.58) は P×R 平面の
+    # 「低P低R or 中P高R」帯。高P低R 象限は経済的にも非報酬域。
+    # 上限 25→20 bar で右端切除、R 下限 1.5→2.0 で低 R 切除して罠 A を物理排除。
+    'P_dist1_Pa':        (12.0e5, 20.0e5, 'linear', 'float'),  # Pa (上限 25→20, 高P罠切除)
+    # 設計判断 (2026-05-23 forensic, main_20260523_085918): 下限 16→20 に引上げ。
+    # r1 fail 11 件中 7 件が N_dist1≤18 (= Gilliland N_needed 不足)。これが低 T_in 帯に
+    # 集中したため、TPE は「低 T_in = r1 fail = 悪い」と spurious correlation で誤学習し、
+    # 黄金帯 (低 T_in) を 95% 避ける挙動に。N_dist1≥20 にすることで r1 fail を構造的に
+    # 削減、TPE の誤学習素材を除去。過去 best (#12 N=29, #272 N=28) は新範囲内。
+    'N_dist1':           (20,     30,     'linear', 'int'  ),  # - (下限 16→20, r1 fail 削減)
+    # 設計判断 (2026-05-23 forensic, main_20260523_165334): 下限 1.5→2.0 に引上げ。
+    # 165334 run で R≤2.0 の r1 fail が連発 (12件中 9件が R<2.0)。R=1.5-2.0 は
+    # 過去 best (124508 R=2.20, 050049 R=1.58) のうち 050049 の 1.58 だけ切るが、
+    # 050049 系は Dist1 narrow margin で rigorous 再現性が怪しい設計のため切捨て妥協。
+    'reflux_dist1':      (2.0,    3.0,    'linear', 'float'),  # -  (下限 1.5→2.0, r1 fail 削減)
 
     # ----- Dist2 (脱エタン塔, partial cond) -----
     # 設計判断 (2026-05-21 D-plan revert): P_dist2 を b1712d1 (5.0, 7.0)e5 に戻す。
     # 124508 best は P_dist2=5.41e5、5/20 縮小の下限 5.5e5 で切られてた。
     'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),  # Pa (124508 best は 5.41e5)
-    # 設計判断 (2026-05-22 改良 3): N_dist2 上限を 40 → 50 に拡張。
-    # 根拠: main_20260522_094436 で trace bypass borderline trial 群が全て
-    # N_dist2 ∈ [35, 40] (上限張り付き) + reflux_dist2 ≈ 10.0 (上限張り付き) だった。
-    # TPE は Dist2 を物理限界まで詰めても C3H6 漏れ 1% 閾値を切れない状態。
-    # N=40→50 拡張で C3H6 漏れを更に抑える余地を与える。Wang-Henke 計算時間は
-    # N に対し ~線形なので +25% 程度の per-trial 増加見込み。
-    # 履歴 best (N=22) は範囲内、下限 20 は維持。
-    'N_dist2':           (20,     50,     'linear', 'int'  ),  # - (124508 best は 22)
+    # 設計判断 (2026-05-22 forensic 反映、214750 run): N_dist2 上限を 50 → 40 に戻す。
+    # 根拠: 5/22 改良 3 で 40→50 拡張したが、main_20260522_214750 (n=130 stopped)
+    # で TPE phase 80 trial の 45% が N_dist2 ≥ 45 領域に張り付き、dist2_dT_shortfall
+    # NZ 14 件全てが N=45-50 で Wang-Henke 不収束 (dT_max≈20K)。物理的に収束不可な
+    # 領域に TPE が誤誘導された罠。上限 40 に戻して罠を物理的に閉鎖。
+    # 124508 best (N=22) は新範囲内、下限 20 維持。
+    'N_dist2':           (20,     40,     'linear', 'int'  ),  # - (124508 best は 22)
     'reflux_dist2':      (6.0,    10.0,   'linear', 'float'),  # -  維持 (Wang-Henke 収束、yield 中立)
 
     # ----- Dist3 (C3 スプリッタ, narrow-α) -----
-    # 設計判断 (2026-05-22 E-plan): P_dist3 下限を 15e5 → 16e5 に引上げ。
-    # 根拠: main_20260522_005631 forensic 解析で P_dist3 ∈ [15, 16) bar の 110 trial が
-    #   100% PSA/Mem CAPEX sentinel hit (= 完全な dead zone)。Mem 製品冷却器の Case A
-    #   制約 (bp_perm ≤ T_cold_out=40°C で温度クロス → 冷却水で凝縮不可) が 15 bar 付近で
-    #   組成依存に発火。16 bar 以上でも 79% hard だが 17 bar 帯では 60% に下がる。
-    # 履歴 best (TAC=167.74, P_dist3=16.72 bar) は新範囲内で保全。
-    'P_dist3_Pa':        (16.0e5, 25.0e5, 'linear', 'float'),  # Pa
+    # 設計判断 (2026-05-23 forensic, main_20260523_004243): P_dist3 上限 25→19 + 下限 17→16。
+    # 根拠: 004243 run で TPE が P_dist3 中央値 22-23 bar に向かい、α 悪化で N_dist3 が
+    # 171 まで爆増、Dist3 CAPEX 414 億円 (全 CAPEX の 70%) になった。
+    # 過去 best (TAC=167.74, P_dist3=16.72bar, N_dist3=93) を含めるため下限 17→16、
+    # かつ「TPE が高 P_dist3 罠に再び向かう」のを防ぐため上限 25→19 に縛る。
+    # 補完: mem_bp_shortfall 対策は 16bar 帯でも shortfall シグナルが TPE に渡るので
+    # 自動学習を期待 (P_dist3 を 16→17 bar 上げると Mem が楽になる方向シグナルは残る)。
+    'P_dist3_Pa':        (16.0e5, 19.0e5, 'linear', 'float'),  # Pa (過去 best 16.72 を含む)
     # 設計判断 (2026-05-21 D-plan): N_dist3 下限を 80 に。124508 best (TAC=167.74) は N=93。
-    'N_dist3':           (80,    250,    'linear', 'int'  ),  # - (124508 best は 93)
-    # 設計判断 (2026-05-21 D-plan revert): reflux_dist3 を b1712d1 (11, 20) に戻す。
-    # 124508 best は R=11.5、5/20 縮小の下限 14 で切られてた。
-    'reflux_dist3':      (11.0,   20.0,   'linear', 'float'),  # - (124508 best は 11.5)
+    # 設計判断 (2026-05-23 forensic, main_20260523_172800): 下限 80→90 に引上げ。
+    # 根拠: 172800 run trial #26 で N=80 + rec_HK_bot_dist3=0.982 (下限近傍) の組合せで
+    # Gilliland N_needed=103 が爆発、N=80 では届かない罠を踏んだ。
+    # rec_HK_bot_dist3 変数化 (5/23 004243) の副作用で「N 下限 + 低 rec」象限に
+    # 新たな N不足罠が生まれていた。下限を 124508 best (N=93) より少し下 (90) まで
+    # 詰めることで罠象限を排除。過去 best 93 は内側、TAC=247(050049) 系の N=132 等も影響なし。
+    # 設計判断 (2026-05-23 forensic, main_20260523_182527): 上限 250→150 に縮小。
+    # 根拠: 182527 run TPE phase (#26-29) が N_dist3=246-249 (上限張付き) で TAC=1156-1196 に
+    # 集中、同 run の QMC best #18 (N=135, TAC=1011.78) を捨てて N 上限方向に学習。
+    # 「N 大 → 純度安定 → feasible」を施策 A (spec ±5% 緩和) と組み合わせて強く学習した結果。
+    # 過去 best (124508 N=93, 050049 N=132, 182527 #18 N=135) は全て N≤135 で、N=200+ は
+    # 物理現実 (C3 splitter 標準 N=80-150) と乖離。塔高 60m 超は工業的に許容不可。
+    # 上限 150 で過去 best 全部内側、TPE の「N 上限逃げ」経路を物理的に閉鎖。
+    # 副作用: N>150 必要な低 P + 低 rec 設計は r3 (Gilliland N不足) で infeas 化。
+    # これは施策 F (reflux_dist3 下限 ↑) で軽減。
+    'N_dist3':           (90,    150,    'linear', 'int'  ),  # - (上限 250→150, N 上限逃げ閉鎖)
+    # 設計判断 (2026-05-23 forensic, main_20260523_004243): 下限 11→9 に拡張。
+    # 根拠: 004243 best (#272) は R=11.17 で R_min=8.46 → margin 32%。下限 11 だと
+    # 「R ぎりぎり」の小型 Dist3 設計を TPE が試せない構造になっていた。
+    # 9.0 ≈ R_min×1.07 まで下げれば、TPE が Gilliland の物理境界近傍を探索可能。
+    # 副作用は Wang-Henke 不収束 (= dist3_dT_shortfall) だが信号化済みで TPE 学習可能。
+    # 期待効果: Dist3 N↓ → 全 CAPEX 414→200 億円台。
+    # 設計判断 (2026-05-23 forensic, main_20260523_182527): 下限 9.0→10.0 に引上げ。
+    # 根拠: N_dist3 上限を 250→150 に縮小したため、R ぎりぎり (R≈R_min×1.07) 設計で
+    # Gilliland N_needed が 150 を超えると r3 N不足罠を踏みやすい。
+    # 過去 best (124508 R=11.50, 050049 R=11.52, 182527 #18 R=10.03) は全て R≥10、
+    # 下限 10.0 で過去 best 全部内側、かつ Gilliland safe margin (≈R_min×1.18) を確保。
+    # 副作用: R↑→ OPEX 増 (リボイラー熱負荷↑) だが、N 上限縮小と組合せで Dist3 CAPEX
+    # 純減方向 (= TAC 純減方向)。R/N トレードオフは TPE に委ねる。
+    'reflux_dist3':      (10.0,   20.0,   'linear', 'float'),  # - (下限 9→10, N=150 上限と整合)
 
     # ----- Fresh LPG (BO 直接指定、外側ループ skip) -----
-    'F_C3H8_fresh_kmol_h': (1200.0, 1700.0, 'linear', 'float'),  # kmol/h
+    # 設計判断 (2026-05-22 forensic, 214750 run): 範囲を 1200-1700 → 1380-1500 に縮小。
+    # 根拠: 214750 run で prod_under (中央 F=1620) と prod_over (中央 F=1480) が二極化、
+    # 21 件 (16%) が F_fresh 範囲端での生産量逸脱で死亡。1380-1500 は履歴 best
+    # (F=1424.1, 1414.1, 1433.2) を全部含み、prod_over/under 両側の dead zone を切る。
+    # 5/22 forensic 解析の F_fresh 別ヒストグラム支持。
+    'F_C3H8_fresh_kmol_h': (1380.0, 1500.0, 'linear', 'float'),  # kmol/h
 
     # ----- 蒸留塔 recovery -----
     # 設計判断 (2026-05-20): rec_HK_bot_dist2 の下限を 0.998 → 0.9995 に再タイト化。
@@ -192,9 +273,38 @@ SEARCH_SPACE = {
     # 設計判断 (2026-05-21 D-plan revert): 0.9995 → 0.998 に戻す。
     # 124508 best (trial 247, TAC=167.74) は rec_HK_bot=0.9997、5/20 縮小の下限 0.9995 で
     # 切られてないものの、TAC 247.37 の 050049 trial 294 (in-bounds 最良) は 0.998 ≤ rec ≤ 0.9999 領域。
-    'rec_HK_bot_dist2':  (0.998, 0.9999, 'linear', 'float'),  # C3H8 → bot (124508 best は 0.9997)
-    # 'rec_LK_top_dist3':  (0.90, 0.999, 'linear', 'float'),
-    # 'rec_HK_bot_dist3':  (0.95, 0.999, 'linear', 'float'),
+    # 設計判断 (2026-05-23 forensic, main_20260523_165334): 上限 0.9999→0.9995 に縮小。
+    # r3 (Dist3 feed flow ≤ 0) が 4件 (10%) 発生、rec_HK_bot_dist2 が高い設計で Dist2 が
+    # C3H8 を bot に過剰回収 → Dist3 入側 C3 ストリームが numeric 縮退。
+    # 上限 0.9999 は実装上 numeric 縮退を引き起こしやすい (浮動小数 epsilon 帯)。
+    # 過去 best (124508 0.9997) は新 bounds 内、TAC=247(050049) 系も 0.9995 系。
+    'rec_HK_bot_dist2':  (0.998, 0.9995, 'linear', 'float'),  # C3H8 → bot (上限 0.9999→0.9995, r3 fail 削減)
+    # 設計判断 (2026-05-23 forensic, main_20260523_004243): Dist3 recovery を BO 変数化。
+    # 根拠: 004243 best (#272 rigorous, TAC=1055) は purity 99.88wt% (spec 99.5%+0.38pp over-design)
+    # で Dist3 CAPEX が 414 億円 (全 CAPEX の 69.6%)。ハードコード 0.99 で TPE が
+    # 「purity ぎりぎり 99.5%」の Dist3 縮小設計を探れない構造になっていた。
+    # 変数化することで TPE が「purity 99.5% ギリギリ → N_dist3↓, R_dist3↓ → CAPEX↓」を
+    # 探索できる。期待効果: Dist3 CAPEX 414 → 200 億円台、TAC 1055 → 800 程度。
+    # 範囲:
+    #   rec_LK_top_dist3 (C3H6 → top): 0.985-0.999、C3H6 の製品側回収率
+    #     - 下限 0.985: C3H6 1.5% が bot へ漏れて recycle = production loss が増える上限
+    #     - 上限 0.999: 現状ハードコード相当
+    #   rec_HK_bot_dist3 (C3H8 → bot): 0.95-0.999、C3H8 の bot 側回収率 = purity 直接制御
+    #     - 下限 0.95: C3H8 5% が top へ漏れて purity ~95% = spec 違反確定
+    #     - 上限 0.999: 現状ハードコード相当 (= over-purity 設計)
+    #     - sweet spot 推定: 0.99 付近 (= purity 99.5% spec ギリギリ)
+    'rec_LK_top_dist3':  (0.985, 0.999, 'linear', 'float'),  # - C3H6 → top
+    # 設計判断 (2026-05-23 forensic, main_20260523_172800): 下限 0.95→0.97 に引上げ。
+    # 根拠: 172800 run trial #8 (rec_HK=0.981, N=101, R=10.4 で N_needed=121) と trial #26
+    # (rec_HK=0.982, N=80, R=12.5 で N_needed=103) で Dist3 N_needed 爆発罠を観測。
+    # rec_HK 低下は purity 制御として有用だが、低 rec × 中 R では Gilliland N_needed が
+    # 急増 (Underwood R_min 自体は低 rec で下がるものの、Gilliland 必要 N が伸びる構造)。
+    # 下限 0.97 は purity ~97% bot で C3H6 top 純度 ~99.5-99.8% を達成できる帯、
+    # かつ N_needed 爆発を回避できる物理的妥協点。
+    # 副作用: 「purity ぎりぎり 99.5%」狙いの極小型 Dist3 設計 (rec_HK=0.95-0.97 帯) を
+    # 探索から外す。期待効果は元の Dist3 CAPEX 削減狙い (004243 forensic) より小さくなるが、
+    # N不足罠を許容するよりは妥当。
+    'rec_HK_bot_dist3':  (0.97,  0.999, 'linear', 'float'),  # - C3H8 → bot (下限 0.95→0.97, N不足罠切除)
 }
 
 

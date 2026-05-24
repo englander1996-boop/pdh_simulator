@@ -107,6 +107,68 @@ def _apply_dependent_lows(params: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
+# ---------------------------------------------------------------------------
+# F_fresh × D_reactor SV カップリング (2026-05-22 forensic, 施策 2b)
+# ---------------------------------------------------------------------------
+# 設計判断: main_20260522_214750 (n=130 stopped) で Reactor SV>3 violation が 15件
+# (= 全体 12%)、いずれも D=7.0-7.6m + F_fresh=1200-1700 の組合せで発生。
+# SV = (F_in_total × R × T) / (P_in × A_cross × N_par) は解析的なので、suggest 直後に
+# F_fresh を「D から計算した F_max を超えていたら下げる」ことで SV>3 を構造的に回避。
+#
+# 既存 _apply_dependent_lows と同じ post-clip パターン。違いは:
+#   - 既存: 依存値より低かったら持ち上げる
+#   - 本関数: D から決まる F_max より高かったら下げる
+#
+# 推定モデル: F_in_total ≈ MULT × F_fresh (= recycle 比) と仮定。
+# 214750 forensic で測定:
+#   SV>3 cases (D=7.0-7.6, N_par=2): MULT ≈ 6.2-6.4
+#   SV<0.5 case (D=9.7, N_par=4):    MULT ≈ 2.5
+# 注意: MULT は強い非線形性あり (F 縮小すると recycle 比が増加する観測あり)。
+# 厳密な SV<3 保証は無理だが、TPE への「方向シグナル」として機能させる目的で
+# MULT=6.5 (= 214750 観測中央値 + 軽い安全マージン) を採用。
+# D=7 では F が ~836 まで clip → prod_under 発生 → TPE は D=7 回避を学習。
+# D=9.5 (履歴 best) では clip ≈ 1551 で F=1380-1500 範囲内、影響なし。
+# N_parallel は worst case = 2 を仮定 (V_cat 小=小 D & 小 z_cat の組合せ)。
+#
+# TPE 動作: Optuna は trial.params に suggest 値を記録するため、F=1500 suggest →
+# 内部で 1100 にクリップされたら、TPE は「F=1500 で objective が悪かった」と
+# 学習する (実評価は 1100)。この乖離は副作用だが、結果として TPE は「小 D 領域では
+# 実 F が抑えられて prod_under が出る → 避ける」を learn する想定。
+_SV_COUPLING_MULT     = 6.5   # recycle 倍率 (214750 中央値 6.2-6.4 + 軽い安全マージン)
+_SV_COUPLING_N_PAR    = 2     # N_parallel worst case
+_SV_COUPLING_SV_LIMIT = 3.0   # m/s (units.reactors.swing.FixedParams.SV_max_m_per_s と同期)
+_REACTOR_P_IN_PA      = 5.0e4 # config.pressure.reactor_inlet_Pa (0.5 bar 固定) と同期
+
+
+def _apply_sv_coupling(params: Dict[str, Any]) -> Dict[str, Any]:
+    """F_fresh × D_reactor SV カップリング (post-clip)。
+
+    SV ≤ 3.0 m/s を満たす F_fresh_max を D_reactor + T_in から計算し、suggest 値が
+    超過してたら F_max にクリップする。F_C3H8_fresh_kmol_h が SEARCH_SPACE に含まれない
+    場合は no-op (= F は外側ループ任せ、baseline 固定)。
+
+    解析式:
+        SV = (F_fresh × MULT × 1000/3600) × R × T_in / (P_in × A_cross × N_par)
+        F_fresh_max = SV_LIMIT × P_in × A_cross × N_par × 3600 / (MULT × 1000 × R × T_in)
+    """
+    import math
+    if 'F_C3H8_fresh_kmol_h' not in params:
+        return params
+    D = float(params.get('D_reactor_m', DEFAULT_BASELINE.get('D_reactor_m', 0.0)))
+    T_in = float(params.get('T_in_K', DEFAULT_BASELINE.get('T_in_K', 0.0)))
+    if D <= 0 or T_in <= 0:
+        return params  # 不正値ガード (本来到達不可)
+    A_cross = math.pi / 4.0 * D ** 2
+    F_max = (
+        _SV_COUPLING_SV_LIMIT * _REACTOR_P_IN_PA * A_cross
+        * _SV_COUPLING_N_PAR * 3600.0
+        / (_SV_COUPLING_MULT * 1000.0 * 8.314 * T_in)
+    )
+    if params['F_C3H8_fresh_kmol_h'] > F_max:
+        params['F_C3H8_fresh_kmol_h'] = F_max
+    return params
+
+
 # exp1 baseline 値 (suggest 対象外のキーを補完するため)
 DEFAULT_BASELINE: Dict[str, Any] = {
     # 反応器
@@ -208,6 +270,12 @@ def suggest_params(trial, search_space: Dict[str, VarSpec]) -> Dict[str, Any]:
             raise ValueError(f"未知の type {vtype!r} (許容: 'int' | 'float')")
     # 依存サンプリングのクリップ (2026-05-22 E-plan)
     _apply_dependent_lows(params)
+    # 設計判断 (2026-05-23 forensic, main_20260523_085918): F×D SV カップリング廃止。
+    # 95% の trial で発動 (= 過剰)、高 T_in で F_clip が F_min 1380 を大幅に下回り
+    # (中央 927)、spec_production_under 50 件の主因に。SV violation は
+    # reactor_sv_shortfall 信号で TPE が自然に学習するため、構造クリップは不要。
+    # 呼出し削除 (関数 _apply_sv_coupling 自体は他用途の可能性あり残置)。
+    # _apply_sv_coupling(params)  # 廃止
     return params
 
 

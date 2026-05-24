@@ -189,10 +189,19 @@ _PROXY_MARGIN_COEF_OKUYEN      = 80.0    # narrow margin 1pt につき [億円/�
 #                            実機運用 R/R_min=1.1-1.3 が一般的。1.50 だと Dist3 の
 #                            R 下限を引き下げて overspec 解消する経済探索が阻害される
 #                            (= R を下げると penalty が乗りすぎて BO が高 R に張り付く)。
-_PROXY_R_MARGIN_THRESHOLD_PARTIAL = 1.50  # partial cond の R/R_min 閾値
-_PROXY_R_MARGIN_THRESHOLD_TOTAL   = 1.30  # total   cond の R/R_min 閾値
-_PROXY_N_MARGIN_THRESHOLD_PARTIAL = 1.50  # partial cond の N/N_min 閾値
-_PROXY_N_MARGIN_THRESHOLD_TOTAL   = 1.30  # total   cond の N/N_min 閾値
+# 設計判断 (2026-05-23 forensic, main_20260523_083228): R 閾値を緩和。
+# 旧 (Partial 1.50 / Total 1.30) は「FUG-rigorous gap 防止」が目的だったが、
+# main_20260523_083228 で TPE が「R ぎりぎり Dist3 設計」(= ユーザー狙いの境界探索)
+# を試すと proxy 罰則だけで死亡する trial が頻発した:
+#   #12 (TAC=1055, c3h6=99.98%, prod ok): Dist3 R/R_min=1.24 で +1.5 億円 = infeas
+#   #26 (TAC=1080, c3h6=99.95%):          Dist2 R/R_min=1.10 で +28.7 億円 = infeas
+#   #30 (TAC=1113, T_in=882K 新領域活用):   Dist2 R/R_min=1.15 + Dist3 R/R_min=1.23 で 死亡
+# top-k で rigorous 再評価が走るため、BO loop で proxy を厳しくする必要性は低い。
+# 閾値緩和して TPE が「FUG では feas、rigorous で詰むかも」境界を探索可能にする。
+_PROXY_R_MARGIN_THRESHOLD_PARTIAL = 1.30  # partial cond の R/R_min 閾値 (1.50→1.30、Dist2)
+_PROXY_R_MARGIN_THRESHOLD_TOTAL   = 1.20  # total   cond の R/R_min 閾値 (1.30→1.20、Dist1/Dist3)
+_PROXY_N_MARGIN_THRESHOLD_PARTIAL = 1.50  # partial cond の N/N_min 閾値 (N は据置、ユーザー判断で R のみ)
+_PROXY_N_MARGIN_THRESHOLD_TOTAL   = 1.30  # total   cond の N/N_min 閾値 (同上)
 # partial cond の追加倍率 (Dist2 など、FUG 楽観性が大きい塔への上乗せ)
 _PROXY_PARTIAL_COND_MULTIPLIER = 2.0     # partial cond の塔は係数 ×2.0 で評価
 

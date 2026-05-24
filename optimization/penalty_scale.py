@@ -38,19 +38,20 @@ def get_scale() -> float:
 # ---------------------------------------------------------------------------
 
 def default_schedule(trial_num: int, n_total: int) -> float:
-    """既定 schedule: 3 段階 step。
+    """既定 schedule: 線形 0.2 → 3.0 (2026-05-23 forensic, 境界探索強化)。
 
-    序盤探索 (0.3) → 中盤標準 (1.0) → 終盤強制 (3.0)。
+    変遷:
+      - 旧旧 (3段 step 0.3/1.0/3.0): 段差で TPE が混乱、feas=0 のときも序盤甘さが無効
+      - 旧 (線形 0.5→3.0, 2026-05-22): 序盤も「弱くはない」 → 境界 trial が同等扱いに
+      - 現 (線形 0.2→3.0, 2026-05-23): 序盤を更に弱く → spec ぎりぎりの trial も TPE
+        には「悪くない TAC」として認識させる。Dist3 recovery 変数解放と組合せ、
+        「purity 99.5% ギリギリ」設計を境界 trial として TPE に学ばせる狙い。
+        feas 率↓ は許容、best TAC 優先 (ユーザー判断 2026-05-23)。
     """
     if n_total <= 1:
         return 1.0
     pct = trial_num / n_total
-    if pct < 0.30:
-        return 0.3
-    elif pct < 0.70:
-        return 1.0
-    else:
-        return 3.0
+    return 0.2 + (3.0 - 0.2) * pct
 
 
 def linear_schedule(trial_num: int, n_total: int,
