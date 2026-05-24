@@ -230,7 +230,7 @@ def _build_penalty_one_pass_result(
     P_in=0 例外を回避することが主目的。
     """
     stub = _PenaltyResult()
-    return dict(
+    result = dict(
         pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
         fresh=fresh,
         reactor_inlet=reactor_inlet,
@@ -251,7 +251,13 @@ def _build_penalty_one_pass_result(
         # Mem shortfall (Reactor 失敗で Mem 未到達 = 0 で伝播)
         mem_ph_shortfall=0.0, mem_bp_shortfall=0.0,
         mem_phase_shortfall=0.0, mem_other_shortfall=0.0,
+        # 観測ラベル (2026-05-22)
+        first_failed_unit='r_rx',
     )
+    # 上流の r1 + reactor の penalty_reason / SV_actual を抽出。下流は stub なので無視。
+    result.update(_EMPTY_UNIT_DIAG)
+    result.update(_extract_unit_diagnostics(r1=r1, r_rx=r_rx))
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +475,171 @@ def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, 
     return out
 
 
+# ---------------------------------------------------------------------------
+# 観測ラベル抽出 (2026-05-22 L1 観測強化、ユーザー要望)
+# ---------------------------------------------------------------------------
+# 設計判断: shortfall (連続値) は既に user_attrs に流れているが、各装置が持つ
+# 「どの penalty_reason ラベルで死んだか」「実 actual 値はいくつだったか」は
+# trial に届いていない。BO 走行中に「Mem.bp_le_cold_out (T_bp=305K < T_cold=313K)」
+# のような具体ラベル + 数値を live 表示できるよう、result dict に構造化フィールド
+# を埋める。表示は callbacks.py 側。
+
+# 装置別診断フィールドの default 値 (run_one_pass の戻り dict キーを揃える)。
+# str フィールドは '' で空、float は 0.0 で「未計測/未該当」を示す。
+_EMPTY_UNIT_DIAG: Dict[str, object] = {
+    'reactor_penalty_reason':   '',
+    'reactor_SV_actual_m_s':    0.0,
+    'psa_penalty_reason':       '',
+    'psa_t_abs_actual_s':       0.0,
+    'psa_u_0_actual_m_s':       0.0,
+    'mem_penalty_reason':       '',
+    'mem_P_H_actual_Pa':        0.0,
+    'mem_P_feed_actual_Pa':     0.0,
+    'mem_T_dew_actual_K':       0.0,
+    'mem_T_feed_actual_K':      0.0,
+    'mem_T_bp_perm_actual_K':   0.0,
+    'mem_T_cold_out_actual_K':  0.0,
+    'r1_penalty_msg':           '',
+    'r1_N_needed':              0.0,
+    'r1_dT_max_K':              0.0,
+    'r2_penalty_msg':           '',
+    'r2_N_needed':              0.0,
+    'r2_dT_max_K':              0.0,
+    'r3_penalty_msg':           '',
+    'r3_N_needed':              0.0,
+    'r3_dT_max_K':              0.0,
+}
+
+
+def _extract_unit_diagnostics(**unit_results) -> Dict[str, object]:
+    """各装置の equipment から penalty_reason + key actual 値を 1 dict に抽出。
+
+    Parameters
+    ----------
+    unit_results : kwargs
+        r1, r_rx, r2, r_psa, r_mem, r3 のうち計算済みのものを渡す。
+        None や stub (penalty_reason='') は無視され default 値のまま。
+
+    Returns
+    -------
+    dict
+        _EMPTY_UNIT_DIAG と同じキーセット。BO の trial.user_attrs にそのまま展開可能。
+    """
+    d: Dict[str, object] = dict(_EMPTY_UNIT_DIAG)
+
+    # Reactor (swing.py で penalty_reason ラベル + SV_actual を埋め込み済み)
+    r_rx = unit_results.get('r_rx')
+    eq = getattr(r_rx, 'equipment', None) if r_rx is not None else None
+    if eq is not None:
+        reason = getattr(eq, 'penalty_reason', '') or ''
+        if reason:
+            d['reactor_penalty_reason'] = reason
+            sv = getattr(eq, 'SV_actual', 0.0) or 0.0
+            if sv > 0:
+                d['reactor_SV_actual_m_s'] = float(sv)
+
+    # PSA (psa_system.py で penalty_reason + t_abs_actual_s + u_0_actual を埋め込み)
+    r_psa = unit_results.get('r_psa')
+    eq = getattr(r_psa, 'equipment', None) if r_psa is not None else None
+    if eq is not None:
+        reason = getattr(eq, 'penalty_reason', '') or ''
+        if reason:
+            d['psa_penalty_reason'] = reason
+            t_abs = getattr(eq, 't_abs_actual_s', 0.0) or 0.0
+            u_0   = getattr(eq, 'u_0_actual',     0.0) or 0.0
+            if t_abs > 0:
+                d['psa_t_abs_actual_s'] = float(t_abs)
+            if u_0 > 0:
+                d['psa_u_0_actual_m_s'] = float(u_0)
+
+    # Mem (membrane_system.py で penalty_reason + 6 つの T/P actual を埋め込み)
+    r_mem = unit_results.get('r_mem')
+    eq = getattr(r_mem, 'equipment', None) if r_mem is not None else None
+    if eq is not None:
+        reason = getattr(eq, 'penalty_reason', '') or ''
+        if reason:
+            d['mem_penalty_reason'] = reason
+            for src_attr, dst_key in (
+                ('P_H_actual_Pa',       'mem_P_H_actual_Pa'),
+                ('P_feed_actual_Pa',    'mem_P_feed_actual_Pa'),
+                ('T_dew_actual_K',      'mem_T_dew_actual_K'),
+                ('T_feed_actual_K',     'mem_T_feed_actual_K'),
+                ('T_bp_perm_actual_K',  'mem_T_bp_perm_actual_K'),
+                ('T_cold_out_actual_K', 'mem_T_cold_out_actual_K'),
+            ):
+                v = getattr(eq, src_attr, 0.0) or 0.0
+                if v > 0:
+                    d[dst_key] = float(v)
+
+    # 蒸留塔 r1/r2/r3 (DistEquipment.feasible=False で penalty、message + N_needed + dT_max)
+    for col_key in ('r1', 'r2', 'r3'):
+        col = unit_results.get(col_key)
+        eq = getattr(col, 'equipment', None) if col is not None else None
+        if eq is None:
+            continue
+        if getattr(eq, 'feasible', True):
+            continue  # 正常塔は無視
+        msg = getattr(eq, 'message', '') or ''
+        if msg:
+            d[f'{col_key}_penalty_msg'] = str(msg)[:80]
+        n_needed = getattr(eq, 'N_needed', 0.0) or 0.0
+        if n_needed > 0:
+            d[f'{col_key}_N_needed'] = float(n_needed)
+        dt_max = getattr(eq, 'dT_max_rigorous', 0.0) or 0.0
+        if dt_max > 0:
+            d[f'{col_key}_dT_max_K'] = float(dt_max)
+    return d
+
+
+def _determine_first_failed_unit(**unit_results) -> str:
+    """パイプライン順 (r1→r_rx→r2→r_psa→r_mem→r3) で最初に penalty を起こしたユニットを返す。
+
+    PSA/Mem は早期 return しないため、success path でも r_psa/r_mem に penalty_reason
+    が刺さっている可能性がある (solver は CAPEX sentinel で penalty_hit を後から判定する)。
+    本関数はそれを取りこぼさず、Dist3 まで素通りした trial でも「実は PSA で死んでた」
+    を正しくラベル付けする。
+
+    Returns
+    -------
+    str : 'r1' | 'r_rx' | 'r2' | 'r_psa' | 'r_mem' | 'r3' | ''
+          '' は run_one_pass 内 penalty なし (solver/spec レイヤーで判定する)
+    """
+    r1 = unit_results.get('r1')
+    eq = getattr(r1, 'equipment', None) if r1 is not None else None
+    if eq is not None and not getattr(eq, 'feasible', True):
+        return 'r1'
+
+    r_rx = unit_results.get('r_rx')
+    eq = getattr(r_rx, 'equipment', None) if r_rx is not None else None
+    if eq is not None and (
+        (getattr(eq, 'penalty_reason', '') or '') != '' or
+        (getattr(eq, 'Reactor_CAPEX', 0.0) or 0.0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN
+    ):
+        return 'r_rx'
+
+    r2 = unit_results.get('r2')
+    eq = getattr(r2, 'equipment', None) if r2 is not None else None
+    if eq is not None and not getattr(eq, 'feasible', True):
+        return 'r2'
+
+    r_psa = unit_results.get('r_psa')
+    eq = getattr(r_psa, 'equipment', None) if r_psa is not None else None
+    if eq is not None and (getattr(eq, 'penalty_reason', '') or '') != '':
+        return 'r_psa'
+
+    r_mem = unit_results.get('r_mem')
+    eq = getattr(r_mem, 'equipment', None) if r_mem is not None else None
+    if eq is not None and (getattr(eq, 'penalty_reason', '') or '') != '':
+        return 'r_mem'
+
+    r3 = unit_results.get('r3')
+    eq = getattr(r3, 'equipment', None) if r3 is not None else None
+    if eq is not None and not getattr(eq, 'feasible', True):
+        return 'r3'
+
+    return ''
+
+
 def _build_penalty_after_column(
     failed_col_key: str,
     design,
@@ -524,6 +695,13 @@ def _build_penalty_after_column(
         if col_result is not None:
             shortfalls = _compute_dist_shortfalls(failed_col_key, col_result, failed_col_design)
             base.update(shortfalls)
+    # 観測ラベル (2026-05-22): どの装置で詰まったかを明示。
+    # 上流に passed kwargs のうち unit result だけ抜き出して diag 抽出。
+    base['first_failed_unit'] = failed_col_key
+    base.update(_EMPTY_UNIT_DIAG)
+    unit_kwargs = {k: v for k, v in upstream.items()
+                   if k in ('r1', 'r_rx', 'r2', 'r_psa', 'r_mem', 'r3')}
+    base.update(_extract_unit_diagnostics(**unit_kwargs))
     return base
 
 
@@ -814,7 +992,17 @@ def run_one_pass(
     T_d3_new  = r3.bottom.T_in
     T_mem_new = r_mem.retentate.T_out
 
-    return dict(
+    # 観測ラベル (2026-05-22): success path でも PSA/Mem は早期 return しないため、
+    # 「Dist3 まで素通りしたが実は r_psa/r_mem に penalty_reason が刺さってる」trial が
+    # ある (solver は CAPEX sentinel で後から penalty_hit を判定する経路)。
+    # ここで第一失敗ユニットを特定し、診断ラベル群を user_attrs 用に出しておく。
+    first_failed = _determine_first_failed_unit(
+        r1=r1, r_rx=r_rx, r2=r2, r_psa=r_psa, r_mem=r_mem, r3=r3,
+    )
+    unit_diag = _extract_unit_diagnostics(
+        r1=r1, r_rx=r_rx, r2=r2, r_psa=r_psa, r_mem=r_mem, r3=r3,
+    )
+    result = dict(
         pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
         reactor_inlet=reactor_inlet,
         r_rx=r_rx, rx_out=rx_out,
@@ -837,4 +1025,8 @@ def run_one_pass(
         **reactor_shortfalls,
         # Mem shortfall (正常完走時は全 0、ph/bp/phase/other の penalty 経路で > 0)
         **mem_shortfalls,
+        # 観測ラベル (2026-05-22)
+        first_failed_unit=first_failed,
     )
+    result.update(unit_diag)
+    return result

@@ -109,12 +109,21 @@ tear_mem_B_per_1500_fresh = 600.0
 [spec]
 c3h6_min_wtfrac         = 0.995    # Dist3 塔頂の C3H6 質量分率 (contest 必須)
 h2_min_molfrac          = 0.999    # PSA 製品の H2 モル分率 (販売想定で独自設定)
-production_min_relative = 0.01     # 生産量 1% 不足まで許容 (= 外側 TOL と同値)
-# 設計判断 (2026-05-17): 両側 spec で overshoot 戦略を弾き、BO を高 yield 誘導。
-# 旧版は片側 spec で overshoot 自由 → BO が「生産量過剰で revenue 稼ぐ」戦略を選択。
-# 0.02 = 2% overshoot まで許容 (BO の探索余白を確保)、それ以上 penalty。
-# 0.0 で無効化 (旧仕様)。
-production_max_relative = 0.02
+# 設計判断 (2026-05-23 forensic, main_20260523_172800): 許容幅を 0.01→0.05 / 0.02→0.05 に緩和。
+# 根拠: 172800 run 53 trial で spec_production_over/under の合計 15 件 (28%) が
+#   違反幅 1.0-16.2 pp に分布。実観測 distribution:
+#     over  pp: 1.6, 2.6, 3.4, 4.4, 5.5, 6.3, 6.6, 8.4
+#     under pp: 1.0, 1.7, 3.8, 7.4, 8.8, 9.6, 16.2
+#   ±1% / ±2% は「ぎりぎりを攻める」探索性確保には狭すぎ、target ± 数 pp の trial を
+#   全部 infeasible 化していた。±5% に緩めることで実観測 15 件中 7 件が feasible に
+#   転換見込み (feas 率 4% → 28-38% 期待)。
+# 連続ペナルティ (production_under/over_pp × 100億円/pp) は変更なしのため、
+#   TPE は依然 target 中心に学習。許容内 trial も「pp 違反 × 100」で TAC に上乗せされ、
+#   target ぴったりが最良であることは変わらない (= 純粋な探索余白拡大)。
+# 副作用: 最終 best が ±3-5 pp の生産量逸脱を含む可能性。top-k 再評価で実用判定必要。
+# 「赤字 OK、TAC 最小化」方針 (2026-05-21) と整合。
+production_min_relative = 0.05     # 生産量 5% 不足まで許容 (旧 0.01)
+production_max_relative = 0.05     # 生産量 5% 超過まで許容 (旧 0.02)
 
 
 # ===========================================================================

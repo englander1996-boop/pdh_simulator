@@ -172,6 +172,10 @@ def run_recycle_convergence(
                     'r1', design,
                     fresh=None, pump1=None, r1=None,
                 )
+            # 観測ラベル (2026-05-22): timeout は r1 失敗ではないので上書き。
+            # _build_penalty_after_column はキー名から 'r1' を入れてしまうため。
+            if isinstance(results, dict):
+                results['first_failed_unit'] = 'timeout'
             break
         results = run_one_pass(
             state.tear_dist3, state.tear_mem,
