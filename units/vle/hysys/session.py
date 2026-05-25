@@ -79,6 +79,23 @@ _GW_OWNER = getattr(win32con, "GW_OWNER", 4)
 
 
 # ---------------------------------------------------------------------------
+# swap_case 安定化待ち時間 (2026-05-25 短縮)
+# ---------------------------------------------------------------------------
+# 設計判断 (2026-05-25): swap_case は HSC を Close→Open し直すたびに HYSYS 内部の
+# 初期化を待つため固定 sleep を挟む。過去 (〜2026-05-22) は empty-value (Solver 未走)
+# バグ回避で保守的に計 7.0s 積まれていたが、1 パスで塔切替 2-3 回 × 内側 ~10 反復の
+# ため総時間の支配項になっていた (exp3 290s のうち ~200s が swap sleep)。
+# cold 解の結果は待ち時間に依存しない (= 結果中立) ので、安定動作を保てる範囲で短縮。
+# 短すぎた場合は fill_outputs (base.py) が empty-value を検出して明示的に失敗扱いに
+# するので、無音の精度劣化ではなく可視の penalty として現れる。
+# 必要なら下の値を戻すだけで旧挙動に復帰できる。
+_SWAP_SLEEP_AFTER_CLOSE_S     = 0.5   # 旧 1.0
+_SWAP_SLEEP_AFTER_OPEN_S      = 2.0   # 旧 3.0
+_SWAP_SLEEP_AFTER_ACTIVATE_S  = 1.0   # 旧 2.0
+_SWAP_SLEEP_AFTER_ACTIVEDOC_S = 0.5   # 旧 1.0
+
+
+# ---------------------------------------------------------------------------
 # HysysPopupMonitor (移植: lhs_column1.HysysPopupMonitor)
 # ---------------------------------------------------------------------------
 
@@ -420,6 +437,11 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
     -------
     bool : timeout 内に塔が収束したら True
     """
+    import os as _os
+    _timing = _os.environ.get('PDH_HYSYS_TIMING', '0') == '1'
+    _t_start_all = time.monotonic()
+    _observed_solving = False
+
     ran = False
     for runner in (
         lambda: col.Run(),
@@ -436,6 +458,16 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
     if not ran:
         click_run_button_gui(column_name)
 
+    def _timing_report(result_label: str) -> None:
+        if _timing:
+            import sys as _sys
+            _sys.stderr.write(
+                f"[TIMING]   run_column_and_wait({column_name}): "
+                f"{time.monotonic() - _t_start_all:5.2f}s  "
+                f"IsSolving観測={_observed_solving}  結果={result_label}\n"
+            )
+            _sys.stderr.flush()
+
     # 塔の sub-flowsheet Solver を取得
     try:
         col_solver = col.ColumnFlowsheet.Solver
@@ -448,10 +480,13 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
         while time.monotonic() < deadline:
             try:
                 if not case.Solver.IsSolving:
+                    _timing_report("fallback-done")
                     return True
             except Exception:
+                _timing_report("fallback-exc")
                 return True
             time.sleep(0.5)
+        _timing_report("fallback-timeout")
         return False
 
     # Phase 1: IsSolving=True を観測 (startup_grace 内)。観測できなくても先へ進む
@@ -461,6 +496,7 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
     while time.monotonic() < grace_deadline:
         try:
             if col_solver.IsSolving:
+                _observed_solving = True
                 break
         except Exception:
             break
@@ -476,11 +512,14 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
         if not solving:
             # Converged プロパティで最終判定
             try:
+                _timing_report("converged-check")
                 return bool(col_solver.Converged)
             except Exception:
                 # Converged 取れない場合は IsSolving=False をもって完了とみなす
+                _timing_report("issolving-false")
                 return True
         time.sleep(0.5)
+    _timing_report("timeout")
     return False
 
 
@@ -675,7 +714,7 @@ class HysysSession:
                 pass
             self._case = None
         # close 後の安定化
-        time.sleep(1.0)
+        time.sleep(_SWAP_SLEEP_AFTER_CLOSE_S)
         # 新規 case を開く (リトライ 3 回)
         last_exc = None
         for attempt in range(3):
@@ -692,7 +731,7 @@ class HysysSession:
             ) from last_exc
         self.hsc_path = new_path
         # 安定化待ち
-        time.sleep(3.0)
+        time.sleep(_SWAP_SLEEP_AFTER_OPEN_S)
         # 設計判断 (2026-05-22): swap_case 後は **常に** Activate を呼ぶ。
         # visible=False でも Activate しないと ActiveDocument が前の case のまま残って
         # Solver 起動が前のセッションの状態を引きずる (Dist3 で empty value 発生の原因)。
@@ -704,10 +743,10 @@ class HysysSession:
             except Exception:
                 pass
         # Activate 後の追加安定化待ち (HSC 大きいほど必要)
-        time.sleep(2.0)
+        time.sleep(_SWAP_SLEEP_AFTER_ACTIVATE_S)
         # 念のため ActiveDocument を明示設定 (HYSYS API では set 可能なケースあり)
         try:
             self._app.ActiveDocument = self._case
         except Exception:
             pass
-        time.sleep(1.0)
+        time.sleep(_SWAP_SLEEP_AFTER_ACTIVEDOC_S)

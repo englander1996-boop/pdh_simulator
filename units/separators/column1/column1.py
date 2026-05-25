@@ -66,6 +66,12 @@ def simulate_column1(
         from units.vle.hysys.provider import solve_column1_via_hysys
         return solve_column1_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
 
+    # SM (surrogate) 経路。学習済み GPR で HYSYS 解を近似 (2026-05-25)。
+    # In_CompFraction2 = t.hysys_spec_value を使うので hysys 系の tunables を流用。
+    if t.solver_method == 'sm':
+        from src.distillation_sm import solve_column1_via_sm
+        return solve_column1_via_sm(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
+
     # tunables.recovery_* が None なら 0.99 (既定)、float ならその値を採用 (BO 用)
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
     rec_HK_bot = t.recovery_HK_bot if t.recovery_HK_bot is not None else 0.99

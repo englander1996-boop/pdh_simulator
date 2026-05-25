@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from typing import Dict, Optional
 
@@ -66,10 +67,15 @@ class _SessionCache:
           max_cases を超えたら LRU で古い case を Close。
     """
     def __init__(self, visible: bool = False, keep_open: bool = False,
-                 max_cases: int = 6):
+                 max_cases: int = 6, force_cold: bool = False):
         self.visible = visible
         self.keep_open = keep_open
         self.max_cases = max_cases
+        # 設計判断 (2026-05-25): force_cold=True のとき、同一 key の再取得でも HSC を
+        # 開き直して cold 解を保証する。Dist1/Dist3 を SM 化して HYSYS 塔が Dist2 のみに
+        # なると swap が起きず Dist2 が開きっぱなし=warm-start になる。warm-start 不採用
+        # 方針 (BO 張り付き回避) を単一塔ケースでも貫くためのスイッチ。
+        self.force_cold = force_cold
         self._app_session: Optional[HysysSession] = None
         # OrderedDict 相当: 古い順に並ぶ
         self._cases: "dict[tuple, object]" = {}
@@ -90,6 +96,11 @@ class _SessionCache:
         # Solver 走らない症状が出たので、swap_case 経由に戻す (app 使い回しのみ維持)。
         # 同 key なら現セッションそのまま、異なる key なら HSC を swap。
         if key == next(iter(self._cases), None):
+            if self.force_cold:
+                # 同一 key でも cold 保証のため HSC を開き直す (Close+Open)。
+                self._app_session.swap_case(hsc_path)
+                self._cases.clear()
+                self._cases[key] = self._app_session._case
             return self._app_session
 
         # 異なる key: swap で切替 (debug で動作実績ある経路)
@@ -145,10 +156,26 @@ class HysysVLEProvider:
         self.visible = visible
         self.timeout_sec = timeout_sec
         self.keep_open = keep_open
+        # 設計判断 (2026-05-25): PDH_HYSYS_FORCE_COLD=1 で同一塔の再解も毎回 cold
+        # (HSC 開き直し) にする。SM 化で HYSYS 塔が 1 つだけになると warm-start に
+        # なるのを防ぐスイッチ (warm-start 不採用方針)。
+        _force_cold = os.environ.get('PDH_HYSYS_FORCE_COLD', '0') == '1'
         self._cache = (
-            _SessionCache(visible=visible, keep_open=keep_open) if use_cache else None
+            _SessionCache(visible=visible, keep_open=keep_open, force_cold=_force_cold)
+            if use_cache else None
         )
         self._run_counter = 0
+        # 設計判断 (2026-05-25): Dist1 (column1) の結果メモ化。
+        #   run_one_pass で Dist1 のフィードは Fresh LPG のみ。リサイクル (tear) は
+        #   Dist1 の「後」(反応器入口) で合流するため、内側リサイクル反復に対して
+        #   Dist1 の入力 (feed 組成・流量・T・P + tunables) は完全に不変。
+        #   → 入力が一致する限り同じ HSC 解になるので、毎反復 HYSYS を叩く必要はない。
+        #   warm-start (前回プロファイル流用で解を変える) とは別物で、入力一致時の
+        #   厳密な結果再利用。キーが変われば (外側 Fresh 変化・BO で N/spec 変化) 必ず
+        #   ミスして cold 再計算するので、経路依存 (BO 張り付き) は起きない。
+        #   メモは直近 1 件のみ (LRU 1)。塔切替の swap も 1 回減る副次効果あり。
+        self._column1_memo_key = None
+        self._column1_memo_result: Optional[DistResult] = None
 
     # ---- ライフサイクル ----
     def close(self) -> None:
@@ -182,7 +209,19 @@ class HysysVLEProvider:
 
     # ---- 各塔の solve API ----
     def solve_column1(self, feed: ProcessStream, tunables: ColumnTunables) -> DistResult:
-        return _solve_via_hysys(self, feed, tunables, column_id="column1")
+        # 設計判断 (2026-05-25): Dist1 は内側リサイクル反復に対し入力不変なのでメモ化。
+        # 入力 (feed + tunables) が直近と一致すれば前回結果をそのまま返す (cold 結果の
+        # 厳密再利用、warm-start ではない)。詳細は __init__ のメモ説明を参照。
+        key = _column1_memo_key(feed, tunables)
+        if key is not None and key == self._column1_memo_key:
+            return self._column1_memo_result
+        result = _solve_via_hysys(self, feed, tunables, column_id="column1")
+        # feasible な結果のみメモ (penalty/失敗はキャッシュせず毎回再評価して
+        # transient な失敗を引きずらない)
+        if key is not None and getattr(result.equipment, 'feasible', False):
+            self._column1_memo_key = key
+            self._column1_memo_result = result
+        return result
 
     def solve_column2(self, feed: ProcessStream, tunables: ColumnTunables) -> DistResult:
         return _solve_via_hysys(self, feed, tunables, column_id="column2")
@@ -255,28 +294,41 @@ def _solve_via_hysys(
     tunables: ColumnTunables,
     column_id: str,
 ) -> DistResult:
+    import os as _os, sys as _sys, time as _time
+    _timing = _os.environ.get('PDH_HYSYS_TIMING', '0') == '1'
+
     # 1. HYSYS 用入力を組み立て
     try:
         hysys_input = _build_input(column_id, feed, tunables)
     except Exception as e:
         return _failure_dist_result(tunables, f"HYSYS input 組立失敗: {e}")
 
-    # 2. HSC オープン
+    # 2. HSC オープン (swap or 単発)
+    _t0 = _time.time()
     try:
         sess, owns = provider._open_session(column_id, int(tunables.N_stages))
     except StageNotAvailableError as e:
         return _failure_dist_result(tunables, f"段数解決失敗: {e}")
     except Exception as e:
         return _failure_dist_result(tunables, f"HSC オープン失敗: {e}")
+    _t_open = _time.time() - _t0
 
     # 3. アダプタ実行
     try:
         adapter_cls = _ADAPTER_BY_COLUMN_ID[column_id]
         run_id = provider._next_run_id()
+        _t1 = _time.time()
         cr = adapter_cls.run(
             sess, hysys_input,
             timeout_sec=provider.timeout_sec, run_id=run_id,
         )
+        if _timing:
+            _t_run = _time.time() - _t1
+            _sys.stderr.write(
+                f"[TIMING] {column_id} N={tunables.N_stages}: "
+                f"open/swap={_t_open:5.2f}s  adapter.run={_t_run:5.2f}s\n"
+            )
+            _sys.stderr.flush()
     except Exception as e:
         if owns:
             try:
@@ -305,6 +357,31 @@ _ADAPTER_BY_COLUMN_ID = {
 # ---------------------------------------------------------------------------
 # 入力組立 (ColumnTunables + ProcessStream → Column{1,2,3}Input)
 # ---------------------------------------------------------------------------
+
+def _column1_memo_key(feed: ProcessStream, t: ColumnTunables):
+    """Dist1 メモ化のキー (feed 組成・流量・T・P + tunables)。
+
+    値が完全一致する限り HYSYS 解は同一なので前回結果を再利用できる。
+    丸め (組成 1e-6, T 1e-3, P 1e-1, flow 1e-3) で float ジッタを吸収するが、
+    リサイクル内側反復では Fresh が固定 → pump1.outlet も同値なので実質ヒットする。
+    HYSYS 必須入力 (hysys_spec_value / hysys_feed_stage) が None のときは None を返し
+    メモを無効化 (= 毎回 _build_input 側でエラー扱い)。
+    """
+    if t.hysys_feed_stage is None or t.hysys_spec_value is None:
+        return None
+    feed_sig = tuple(sorted(
+        (k, round(float(v), 6)) for k, v in feed.F_in.items()
+    ))
+    return (
+        feed_sig,
+        round(float(feed.T_in), 3),
+        round(float(feed.P_in), 1),
+        int(t.N_stages),
+        round(float(t.P_col), 1),
+        round(float(t.hysys_spec_value), 9),
+        int(t.hysys_feed_stage),
+    )
+
 
 def _build_input(column_id: str, feed: ProcessStream, t: ColumnTunables):
     if t.hysys_feed_stage is None:
@@ -433,10 +510,40 @@ def _column_result_to_dist_result(
         capex_cond = calc_he_capex_okuyen(A_cond)
         capex_reb  = calc_he_capex_okuyen(A_reb)
 
-    # 塔本体 CAPEX: 暫定で 0。塔径計算 (ρ_v 必要) は後続フェーズで詰める。
-    # CAPEX_vessel + CAPEX_trays = 0 でも HE CAPEX + OPEX で BO は方向感を持てる。
-    capex_vessel = 0.0
-    capex_trays  = 0.0
+    # ---- 塔本体 (vessel + trays) CAPEX ----
+    # 設計判断 (2026-05-25): SM/HYSYS 経路でも FUG/rigorous (distillation_core Step 9) と
+    # 同じ式で塔径・塔高・vessel/trays CAPEX を計算する。必要量 (塔頂流量・還流比・塔頂温度・
+    # 塔頂組成・N) は SM/HYSYS 出力から全て得られる (model1/3 とも Out_RefluxRatio あり)。
+    # 旧版は暫定 0 で、BO の TAC が塔サイズに無反応 (flat) だった。本計算で N/還流が CAPEX に
+    # 効き、BO が「feasible 縁で段数最小=安い塔」を探索できるようになる。
+    from src.component_data import MW as _MW, liquid_density_mix as _liq_rho
+    from src.distillation_core import _vessel_capex_okuyen as _vessel_capex
+    from src.cost_calculator import calc_tray_capex_okuyen as _tray_capex
+    _fx = DistFixedParams()
+    _R_GAS = 8.314
+    try:
+        F_top_total_kmolh = float(cr.top_flow_kmolh)
+        MW_top_avg = (sum(top_flows.get(c, 0.0) * _MW.get(c, 50.0) for c in top_flows)
+                      / max(F_top_total_kmolh, 1e-9))
+        rho_v = float(t.P_col) * (MW_top_avg * 1e-3) / (_R_GAS * max(T_top_K, 1.0))
+        rho_l = _liq_rho(top_flows)
+        if rho_l <= rho_v + 1.0:
+            rho_l = rho_v + 100.0
+        G_star = _fx.SF * _fx.K_factor * math.sqrt(max(rho_v * (rho_l - rho_v), 1e-12))
+        # 還流比: SM/HYSYS 出力 (Out_RefluxRatio / HYSYS spec) を優先、無ければ tunable。
+        rr = cr.reflux_ratio if (cr.reflux_ratio and cr.reflux_ratio > 0) else float(t.reflux_ratio)
+        mass_flow_vap = F_top_total_kmolh * (rr + 1.0) * MW_top_avg / 3600.0   # kg/s (塔頂蒸気)
+        D_col = max(math.sqrt(4.0 * (mass_flow_vap / max(G_star, 1e-9)) / math.pi), 0.3)
+        N_real = math.ceil(int(t.N_stages) / _fx.tray_efficiency)
+        H_col = max(N_real * _fx.tray_spacing_m + _fx.top_section_m + _fx.bot_section_m, 5.0)
+        V_col = math.pi / 4.0 * D_col ** 2 * H_col
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            capex_vessel = _vessel_capex(V_col, float(t.P_col), D_col)
+            capex_trays  = _tray_capex(D_col, int(t.N_stages))
+    except Exception:
+        D_col = H_col = V_col = 0.0
+        capex_vessel = capex_trays = 0.0
     capex_total  = capex_vessel + capex_trays + capex_cond + capex_reb
 
     return DistResult(
@@ -449,7 +556,7 @@ def _column_result_to_dist_result(
             P_in=float(cr.bot_pressure_kpa) * 1000.0,
         ),
         equipment = DistEquipment(
-            D_col=0.0, H_col=0.0, V_col=0.0,
+            D_col=D_col, H_col=H_col, V_col=V_col,
             CAPEX_vessel=capex_vessel, CAPEX_trays=capex_trays, CAPEX=capex_total,
             Q_cond=Q_cond_kW, Q_reb=Q_reb_kW,
             Q_feed_preheat_kW=0.0,
