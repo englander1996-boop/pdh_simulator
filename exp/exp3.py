@@ -1,8 +1,15 @@
 r"""
-exp3.py — リサイクルあり PDH プロセス全体フロー シミュレーション (HYSYS バックエンド)
+exp3.py — リサイクルあり PDH プロセス全体フロー シミュレーション (HYSYS + SM バックエンド)
 
-exp1.py の HYSYS 版。蒸留塔 3 つだけ HYSYS COM 経由で計算し、それ以外
-(反応器・PSA・膜・リサイクル合流) は exp1 と同じく既存実装で動かす。
+exp1.py の HYSYS 版。蒸留塔は塔ごとにバックエンドを選択:
+  - Dist1 / Dist3 : SM (学習済み GPR サロゲート、2026-05-25 導入)。HYSYS 解とほぼ一致を検証済み。
+  - Dist2         : HYSYS COM (SM 化できなかったため HYSYS 継続)。
+それ以外 (反応器・PSA・膜・リサイクル合流) は exp1 と同じく既存実装で動かす。
+
+高速化の経緯 (2026-05-25):
+  290s (全塔 HYSYS) → 159s (Dist1 メモ化 + swap_case sleep 短縮) → 26s (Dist1/Dist3 SM 化)。
+  SM 化で HYSYS 塔が Dist2 のみになり HSC swap が消滅。Dist2 は開きっぱなしで warm 再解に
+  なるが、force-cold (PDH_HYSYS_FORCE_COLD=1) 版と結果完全一致で経路依存なしを実証済み。
 
 設計判断 (2026-05-22):
   HYSYS の探索変数は exp1 (FUG/rigorous) と異なる:
@@ -131,8 +138,10 @@ design = FlowsheetDesignVars(
     dist1=ColumnTunables(
         P_col=P_dist1_kPa * 1000.0,
         N_stages=N_dist1, N_feed=1,
-        reflux_ratio=2.0,                       # dummy (HYSYS 経路では未使用)
-        solver_method='hysys',
+        reflux_ratio=2.0,                       # dummy (SM/HYSYS 経路では未使用)
+        # 設計判断 (2026-05-25): Dist1 を SM (学習済み GPR) に置換。
+        # In_CompFraction2 = hysys_spec_value を流用。HYSYS 解とほぼ完全一致を検証済み。
+        solver_method='sm',
         hysys_spec_value=COMP_FRAC_2_dist1,
         hysys_feed_stage=FEED_STAGE_dist1,
     ),
@@ -148,7 +157,10 @@ design = FlowsheetDesignVars(
         P_col=P_dist3_kPa * 1000.0,
         N_stages=N_dist3, N_feed=1,
         reflux_ratio=12.0,                      # dummy
-        solver_method='hysys',
+        # 設計判断 (2026-05-25): Dist3 を SM (学習済み GPR) に置換 (速度の本命)。
+        # model3 は spec 入力なし → 分配(回収率)は SM 予測をそのまま設計値として採用
+        # (ユーザー決定)。製品純度 99.5% は満たす。hysys_spec_value は SM では未使用。
+        solver_method='sm',
         # 設計判断 (2026-05-22): adapter で 0-1 範囲なら recovery_LK_top (動的 Draw Rate
         # 計算)、1.0 超なら絶対量 (kgmol/s) として扱う。
         # DRAW_RATE_dist3_kmolh が 0.99 (純度モード) なら /3600 せずそのまま渡す。
@@ -163,6 +175,10 @@ design = FlowsheetDesignVars(
 # ===========================================================================
 #  実行 + 結果表示 (exp1 と共通の run_exp ラッパ)
 # ===========================================================================
+#  設計判断 (2026-05-25): Wegstein 減衰 (q_min=-5→-2) も検討したが、振動抑制で
+#  反復は 10→9 に減るものの収束経路が変わり 1% 許容球内の別点に着地して結果が
+#  わずかに動く (生産量 1248→1258) 割に効果が限定的だった。結果中立な高速化
+#  (Dist1 メモ化 + swap_case 待ち時間削減) を優先し、減衰は不採用とした。
 config = load_operating_config()
 
 

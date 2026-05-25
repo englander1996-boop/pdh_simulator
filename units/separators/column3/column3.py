@@ -109,6 +109,12 @@ def simulate_column3(
         from units.vle.hysys.provider import solve_column3_via_hysys
         return solve_column3_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
 
+    # SM (surrogate) 経路。学習済み GPR で HYSYS 解を近似 (2026-05-25)。
+    # In_Propane = feed の C3H8 mol 分率 (spec 入力なし)。分配は SM 準拠を設計値として採用。
+    if t.solver_method == 'sm':
+        from src.distillation_sm import solve_column3_via_sm
+        return solve_column3_via_sm(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
+
     rec_LK_top = t.recovery_LK_top if t.recovery_LK_top is not None else 0.99
     if t.recovery_HK_bot is not None:
         rec_HK_bot = t.recovery_HK_bot
