@@ -797,6 +797,44 @@ def _vessel_capex_okuyen(V_m3: float, P_pa: float, D_m: float) -> float:
 
 
 # ===========================================================================
+# partial condenser の凝縮器エネルギー収支 (2026-05-26 追加)
+# ===========================================================================
+_T_REF_ENTHALPY = 298.15   # [K] 理想気体エンタルピー基準
+
+
+def _H_mol_jmol(T: float, P: float, comp_frac: Dict[str, float],
+                keys: List[str], phase: str) -> float:
+    """混合物のモルエンタルピー [J/mol] = 理想気体(T_ref=298.15→T) + PR 残差。
+
+    partial condenser の凝縮器エネルギー収支 Q = V2·Hv − D·Hv − L1·Hl 用。
+    設計判断 (2026-05-26): 旧 partial-cond Q_cond 式 (R×凝縮性成分×λ) は CMO 還流量
+    L=R×D_total を「留出の凝縮性成分」で代用し、かつ塔頂蒸気の顕熱を無視して
+    ~6.7倍過小評価だった (tools/_diag_dist2_qcond.py で実証: 8MW vs 厳密54MW≈HYSYS62MW)。
+    本関数で厳密エネルギー収支を組む。
+    """
+    s = sum(max(comp_frac.get(k, 0.0), 0.0) for k in keys)
+    if s <= 0:
+        return 0.0
+    x = [max(comp_frac.get(k, 0.0), 0.0) / s for k in keys]
+    H_ig = 0.0
+    for i, k in enumerate(keys):
+        p = THERMO_DATA.get(k)
+        if p is None:
+            continue
+        T0 = _T_REF_ENTHALPY
+        H_ig += x[i] * (p.a * (T - T0)
+                        + p.b / 2.0 * (T**2 - T0**2)
+                        + p.c / 3.0 * (T**3 - T0**3)
+                        + p.d / 4.0 * (T**4 - T0**4))
+    try:
+        Z = z_factor(T, P, x, keys, phase)
+        H_r = residual_enthalpy(T, P, x, keys, Z)
+    except Exception:
+        H_r = 0.0
+    return H_ig + H_r
+
+
+# ===========================================================================
 # メイン関数
 # ===========================================================================
 
@@ -1003,15 +1041,36 @@ def _simulate_rigorous(
 
     # ---- 5. Q_cond, Q_reb の再計算 (rigorous compositions ベース) ----
     if design.partial_condenser:
-        F_top_C = {c: v for c, v in F_top.items()
-                   if c not in NON_CONDENSABLE_COMPS and v > 0.0}
-        F_C_total = sum(F_top_C.values())
-        if F_C_total > 0:
-            lam_top = _weighted_lambda(F_top_C)
-            Q_cond_kW = (design.reflux_ratio * F_C_total
+        # 設計判断 (2026-05-26): partial cond の Q_cond を凝縮器(stage1)の厳密
+        # エネルギー収支に置換。旧式 Q=R×(留出の凝縮性成分)×λ は CMO 還流量
+        # L=R×D_total を「留出の凝縮性成分」で代用 (~5.7x 過小) + 塔頂蒸気の顕熱
+        # 無視で計 6.68x 過小評価だった (tools/_diag_dist2_qcond.py: 8MW vs 厳密54MW
+        # ≈HYSYS62MW)。収支: Q = V2·Hv(y2,T2) − D·Hv(y1,T1) − L1·Hl(x1,T1)。
+        # rig プロファイル (V/L 流量・各段組成 y/x・温度) から組む。
+        try:
+            V2 = rig.V_top_kmolh
+            L1 = rig.L_top_kmolh
+            D_v = V2 - L1
+            T1 = rig.T_profile_K[0]
+            T2 = rig.T_profile_K[1] if len(rig.T_profile_K) > 1 else T1
+            y1 = rig.y_profile[0]
+            y2 = rig.y_profile[1] if len(rig.y_profile) > 1 else y1
+            x1 = rig.x_profile[0]
+            Q_cond_kW = (
+                V2 * _H_mol_jmol(T2, design.P_col, y2, comps, 'vapor')
+                - D_v * _H_mol_jmol(T1, design.P_col, y1, comps, 'vapor')
+                - L1 * _H_mol_jmol(T1, design.P_col, x1, comps, 'liquid')
+            ) / 3600.0
+            if not math.isfinite(Q_cond_kW) or Q_cond_kW <= 0:
+                raise ValueError("energy-balance Q_cond が非正/非有限")
+        except Exception:
+            # フォールバック: 還流量補正した簡易式 (R×D_total×λ、顕熱なし)
+            F_top_C = {c: v for c, v in F_top.items()
+                       if c not in NON_CONDENSABLE_COMPS and v > 0.0}
+            lam_top = (_weighted_lambda(F_top_C) if sum(F_top_C.values()) > 0
+                       else _LAMBDA_DEFAULT)
+            Q_cond_kW = (design.reflux_ratio * F_top_total
                          * lam_top * 1000.0 / 3600.0)
-        else:
-            Q_cond_kW = 0.0
     else:
         lam_top = _weighted_lambda(F_top)
         Q_cond_kW = (F_top_total * (design.reflux_ratio + 1.0)
@@ -1470,8 +1529,11 @@ def simulate_distillation_column(
         x_C_list = [F_top_C.get(c, 0.0) / F_C_total for c in comps]
         T_cond, _ = _bubble_T_K(x_C_list, comps, design.P_col, design.K_method)
         lam_top = _weighted_lambda(F_top_C)        # 凝縮分の λ
-        # reflux liquid のみ凝縮 (vapor distillate は凝縮せず): Q = R × D_C × λ_C
-        Q_cond_kW = (design.reflux_ratio * F_C_total
+        # 設計判断 (2026-05-26): 還流量補正。CMO 還流は L=R×D_total なので Q_latent は
+        # R×F_top_total×λ が正 (旧 R×F_C_total は留出の凝縮性成分で代用し ~5.7x 過小)。
+        # FUG はプロファイル無しのため塔頂蒸気の顕熱は省略 (rigorous 経路は厳密
+        # エネルギー収支)。残差は rigorous 比 ~10-15% 過小。詳細 tools/_diag_dist2_qcond.py。
+        Q_cond_kW = (design.reflux_ratio * F_top_total
                      * lam_top * 1000.0 / 3600.0)
     else:
         # Total condenser (Dist1/Dist3): V = (R+1)D を全量凝縮

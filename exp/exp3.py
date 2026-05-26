@@ -58,49 +58,53 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 #  実験で振る設計変数 (ここを書き換えて再実行)
 # ===========================================================================
 
+# 設計判断 (2026-05-26): special.py の BO best = trial #294 の最適化済み 21 変数を
+# そのまま投入。出典 outputs/special_20260526_172608_best.json
+#   (BO 記録 effective_TAC=1305.59 億円/年、feasible=True)。
+# ユーザーが exp3 でフル詳細出力を見て手動検証するため。旧テンプレ値 (exp1 best #115
+# 系) は git 履歴で復元可能。
+# 注意: special では col2/col3 の feed を「比率」で suggest し _feed_stage_from_ratio で
+#   絶対段に変換している。exp3 は絶対段を直接指定するため、変換後の値を記載:
+#     Dist2: feed_ratio 0.553435 × N67 → FEED_STAGE_dist2 = 37  (レポート kirkbride 37 と一致)
+#     Dist3: feed_ratio 0.715715 × N156 → FEED_STAGE_dist3 = 112 (同 112 と一致)
+
 # === 反応器 (Swing) ============================================================
-# exp1 のベスト値 (top-k rank 2 = trial #115) を初期値として流用。
-# 上流ノータッチ方針 (2026-05-22 ユーザー確認) のため、ここは触らず、塔だけ HYSYS。
-T_in_K        = 955.6260
-z_cat_m       = 21.0550
-t_cyc_min     = 14.2111
-D_reactor_m   = 10.0       # 8.44→10.0 (SV=3.65→2.6 m/s で範囲 [0.5,3.0] 内に)
+T_in_K        = 936.9962277
+z_cat_m       = 29.1345707
+t_cyc_min     = 19.0206554
+D_reactor_m   = 9.4751160
 
 # === PSA =====================================================================
-D_psa_col_m       = 4.0       # 3.32→4.0 (PSA 容量UP、t_abs_below_min 回避)
-L_psa_bed_m       = 35.0      # 25.6→35.0 (同上)
-desorption_target = 0.2805
+D_psa_col_m       = 4.4154197
+L_psa_bed_m       = 27.8226005
+desorption_target = 0.2974322
 
 # === 膜分離 ===================================================================
-P_H_Pa     = 7.5403e5
+P_H_Pa     = 8.0711387e5
 P_L_Pa     = 1.0e5
-A_mem_m2   = 3.0e5     # 余裕大きく、透過流量を十分に
+A_mem_m2   = 1.1854758e5
 
-# === Dist1 (脱ブタン塔) HYSYS ===============================================
-# 設計判断 (2026-05-22): 余裕ある設計に。N=60 (HSC 最大に近い)、塔圧は exp1 best より
-# 余裕みて。Comp Fraction-2=0.99 は変えず。
-P_dist1_kPa            = 1700.0
-N_dist1                = 60       # HSC 30-60 の最大
-FEED_STAGE_dist1       = 30       # 中間段
-COMP_FRAC_2_dist1      = 0.99
+# === Dist1 (脱ブタン塔) SM ===================================================
+P_dist1_kPa            = 1996.1098
+N_dist1                = 31
+FEED_STAGE_dist1       = 28
+COMP_FRAC_2_dist1      = 0.9083715
 
 # === Dist2 (脱エタン塔) HYSYS ===============================================
-# 設計判断 (2026-05-22): Dist2 塔圧は Mem P_H (754 kPa) より下に。500 kPa は exp1 best 値。
-# N と RR に余裕を持たせて HYSYS 収束させやすく。
-P_dist2_kPa            = 500.0    # < P_H=754 kPa (Mem の ph_le_pfeed 回避)
-N_dist2                = 80       # HSC 15-80 の最大、N で余裕
-FEED_STAGE_dist2       = 40       # 中間段
-REFLUX_RATIO_dist2     = 12.0     # 高めで余裕
+# P_dist2=645.4 kPa < P_H=807.1 kPa (Mem の ph_le_pfeed 回避を満たす)。
+P_dist2_kPa            = 645.4137
+N_dist2                = 67
+FEED_STAGE_dist2       = 37       # special: feed_ratio 0.553435 × N67 → 37
+REFLUX_RATIO_dist2     = 8.9916122
 
-# === Dist3 (C3 スプリッタ) HYSYS ============================================
-# 設計判断 (2026-05-22): N 多めで余裕。column3 スモークで動いた P=1800, N=150。
-P_dist3_kPa            = 1800.0
-N_dist3                = 150      # debug で feasible だった値
-FEED_STAGE_dist3       = 75
-DRAW_RATE_dist3_kmolh  = 0.99    # 純度 spec (0-1) として解釈、C3H6 99% 純度
+# === Dist3 (C3 スプリッタ) SM ===============================================
+P_dist3_kPa            = 1677.1573
+N_dist3                = 156
+FEED_STAGE_dist3       = 112      # special: feed_ratio 0.715715 × N156 → 112
+DRAW_RATE_dist3_kmolh  = 0.99     # SM では未使用 (Dist3 は spec なし)
 
 # === Fresh LPG ==============================================================
-F_C3H8_fresh_kmol_h = 1647.5800
+F_C3H8_fresh_kmol_h = 1523.3995
 
 
 # ===========================================================================

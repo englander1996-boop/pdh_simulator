@@ -39,6 +39,7 @@ import json
 import time
 import datetime
 import contextlib
+import io
 from typing import Optional
 
 os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '300')
@@ -71,7 +72,16 @@ from simulation import display_full_results, show_input_snapshot
 N_TRIALS    = 300            # main.py 準拠。全21変数なので 300 推奨 (~1-1.5h 目安)
 N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (以降 TPE)
 SEED        = 42
-N_JOBS      = 1              # HYSYS COM + penalty_scale global のため 1
+N_JOBS      = 1              # HYSYS COM + penalty_scale global のため 1 (スレッド並列は不可)
+# 設計判断 (2026-05-26): マルチプロセス並列 worker 数。>1 で N プロセスが共有 SQLite study を
+# 分担し、各 worker が自前の HYSYS インスタンスを起動する (重い: 各 ~数百MB + 起動 ~1分。
+# RAM 次第で 3 worker 程度が現実的)。各 worker 単スレッドで penalty_scale/GIL 問題なし、
+# constant_liar=True で冗長サンプリング抑制。1 で従来の単一プロセス。
+# 設計判断 (2026-05-26): special は N_WORKERS=1 のみ正しい。HYSYS.Application は
+# ユーザーセッションに単一インスタンスの COM サーバーで、複数 worker が Dispatch しても
+# 同じ HYSYS を共有 → ケース切替(Close+Open)が跨プロセスで割り込み結果汚染する (実証済)。
+# 並列化できるのは HYSYS 不使用の main のみ。special は SM 化で元々高速(~30分)。
+N_WORKERS   = 1
 N_TOPK      = 3              # 詳細レポートを出す上位候補数
 
 USE_SQLITE_STORAGE = False
@@ -94,6 +104,11 @@ HI_DT_MIN_K  = 10.0
 # ===========================================================================
 SEARCH_SPACE = {
     # ----- 反応器 (Swing) — main.py 準拠 -----
+    # 設計判断 (2026-05-26): 940→925 に下げたら feas 0/61 に激減 → 940 へ戻す。
+    # 理由: special は Dist3 が固定スペック(99.5mol%/~1200製品)で、高い C3H6 throughput を
+    # 維持するには高転化=高 T_in が必須。前回 feasible は全て T_in 929-940。925 で全除外された。
+    # main は自由Dist3で低Tでも1129生産できる(選択率↑で収率79%)が、special では低T=production不足。
+    # → special の収率は固定1200 Dist3 demand により高T(~76%)で構造的に頭打ち。T_in は下げない。
     "T_in_K":              (880.0,  940.0,  'linear', 'float'),
     "z_cat_m":             (15.0,   40.0,   'linear', 'float'),
     "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
@@ -108,8 +123,15 @@ SEARCH_SPACE = {
     "P_H_Pa":              (7.5e5,  9.5e5,  'linear', 'float'),
     "A_mem_m2":            (5.0e4,  3.0e5,  'log',    'float'),
 
-    # ----- 原料 (外側ループ skip、override) — main.py 準拠 -----
-    "F_C3H8_fresh_kmol_h": (1380.0, 1500.0, 'linear', 'float'),
+    # ----- 原料 (外側ループ skip、override) -----
+    # 設計判断 (2026-05-26): (1380,1500) → (1500,1750) に上げる。
+    # 根拠: HYSYS+SM フローの実効収率は ~72% (観測 66-77%) と FUG/main より低い。
+    #   旧上限 1500 では F×yield = 1500×0.72 ≈ 1083 で生産量下限 1128.6 (target 1188 の -5%)
+    #   すら割り、special_run_20260526_125938 で Dist2 を通過した 28 trial の 27 件が
+    #   prod_under、feasible は 1/154 に留まった。中央収率で target 1188 を満たすには
+    #   F ≈ 1188/0.72 ≈ 1645 が必要。main.py の縮小前 (1200,1700) 寄りに戻す方向で、
+    #   feasible 生産量帯 [1128.6, 1247.4] を F×yield の範囲で到達可能にする。
+    "F_C3H8_fresh_kmol_h": (1500.0, 1750.0, 'linear', 'float'),
 
     # ----- Dist1 (SM model1: N30-60/P1600-2200/feed_stage10-39/CF0.9-0.999) -----
     # feed_stage は SM feas ≥22 (プローブ: <21 で 0%)。範囲は (22,28) 固定: N 下限 30 でも
@@ -121,10 +143,15 @@ SEARCH_SPACE = {
     "col1_comp_frac_2":    (0.90,   0.999,  'linear', 'float'),
 
     # ----- Dist2 (HYSYS 脱エタン塔)。収束 envelope 狭、縁を含む (N≈45 安/N=75-80 頑健) -----
-    "col2_p_kpa":          (500.0,  620.0,  'linear', 'float'),  # 膜 P_H 未満
+    # 設計判断 (2026-05-26): 上限 620→700。Dist2(HYSYS) 塔頂を浅冷化(高P→塔頂温度↑)して
+    # 深冷コンデンサ費(エチレン-100C 17731円/GJ)を下げるレバー。P_H 下限 750kPa 未満を維持(膜 ph_le_pfeed 回避)。
+    "col2_p_kpa":          (500.0,  700.0,  'linear', 'float'),  # 膜 P_H 未満 (上限 620→700, 浅冷化)
     "col2_n_stages":       (44,     80,     'linear', 'int'  ),
     "col2_feed_ratio":     (0.40,   0.60,   'linear', 'float'),
-    "col2_reflux_ratio":   (8.0,    13.0,   'linear', 'float'),
+    # 設計判断 (2026-05-26): 上限 13→10.5。Dist2(HYSYS) 深冷コンデンサ(−83°C, エチレン-100C)
+    # が special TAC の ~25%(427億)の最大コスト。還流比↓ = 凝縮 duty↓ = 直接削減。
+    # 高還流(13)を切って低還流帯へ誘導。下限 8 は維持(HYSYS 収束 envelope + C3 封じ込め)。
+    "col2_reflux_ratio":   (8.0,    10.5,   'linear', 'float'),
 
     # ----- Dist3 (SM model3: N69-200/P1600-2200, spec なし)。feas: N≥115, P≤1900 -----
     "col3_p_kpa":          (1600.0, 1900.0, 'linear', 'float'),
@@ -368,15 +395,29 @@ def _save_best_reports(study: optuna.Study, base_path: str, top_n: int) -> list:
             res = evaluate(design, _CONFIG, verbose=False,
                            apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
                            apply_stage2=APPLY_STAGE2, F_C3H8_override=F_fresh)
-            path = f"{base_path}_top{rank}_trial{t.number}.txt"
-            with open(path, 'w', encoding='utf-8') as f, contextlib.redirect_stdout(f):
+            # 設計判断 (2026-05-26): レポート本文を一度 StringIO に組み立て、ファイル保存と
+            # コンソール出力で共用する。top1 は main.py (pipeline._display_best_full) と同様に
+            # コンソールにも全文を出す (ファイルだけだと分析しづらいという指摘に対応)。
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
                 print(f"# special.py top{rank}  trial #{t.number}  "
                       f"effective_TAC(BO)={t.value:.2f} 億円/年  "
                       f"feasible={t.user_attrs.get('is_feasible')}")
                 print("#" + "=" * 70)
                 show_input_snapshot(design, _CONFIG, eval_kwargs)
                 display_full_results(res, design, _CONFIG)
+            report_text = buf.getvalue()
+            path = f"{base_path}_top{rank}_trial{t.number}.txt"
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(report_text)
             saved.append(path)
+            if rank == 1:
+                # top1 のみコンソールにも全文出力 (main の最終詳細レポート相当)。
+                print("\n" + "=" * 72, flush=True)
+                print(f"  ★ ベスト候補 詳細レポート (top1 / trial #{t.number}) ─ コンソール表示",
+                      flush=True)
+                print("=" * 72, flush=True)
+                print(report_text, flush=True)
             print(f"  top{rank} 詳細レポート(CAPEX/OPEX/spec内訳): {path}", flush=True)
         except Exception as e:
             print(f"  top{rank} レポート生成失敗 (trial #{t.number}): {type(e).__name__}: {e}", flush=True)
@@ -391,20 +432,32 @@ def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     sampler = make_sampler('tpe', SEED, N_STARTUP, constraints_func=constraints_func)
-    storage = None
-    if USE_SQLITE_STORAGE:
-        storage = f"sqlite:///{os.path.join(OUTPUT_DIR, f'special_{ts}.db')}"
+    # 設計判断 (2026-05-26): 並列(N_WORKERS>1)時は worker 間で study 共有のため SQLite 必須。
+    _use_sqlite = USE_SQLITE_STORAGE or N_WORKERS > 1
+    _db_path = os.path.join(OUTPUT_DIR, f'special_{ts}.db')
+    storage = f"sqlite:///{_db_path}" if _use_sqlite else None
     study = optuna.create_study(
-        study_name=STUDY_NAME if not USE_SQLITE_STORAGE else f"{STUDY_NAME}_{ts}",
+        study_name=f"{STUDY_NAME}_{ts}" if _use_sqlite else STUDY_NAME,
         sampler=sampler, direction='minimize',
         storage=storage, load_if_exists=bool(storage),
     )
 
-    run_optimization(
-        study, objective, n_trials=N_TRIALS,
-        show_progress_bar=False, n_jobs=N_JOBS,
-        callbacks=[_make_special_callback(N_TRIALS)],
-    )
+    if N_WORKERS > 1 and storage is not None:
+        # 設計判断 (2026-05-26): N worker プロセスで共有 study を分担。各 worker は自前の
+        # HYSYS を起動 (重い)。完了後は study.trials(DB) を読んでサマリ/レポートを生成する。
+        print(f"  並列実行: {N_WORKERS} worker (各々 HYSYS 起動)。worker ログ: outputs/_worker*.log", flush=True)
+        from optimization.parallel import spawn_workers
+        spawn_workers(
+            kind='special', study_name=study.study_name, storage_url=storage,
+            db_path=_db_path, n_workers=N_WORKERS, n_trials_total=N_TRIALS,
+            n_startup=N_STARTUP, base_seed=SEED, out_dir=OUTPUT_DIR,
+        )
+    else:
+        run_optimization(
+            study, objective, n_trials=N_TRIALS,
+            show_progress_bar=False, n_jobs=N_JOBS,
+            callbacks=[_make_special_callback(N_TRIALS)],
+        )
 
     # ---- 結果サマリ ----
     complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
@@ -418,11 +471,17 @@ def main():
         best = min(complete, key=lambda t: t.value); tag = "best (feasible 無し)"
     if best is not None:
         print(f"  {tag}: trial #{best.number}  effective_TAC={best.value:.2f} 億円/年", flush=True)
-        print(f"    purity={best.user_attrs.get('c3h6_purity_wtfrac','?')} "
-              f"prod={best.user_attrs.get('production_kmol_h','?')} "
-              f"F_fresh={best.params.get('F_C3H8_fresh_kmol_h','?')}", flush=True)
-        for k, v in best.params.items():
-            print(f"    {k} = {v}", flush=True)
+        # 設計判断 (2026-05-26): 生 params の羅列 (float 21 行) は撤去。見やすい入力
+        # スナップショットは下の top1 詳細レポート (show_input_snapshot) に出力され、
+        # 再現用の生 params は best JSON に保存される。ここでは要点 1 行のみ。
+        try:
+            _pur  = float(best.user_attrs.get('c3h6_purity_wtfrac'))
+            _prod = float(best.user_attrs.get('production_kmol_h'))
+            _ff   = float(best.params.get('F_C3H8_fresh_kmol_h'))
+            print(f"    purity={_pur*100:.2f}wt%  prod={_prod:.1f}kmol/h  "
+                  f"F_fresh={_ff:.1f}kmol/h", flush=True)
+        except Exception:
+            pass
 
     # ---- 保存 ----
     base = os.path.join(OUTPUT_DIR, f'special_{ts}')

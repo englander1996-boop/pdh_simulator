@@ -218,6 +218,7 @@ def make_sampler(
     n_startup:         int,
     *,
     constraints_func:  Optional[Callable] = None,
+    constant_liar:     bool = False,
 ) -> optuna.samplers.BaseSampler:
     """Sampler を名前から生成。
 
@@ -261,12 +262,17 @@ def make_sampler(
         # 施策 Q (n_ei_candidates=200): 各 trial で 200 候補から最良 EI を選ぶ (デフォルト 24)。
         # 24 だと候補が直近成功領域に集中しがち、exploitation 偏重を緩和。
         # 副作用: best 収束ペースが緩む可能性 (exploration 強化のトレードオフ)。
+        # 設計判断 (2026-05-26): constant_liar は並列(マルチプロセス)最適化用。
+        # 実行中(pending)trial を悲観的な仮値で埋めて扱い、複数 worker が同じ有望領域に
+        # 群がる(冗長サンプリング)のを防ぐ。共有 SQLite storage 経由で worker 同士の
+        # running trial が見えるので、プロセス並列でも機能する。単一プロセスでは False。
         tpe = optuna.samplers.TPESampler(
             seed=seed,
             n_startup_trials=n_startup,
             constraints_func=cf,
             multivariate=True,                  # 施策 P (変数間相関学習)
             n_ei_candidates=200,                # 施策 Q (exploration 強化、デフォルト 24)
+            constant_liar=constant_liar,        # 並列時 True (pending trial を悲観評価)
         )
         if n_startup > 0:
             try:
