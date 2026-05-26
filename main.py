@@ -69,6 +69,11 @@ SAMPLER     = 'tpe'          # 'tpe' | 'cmaes' | 'random'
 # 設計判断 (2026-05-21): n_jobs=1 デフォルト。並列化したい場合 2-4 (SQLite ロック注意)。
 # penalty_scale が thread-local でないため最終評価は 1 推奨、中間探索は 2-4 で時短可。
 N_JOBS      = 1
+# 設計判断 (2026-05-26): マルチプロセス並列 worker 数。>1 で N プロセスが共有 SQLite study
+# を分担 (要 SAVE_SQLITE=True)。各 worker 単スレッドで penalty_scale/GIL 問題なし、
+# constant_liar=True で冗長サンプリング抑制。8コアなら 4 が目安 (sample 効率と速度の両立)。
+# 1 で従来の単一プロセス。N_JOBS(スレッド)とは別物 — 並列は必ず N_WORKERS を使う。
+N_WORKERS   = 4
 
 
 # ===========================================================================
@@ -195,7 +200,12 @@ SEARCH_SPACE = {
     # ----- Dist2 (脱エタン塔, partial cond) -----
     # 設計判断 (2026-05-21 D-plan revert): P_dist2 を b1712d1 (5.0, 7.0)e5 に戻す。
     # 124508 best は P_dist2=5.41e5、5/20 縮小の下限 5.5e5 で切られてた。
-    'P_dist2_Pa':        (5.0e5,  7.0e5,  'linear', 'float'),  # Pa (124508 best は 5.41e5)
+    # 設計判断 (2026-05-26): 上限 7e5 → 8e5 に拡大。Dist2 partial-cond コンデンサ熱量を
+    # 厳密エネルギー収支に改修 (src/distillation_core.py、+190億の深冷冷凍費) したことで、
+    # 「塔頂を浅冷化して安い冷媒に乗せる」のが強い TAC レバーになった。高 P → 塔頂温度↑
+    # → −100°C エチレン(14373円/GJ) より暖かい tier に移れる。膜依存 (P_H≥P_dist2+0.5e5,
+    # P_H 上限 9.5e5) より P_dist2 上限は 8e5 が上限実用値。BO に浅冷化の余地を与える。
+    'P_dist2_Pa':        (5.0e5,  8.0e5,  'linear', 'float'),  # Pa (上限 7→8, 浅冷化レバー)
     # 設計判断 (2026-05-22 forensic 反映、214750 run): N_dist2 上限を 50 → 40 に戻す。
     # 根拠: 5/22 改良 3 で 40→50 拡張したが、main_20260522_214750 (n=130 stopped)
     # で TPE phase 80 trial の 45% が N_dist2 ≥ 45 領域に張り付き、dist2_dT_shortfall
@@ -423,6 +433,7 @@ if __name__ == '__main__':
         seed       = SEED,
         sampler    = SAMPLER,
         n_jobs     = N_JOBS,
+        n_workers  = N_WORKERS,
         # § 2
         solver_bo   = SOLVER_BO,
         solver_topk = SOLVER_TOPK,

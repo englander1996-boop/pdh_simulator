@@ -411,9 +411,13 @@ def show_specs(specs, failure_reason: str) -> None:
     print(f"  H2 純度 (PSA 製品)     : {specs.h2_purity_molfrac*100:6.3f} mol%"
           f"   {'✓' if specs.h2_pass else '✗'}"
           f" (spec ≥ {99.9:.1f} mol%)")
+    if specs.threshold_high_kmol_h == float('inf'):
+        _spec_range = f"≥ {specs.threshold_low_kmol_h:.2f}"
+    else:
+        _spec_range = f"{specs.threshold_low_kmol_h:.2f}〜{specs.threshold_high_kmol_h:.2f}"
     print(f"  生産量                 : {specs.production_kmol_h:7.2f} kmol/h"
           f" {'✓' if specs.production_pass else '✗'}"
-          f" (片側 spec ≥ {specs.target_kmol_h * 0.99:.2f})")
+          f" (spec {_spec_range} kmol/h)")
     if not specs.all_pass:
         print(f"  違反内訳 : {failure_reason}")
 
@@ -435,15 +439,42 @@ def show_hi_summary(result) -> None:
 
 
 def show_stage2_synthesis(result) -> None:
-    """Stage 2 (HEN synthesis) の結果を 1 行サマリで表示。matching 詳細は省略。"""
+    """Stage 2 (HEN synthesis) の結果: 熱交換の組み合わせ (hot↔cold) と移動熱量を表示。
+
+    設計判断 (2026-05-26 ユーザー要望): 旧版は 1 行サマリのみで matching 詳細を省略して
+    いたが、「どの hot ストリームとどの cold ストリームを、何 kW 交換するか」(= HEN の
+    実構成) を結果に出す。データは HENResult.matches (各 HEMatch に hot_label/cold_label/
+    Q_kW/温度/A/CAPEX) に揃っているので表で展開する。exp1/exp3/special/main top-k の
+    display_full_results は全て本関数を通るので一括で反映される。
+    """
     if result.hen_result is None or result.economics_synth is None:
         return
     hr = result.hen_result
+
+    hdr("Heat Integration Stage 2 (HEN 合成: 熱交換の組み合わせ・移動熱量)")
+    print(f"  追加 process-process HE: {hr.n_process_HE} 機   "
+          f"内部熱回収 = {hr.Q_recovered_kW/1000:6.2f} MW   "
+          f"追加 CAPEX = {hr.CAPEX_added_okuyen:.3f} 億円")
+    print(f"  残ユーティリティ: 加熱 hot = {hr.Q_hot_utility_kW/1000:6.2f} MW   "
+          f"冷却 cold = {hr.Q_cold_utility_kW/1000:6.2f} MW")
     if not hr.feasible:
-        print(f"  HEN synthesis infeasible: {hr.message}")
-        return
-    print(f"    HEN: {hr.n_process_HE} 機 追加 (回収 {hr.Q_recovered_kW/1000:.1f} MW, "
-          f"追加 CAPEX {hr.CAPEX_added_okuyen:.2f} 億円)")
+        print(f"  ⚠ HEN synthesis infeasible: {hr.message}")
+
+    if hr.matches:
+        print()
+        print("  熱交換の組み合わせ (hot ストリーム → cold ストリーム / 移動熱量):")
+        print(f"  {'#':>2} {'hot stream':<18} {'cold stream':<18} {'移動熱量':>9} "
+              f"{'hot T(in>out)':>15} {'cold T(in>out)':>15} {'A[m2]':>7} {'CAPEX':>7} {'pinch':>6}")
+        print(f"  {'-'*2} {'-'*18} {'-'*18} {'-'*9} {'-'*15} {'-'*15} {'-'*7} {'-'*7} {'-'*6}")
+        for i, m in enumerate(hr.matches, 1):
+            h_lab = m.hot_label if len(m.hot_label) <= 18 else m.hot_label[:17] + '…'
+            c_lab = m.cold_label if len(m.cold_label) <= 18 else m.cold_label[:17] + '…'
+            print(f"  {i:>2} {h_lab:<18} {c_lab:<18} {m.Q_kW/1000:>6.2f}MW "
+                  f"{m.T_h_in_K-273.15:>6.0f}>{m.T_h_out_K-273.15:<6.0f} "
+                  f"{m.T_c_in_K-273.15:>6.0f}>{m.T_c_out_K-273.15:<6.0f} "
+                  f"{m.A_m2:>7.0f} {m.CAPEX_okuyen:>7.3f} {m.side:>6}")
+    else:
+        print("  (process-process マッチなし: 全ストリームを utility で処理)")
 
 
 def show_tac_summary(result, C3H6_product: float) -> None:

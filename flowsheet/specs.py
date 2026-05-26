@@ -49,6 +49,12 @@ class SpecComplianceResult:
     h2_purity_molfrac:   float
     production_kmol_h:   float
     target_kmol_h:       float
+    # 設計判断 (2026-05-26): 生産量スペックの実効閾値を結果に保持する。
+    # display 等が production_min_relative / production_max_relative を知らなくても
+    # 正しい両側閾値を表示できるようにするため (旧 display は target×0.99 を
+    # ハードコードしており、実 config の 5% 許容と食い違って誤表示していた)。
+    threshold_low_kmol_h:  float
+    threshold_high_kmol_h: float
 
     c3h6_pass:           bool
     h2_pass:             bool
@@ -138,6 +144,8 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
         h2_purity_molfrac      =h2_mol,
         production_kmol_h      =production_kmol_h,
         target_kmol_h          =target_kmol_h,
+        threshold_low_kmol_h   =threshold_low,
+        threshold_high_kmol_h  =threshold_high,
         c3h6_pass              =c3h6_pass,
         h2_pass                =h2_pass,
         production_pass        =production_pass,

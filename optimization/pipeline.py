@@ -48,6 +48,11 @@ class PipelineConfig:
     # 設計判断 (2026-05-21): n_jobs=1 推奨 (penalty_scale が thread-local でない)。
     # 並列化したい場合は n_jobs=2-4 程度。同時に N_TRIALS を増やすと実効サンプル数↑。
     n_jobs:      int             = 1
+    # 設計判断 (2026-05-26): n_workers>1 でマルチプロセス並列最適化。
+    # 共有 SQLite storage(save_sqlite=True 必須) を N プロセスで分担。各プロセス単スレッド
+    # で penalty_scale/GIL 問題なし。constant_liar=True で冗長サンプリング抑制。
+    # 1 で従来の単一プロセス。詳細は optimization/parallel.py。
+    n_workers:   int             = 1
 
     # § 2. ソルバ選択
     solver_bo:   Dict[str, str]  = field(default_factory=lambda: {
@@ -286,18 +291,35 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     from optimization.callbacks import make_compact_callback
     _compact_cb = make_compact_callback(n_trials_total=cfg.n_trials)
 
-    print(f"[BO] {cfg.n_trials} trial を実行中 ...")
+    _para = cfg.n_workers > 1 and storage_url is not None
+    print(f"[BO] {cfg.n_trials} trial を実行中 "
+          f"({'並列 ' + str(cfg.n_workers) + ' worker' if _para else '単一プロセス'}) ...")
     t_start = datetime.now()
     bo_interrupted = False
     bo_fatal_error = None
     try:
-        run_optimization(
-            study, objective,
-            n_trials          = cfg.n_trials,
-            show_progress_bar = False,           # tqdm は自前 ETA と競合するため無効
-            callbacks         = [_compact_cb],
-            n_jobs            = cfg.n_jobs,
-        )
+        if _para:
+            # 設計判断 (2026-05-26): 共有 SQLite study を N worker プロセスで分担。
+            # workers が DB に trial を書き込む → 以降の top-k/レポートは study.trials
+            # (= DB 再クエリ) でそのまま全 trial を見られる。
+            from optimization.parallel import spawn_workers
+            spawn_workers(
+                kind='main', study_name=study_name, storage_url=storage_url,
+                db_path=str(paths['db']), n_workers=cfg.n_workers,
+                n_trials_total=cfg.n_trials, n_startup=cfg.n_startup,
+                base_seed=cfg.seed, out_dir=str(out_dir),
+            )
+        else:
+            if cfg.n_workers > 1:
+                print("[BO] 警告: n_workers>1 だが SQLite storage 無効 (save_sqlite=False) "
+                      "→ 単一プロセスで実行")
+            run_optimization(
+                study, objective,
+                n_trials          = cfg.n_trials,
+                show_progress_bar = False,           # tqdm は自前 ETA と競合するため無効
+                callbacks         = [_compact_cb],
+                n_jobs            = cfg.n_jobs,
+            )
     except KeyboardInterrupt:
         bo_interrupted = True
         print("\n[BO] Ctrl+C で中断。これまでの結果を保存して終了します。")
