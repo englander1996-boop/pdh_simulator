@@ -1,9 +1,12 @@
 """
 tear stream 加速法のパッケージ。
 
-config/operating.toml の solver.inner.method で選択可能:
+config/operating.toml の solver.inner.method で選択可能 (env PDH_RECYCLE_ACCEL で上書き可):
   - "successive_substitution": α-relaxation (旧来法、ベースライン)
-  - "wegstein": Wegstein 加速 (推奨)
+  - "wegstein": Wegstein 加速 (成分ごとスカラー、推奨デフォルト)
+
+注記 (2026-05-27): Anderson 加速も試したが、exp4 ベンチで真値 (tight tol) に対し +3.3% ズレた点に
+着地 / 0.1% では収束不能だったため**却下・削除**。詳細は memory:project-recycle-accel-benchmark。
 """
 
 from flowsheet.solvers.base import TearAccelerator

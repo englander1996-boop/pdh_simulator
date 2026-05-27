@@ -49,7 +49,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ===========================================================================
 # § 1. 最適化ハイパラ
 # ===========================================================================
-N_TRIALS    = 300            # Optuna 試行回数 (FUG なら ~15 分目安)
+# 設計判断 (2026-05-26): 300 → 360 に増量 (N_WORKERS=6 と対)。
+# 並列 6 worker = async TPE 実効バッチ 6。バッチ>1 は in-flight trial を見ずに提案する
+# ため僅かに sample 効率が落ちる (staleness)。これを試行数 +20% で過補償し、最終品質を
+# 4-worker/300 以上に保つ。6 worker = 計算 1.5 倍速なので 360÷1.5 ≈ 旧 240 trial 相当の
+# wall-clock < 旧 300 → 品質↑ かつ時間↓ の両立。QMC startup(=50) は不変。
+N_TRIALS    = 360            # Optuna 試行回数 (旧 300、6 worker staleness を過補償)
 # 設計判断 (2026-05-22 forensic, 施策 3b): 50 → 25 に縮小。
 # 旧 50 は「QMC で広域 1/6 を網羅 → TPE 起動」の意図だったが、214750 run で 50 trial
 # 全部 feas=0 のまま消費 (= QMC は constraints_func を使わない)。25 に下げて TPE を
@@ -73,7 +78,15 @@ N_JOBS      = 1
 # を分担 (要 SAVE_SQLITE=True)。各 worker 単スレッドで penalty_scale/GIL 問題なし、
 # constant_liar=True で冗長サンプリング抑制。8コアなら 4 が目安 (sample 効率と速度の両立)。
 # 1 で従来の単一プロセス。N_JOBS(スレッド)とは別物 — 並列は必ず N_WORKERS を使う。
-N_WORKERS   = 4
+# 設計判断 (2026-05-26): 4 → 6 (本機 i5-13400 の P-core 数ちょうど)。
+# 品質劣化の唯一原因は「TPE フェーズの同時 worker 数 = async バッチサイズ」で、これは
+# ロードバランスで消せない async BO 固有の staleness。constant_liar 込みでバッチ 6 は
+# 「ほぼ逐次同等」圏の上端 (parallel.py 設計ノート: 控えめ 3-4 がほぼ逐次)。
+# 8+ は E-core(約半速)に worker が載り (a)静的均等分割で straggler 律速 (b)バッチ膨張で
+# staleness 増 の二重劣化なので不可。QMC startup フェーズは Sobol が結果非依存のため
+# 何 worker でも品質ゼロ劣化 (50 QMC は共有 study の総完了数で切替: study.py の
+# _PhaseSwitchSampler)。残る僅かな TPE staleness は N_TRIALS 増量側で過補償する。
+N_WORKERS   = 6
 
 
 # ===========================================================================

@@ -97,7 +97,12 @@ def _build_objective(kind: str) -> Callable:
     if kind == 'special':
         import special as S
         return S.objective
-    raise ValueError(f"未知の kind: {kind!r} ('main' | 'special')")
+    if kind == 'final':
+        # 設計判断 (2026-05-27): final.py = (sm, rigorous, sm) + Stage2 全trial。
+        # special と同じく module global (penalty_scale) 依存だが worker はプロセス分離で安全。
+        import final as Fm
+        return Fm.objective
+    raise ValueError(f"未知の kind: {kind!r} ('main' | 'special' | 'final')")
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +131,9 @@ def _run_worker(kind: str, study_name: str, storage_url: str,
         if kind == 'main':
             from optimization.callbacks import make_compact_callback
             callbacks = [make_compact_callback(n_trials_total=n_trials)]
+        elif kind == 'final':
+            import final as Fm
+            callbacks = [Fm._make_final_callback(n_trials)]
         else:
             import special as S
             callbacks = [S._make_special_callback(n_trials)]
@@ -201,7 +209,15 @@ def spawn_workers(
         print(f"[parallel] worker {i} 起動 PID={p.pid} seed={seed} "
               f"n_trials={per[i]} log={logf}", flush=True)
 
-    # 全 worker 完了待ち
+    # 全 worker 完了待ち。設計判断 (2026-05-27): 並列中 coordinator が沈黙すると
+    # 進捗が見えないため、DB を定期(既定 60s)読みして集約進捗を 1 行表示する
+    # (詳細な per-trial ログは各 _worker*.log に出続ける)。env PDH_PARALLEL_PROGRESS_SEC で間隔調整。
+    import time as _time
+    _t0 = _time.time()
+    _interval = float(os.environ.get('PDH_PARALLEL_PROGRESS_SEC', '60'))
+    while any(p.poll() is None for p, _ in procs):
+        _time.sleep(_interval)
+        _print_parallel_progress(storage_url, study_name, n_trials_total, _t0)
     for i, (p, fout) in enumerate(procs):
         rc = p.wait()
         try:
@@ -212,6 +228,32 @@ def spawn_workers(
     return logs
 
 
+def _print_parallel_progress(storage_url: str, study_name: str,
+                             n_total: int, t0: float) -> None:
+    """共有 study を read-only で読み、集約進捗を 1 行表示 (失敗は黙ってスキップ)。"""
+    try:
+        import time
+        import optuna
+        st = optuna.load_study(
+            study_name=study_name,
+            storage=optuna.storages.RDBStorage(
+                url=storage_url, engine_kwargs={"connect_args": {"timeout": 30.0}}),
+        )
+        comp = [t for t in st.trials if t.state.name == 'COMPLETE']
+        running = sum(1 for t in st.trials if t.state.name == 'RUNNING')
+        feas = [t for t in comp if t.user_attrs.get('is_feasible') and t.value is not None]
+        best = f"{min(t.value for t in feas):.2f}" if feas else "----"
+        done = len(comp)
+        pct = 100.0 * done / max(n_total, 1)
+        el = (time.time() - t0) / 60.0
+        eta = ((n_total - done) / done * el) if done > 0 else 0.0
+        print(f"[parallel] 進捗 {done}/{n_total} ({pct:.0f}%)  running={running}  "
+              f"feasible {len(feas)}  best {best}  経過 {el:.0f}分  ETA ~{eta:.0f}分",
+              flush=True)
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # CLI (worker mode)
 # ---------------------------------------------------------------------------
@@ -219,7 +261,7 @@ def spawn_workers(
 def _main_cli() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--worker", action="store_true")
-    ap.add_argument("--kind", choices=["main", "special"], required=True)
+    ap.add_argument("--kind", choices=["main", "special", "final"], required=True)
     ap.add_argument("--study-name", required=True)
     ap.add_argument("--storage", required=True)
     ap.add_argument("--n-trials", type=int, required=True)
