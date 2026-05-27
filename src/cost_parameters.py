@@ -373,20 +373,24 @@ ELECTRICITY_JPY_PER_KWH: float = 17.0
 #                          ─────────────────         ───────────────────   ──────────────
 #                          一般インフレ (CEPCI)       為替                  US 安価 NG ⇒ 日本高 LNG 差
 #
-# 日本補正定数 (JAPAN_STEAM_FUEL_CORRECTION) = 2.0
-#   根拠: Turton 2018 は US LNG $3/MMBtu 前提、日本 LNG は約 $12/MMBtu (4倍)。
-#         steam の燃料寄与は ~50-70%。fuel ratio 4 × 0.5 + capital ratio 1 × 0.5 ≒ 2.5
-#         実勢が出るのを待つ間の保守的下限として 2.0 を採用 (要見直し)。
+# 日本補正定数 (JAPAN_STEAM_FUEL_CORRECTION)
+#   旧根拠: Turton 2018 は US LNG $3/MMBtu 前提、日本 LNG は約 $12/MMBtu (4倍)。
+#          steam の燃料寄与は ~50-70%。fuel ratio 4 × 0.5 + capital ratio 1 × 0.5 ≒ 2.5
+#          実勢が出るのを待つ間の保守的下限として 2.0 を採用していた (要見直し)。
+#   変更 (2026-05-27, ユーザー決定): 日本補正 2.0 → 1.0 (補正なし) に変更。
+#     理由: 2.0 は実勢未確認の保守的仮置きで TAC を過大評価していた。日本/US 燃料差の
+#     確たる実勢値が無い段階では Turton US 基準値そのまま (補正なし) を採用する。
+#     ※ Turton 基準値自体が書籍未入手の推定なので !仮置き マーカーは継続。
 #
-# 計算:
-#   LP: 4.5 × 1.471 × 158.8595 × 2.0 ≈ 2103 → 2100
-#   MP: 4.8 × 1.471 × 158.8595 × 2.0 ≈ 2244 → 2240
-#   HP: 5.7 × 1.471 × 158.8595 × 2.0 ≈ 2664 → 2660
+# 計算 (補正 1.0):
+#   LP: 4.5 × 1.471 × 158.8595 × 1.0 ≈ 1051 → 1050
+#   MP: 4.8 × 1.471 × 158.8595 × 1.0 ≈ 1122 → 1120
+#   HP: 5.7 × 1.471 × 158.8595 × 1.0 ≈ 1332 → 1330
 # 温度の出典: PDH 学生コンテスト要綱 Ver.2.0 (ア)(イ)(ウ)
-JAPAN_STEAM_FUEL_CORRECTION: float = 2.0   # !仮置き Japan/US 燃料コスト差ざっくり補正
-LP_STEAM_JPY_PER_GJ: float = 2100.0   # 160°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
-MP_STEAM_JPY_PER_GJ: float = 2240.0   # 186°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
-HP_STEAM_JPY_PER_GJ: float = 2660.0   # 230°C 飽和 (!仮置き Turton×CEPCI×日本補正 2.0)
+JAPAN_STEAM_FUEL_CORRECTION: float = 1.0   # !仮置き 2026-05-27 に 2.0→1.0 (補正撤廃、ユーザー決定)
+LP_STEAM_JPY_PER_GJ: float = 1050.0   # 160°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
+MP_STEAM_JPY_PER_GJ: float = 1120.0   # 186°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
+HP_STEAM_JPY_PER_GJ: float = 1330.0   # 230°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
 
 # ---------------------------------------------------------------------------
 # 冷媒階層 (contest.md §2-3 のユーティリティ仕様)
@@ -408,25 +412,54 @@ HP_STEAM_JPY_PER_GJ: float = 2660.0   # 230°C 飽和 (!仮置き Turton×CEPCI�
 AIR_COOLING_JPY_PER_GJ:           float =    95.0   # 空冷 (!仮置き Turton 推定値、書籍未入手)
 COOLING_WATER_JPY_PER_GJ:         float =    85.0   # 30→40°C (!仮置き Turton 推定値、書籍未入手)
 
-# 冷凍冷媒単価 [円/GJ]
-# ⚠️  !仮置き (Vasudevan 2017 + Turton 2018 共に書籍/論文未入手のため数値推定) — 入手後更新要
-# 推定根拠:
-#   Vasudevan, Agarwal & Mohan (2017) "Estimating refrigeration costs at
-#   cryogenic temperatures" Computers & Chemical Engineering 103, 28-43
-#   DOI: https://doi.org/10.1016/j.compchemeng.2017.02.041 (論文未入手)
-#   補助: Turton et al. (2018) Appendix Table 8.3 (中温域 +15°C, +5°C) ※書籍未入手
-# Escalation factor: CEPCI_CURRENT / CEPCI_2016 = 800 / 544 ≈ 1.471 (CEPCI_CURRENT も推定値)
-# 換算: USD/GJ × 1.471 × 158.8595 = 円/GJ
-#   プロピレン (Turton 推定): +15°C ≈ 3 USD/GJ → 701、+5°C ≈ 4.4 USD/GJ → 1028
-#   プロピレン (Vasudevan 推定): -25°C ≈ 9.4 USD/GJ → 2197、-40°C ≈ 13 USD/GJ → 3039
-#   エチレン (Vasudevan 推定, cascade): -60°C ≈ 35 → 8178、-75°C ≈ 50 → 11683、-100°C ≈ 85 → 19861
-PROPYLENE_REFRIG_15C_JPY_PER_GJ:  float =    700.0   # +15°C  (!仮置き Turton 推定、書籍未入手)
-PROPYLENE_REFRIG_5C_JPY_PER_GJ:   float =   1030.0   # +5°C   (!仮置き Turton 推定、書籍未入手)
-PROPYLENE_REFRIG_M25C_JPY_PER_GJ: float =   2200.0   # -25°C  (!仮置き Vasudevan 推定、論文未入手)
-PROPYLENE_REFRIG_M40C_JPY_PER_GJ: float =   3040.0   # -40°C  (!仮置き Vasudevan 推定、論文未入手)
-ETHYLENE_REFRIG_M60C_JPY_PER_GJ:  float =   8200.0   # -60°C  (!仮置き Vasudevan 推定、論文未入手)
-ETHYLENE_REFRIG_M75C_JPY_PER_GJ:  float =  11700.0   # -75°C  (!仮置き Vasudevan 推定、論文未入手)
-ETHYLENE_REFRIG_M100C_JPY_PER_GJ: float =  19900.0   # -100°C (!仮置き Vasudevan 推定、論文未入手)
+# 冷凍冷媒単価 [円/GJ] — contest §2-3 準拠「製造所要動力」ベース
+# 変更 (2026-05-27, ユーザー決定): 旧 Vasudevan 2017 推定の $/GJ「購入単価」を撤回し、
+#   contest §2-3 の規定に従い「製造するための所要動力 (= 冷凍機 圧縮機電力)」ベースに置換。
+#   contest §2-3 原文要旨: 冷凍冷媒は隣接エチレンプラントから供給を受けられる (= 購入費ゼロ、
+#     飽和液で受けプロセス冷却後に飽和蒸気で返す)。コストは「製造するための所要動力」で、温度が
+#     低いほど大きく、エチレン冷媒はプロピレン冷媒を用いたカスケードのためプロピレンより大きい。
+#     冷媒の評価方法は設計者が考察して決める旨も明記。→ 動力(電力)ベースが要綱に忠実。
+#   旧仮置き (撤回・記録保持): Vasudevan(2017) DOI 10.1016/j.compchemeng.2017.02.041 (論文未入手)
+#     の $/GJ 推定 → +15:700 / +5:1030 / -25:2200 / -40:3040 / -60:8200 / -75:11700 / -100:19900。
+#     ($/GJ「購入」前提が contest と不整合のため不採用。文献入手時の比較用に値を残す)
+#
+# モデル: 冷媒製造 = 冷凍サイクルの圧縮機電力。COP = η × Carnot = η × T_c / (T_h - T_c)。
+#   単価[円/GJ_cold] = 電力[円/GJ] / COP。 電力 = ELECTRICITY_JPY_PER_KWH / 3.6e-3 (=4722円/GJ)。
+#   プロピレン冷媒 (+15〜-40℃): 単段、冷却水へ排熱。
+#   エチレン冷媒 (-60〜-100℃): 2段カスケード — エチレン段が T_c→プロピレン-40℃ で吸熱、
+#     プロピレン段が (Q + W_eth) を -40℃→冷却水 で排熱。→ 同温でもエチレン>プロピレン動力 (要綱通り)。
+#   η, T_h は !仮置き の設計仮定。方針「現実にあり得る範囲でぎりぎり安く」→ η=0.60 (良好な大型
+#   冷凍機の対Carnot効率の上端。これ以上は非現実的)。要調整。
+REFRIG_CARNOT_EFF: float = 0.60     # !仮置き 冷凍機の対Carnot効率 (現実的 best 端、要調整)
+_T_H_REJECT_K:     float = 308.15   # !仮置き 排熱先 (冷却水30℃供給 + 接近余裕 ≒ 35℃)
+_T_CASCADE_MID_K:  float = 233.15   # エチレン冷媒カスケードの中間段 = プロピレン-40℃ (contest 記述)
+_ELEC_JPY_PER_GJ:  float = ELECTRICITY_JPY_PER_KWH / 3.6e-3   # 17円/kWh → 4722円/GJ
+
+
+def _refrig_single_jpy_per_gj(T_c_K: float) -> float:
+    """単段冷凍 (T_c で吸熱 → 冷却水へ排熱) の所要動力ベース単価 [円/GJ_cold]。"""
+    cop = REFRIG_CARNOT_EFF * T_c_K / (_T_H_REJECT_K - T_c_K)
+    return _ELEC_JPY_PER_GJ / cop
+
+
+def _refrig_cascade_jpy_per_gj(T_c_K: float) -> float:
+    """2段カスケード (エチレン段 T_c→中間, プロピレン段 中間→冷却水) の単価 [円/GJ_cold]。
+
+    エチレン冷媒製造がプロピレンより大きくなる contest §2-3 記述を物理で反映。
+    W は Q_cold 基準の比仕事 (per unit Q_cold)。
+    """
+    w_eth  = (_T_CASCADE_MID_K - T_c_K) / (REFRIG_CARNOT_EFF * T_c_K)
+    w_prop = (1.0 + w_eth) * (_T_H_REJECT_K - _T_CASCADE_MID_K) / (REFRIG_CARNOT_EFF * _T_CASCADE_MID_K)
+    return _ELEC_JPY_PER_GJ * (w_eth + w_prop)
+
+
+PROPYLENE_REFRIG_15C_JPY_PER_GJ:  float = _refrig_single_jpy_per_gj(288.15)   # +15°C
+PROPYLENE_REFRIG_5C_JPY_PER_GJ:   float = _refrig_single_jpy_per_gj(278.15)   # +5°C
+PROPYLENE_REFRIG_M25C_JPY_PER_GJ: float = _refrig_single_jpy_per_gj(248.15)   # -25°C
+PROPYLENE_REFRIG_M40C_JPY_PER_GJ: float = _refrig_single_jpy_per_gj(233.15)   # -40°C
+ETHYLENE_REFRIG_M60C_JPY_PER_GJ:  float = _refrig_cascade_jpy_per_gj(213.15)  # -60°C
+ETHYLENE_REFRIG_M75C_JPY_PER_GJ:  float = _refrig_cascade_jpy_per_gj(198.15)  # -75°C
+ETHYLENE_REFRIG_M100C_JPY_PER_GJ: float = _refrig_cascade_jpy_per_gj(173.15)  # -100°C
 
 # 燃料 (反応器プリヒーター LNG) 単価 [円/GJ]
 # 出典: JOGMEC 月例 LNG 市況調査 + 財務省 貿易統計 LNG 輸入 CIF 価格
