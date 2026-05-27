@@ -6,7 +6,7 @@ special.py (sm, hysys, sm) のフォーク。**Dist2 を HYSYS → rigorous に�
 (N_WORKERS>1) が可能になる。Dist1/Dist3 は学習済み SM(GPR)、Dist2 は in-house rigorous
 (Wang-Henke)。Stage2(HEN 合成)を **全 trial で実行**(special と同じ apply_stage2=True)
 するので、BO の目的関数が「本物のプラント TAC」= top-k 再評価とほぼ一致する。
-
+  
 なぜこの構成 (2026-05-27, ユーザー決定):
   - special(sm,hysys,sm): 精度◎だが HYSYS COM で並列不可・遅い。
   - main(fug,rig,fug→top-k rig): 並列可だが BO ループの Dist1/Dist3 が fug(低精度)、
