@@ -132,9 +132,13 @@ def run_recycle_convergence(
         )
 
     # 設計判断: 加速法は config/operating.toml で選択 (Wegstein 推奨)。
+    # 設計判断 (2026-05-27): env PDH_RECYCLE_ACCEL で上書き可 (ベンチ用、'anderson' 等)。
     # 内部状態 (履歴) を持つため、新しい外側 iter ごとに reset() する必要がある。
-    accelerator = make_accelerator(s.method, s)
+    import os as _os_accel
+    accelerator = make_accelerator(_os_accel.environ.get('PDH_RECYCLE_ACCEL', s.method), s)
     accelerator.reset()
+    # 設計判断 (2026-05-27): env PDH_RECYCLE_TOL で recycle 相対許容を上書き可 (ベンチ用)。
+    _tol_rel = float(_os_accel.environ.get('PDH_RECYCLE_TOL', s.tol_relative))
 
     if verbose:
         print(f"  Fresh: C3H8={F_C3H8_feed:.2f}, C4H10={F_C4H10_feed:.2f} kmol/h"
@@ -237,10 +241,10 @@ def run_recycle_convergence(
             guard_hit = True
             break
 
-        if diff < s.tol_relative:
+        if diff < _tol_rel:
             converged = True
             if verbose:
-                print(f"  → 内側収束 (Δ_rel={diff*100:.4f}% < TOL_rel={s.tol_relative*100:.3f}%)")
+                print(f"  → 内側収束 (Δ_rel={diff*100:.4f}% < TOL_rel={_tol_rel*100:.3f}%)")
             break
 
         # 設計判断: TearAccelerator (SS or Wegstein) に次反復の更新を委譲。
