@@ -418,7 +418,18 @@ def evaluate(
     mem_excess = one_pass_dict.get('trace_bypass_mem_excess', 0.0) or 0.0
     trace_bypass_excess_total = psa_excess + mem_excess
     if trace_bypass_excess_total > 0:
-        bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN * _scale
+        # 設計判断 (2026-05-27 forensic, final_154103 vs _220920 比較):
+        # trace_bypass を penalty_scale の緩和ランプ (序盤 0.2) から切り離す。
+        # 根拠: 220920 のベスト #129 は素 TAC=1122.34 (前回ベスト #210 の 1122.75 より良い)
+        #   だが PSA trace_bypass 超過 0.0073 を抱え、trial#129 (scale≈1.2) では penalty が
+        #   8.9 億止まりで「feasible best」に化けた → 報告 effective_TAC が 1131 に悪化し、
+        #   2 run 間の 8 億の差は丸ごとこの penalty の副作用だった。同 run の top20 中 5 件が
+        #   崖 (bypass) 設計。trace_bypass は「spec を序盤緩める」性質ではなく、PSA design
+        #   モデルが C3 を 1% 超扱えない=モデル妥当性の壁 (run_one_pass._TRACE_BYPASS_FRAC)
+        #   なので、探索序盤でも割引すべきでない。max(_scale, 1.0) で設計意図 (10 億/pp) を
+        #   下限保証しつつ終盤の強化 (×3) は維持。報告側の保険は final.py の clean 優先選択。
+        bypass_scale = max(_scale, 1.0)
+        bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN * bypass_scale
         soft_penalty += bypass_penalty
         # 注: failures.append は意図的に呼ばない。is_feasible は他の真の spec 違反
         # (純度・生産量) のみで判定する。trace_bypass の情報は user_attr に積んで
