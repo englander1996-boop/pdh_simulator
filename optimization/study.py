@@ -127,6 +127,7 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
       [20] trace_bypass_mem_excess   : Mem trace bypass 閾値超過分 [fraction] (2026-05-22 改良2 追加、
                                        同上、Mem 経路の非 C3 混入率)
       [21] unknown_failure           : is_feasible=False かつ全 shortfall=0 で 1.0 (silent infeas 保険)
+      [22] dist2_cond_shortfall      : HYSYS Dist2 cold-top (凝縮器ΔT不成立) の塔頂温度不足 [K]×0.1 (2026-05-28 追加、col2_p↑/reflux↓ 方向シグナル)
 
     設計判断 (2026-05-20): 旧版は [proxy, feas_flag] の 2 制約のみで、ValueError
     (Dist1 FUG 全ゼロ)・Wang-Henke 失敗 (Dist2) 等の異種 infeasibility が同じ
@@ -161,6 +162,11 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     d1_dT = trial.user_attrs.get('dist1_dT_shortfall', 0.0)                    # log10 ratio, 既に O(1)
     d2_dT = trial.user_attrs.get('dist2_dT_shortfall', 0.0)
     d3_dT = trial.user_attrs.get('dist3_dT_shortfall', 0.0)
+    # 設計判断 (2026-05-28): HYSYS Dist2 cold-top (凝縮器ΔT不成立、r2 失敗の86%) の連続シグナル。
+    # 塔頂が凝縮可能下限を何K下回るか [K]。10K = 1.0 に正規化 (典型失敗は ~2-15K)。
+    # 旧来この失敗は N/dT shortfall が 0 で unknown_failure 扱い=方向勾配なし → feasible 頭打ちの主因。
+    d2_cond_raw = trial.user_attrs.get('dist2_cond_shortfall', 0.0)
+    d2_cond = d2_cond_raw * 0.1
     psa_t = trial.user_attrs.get('psa_t_abs_shortfall', 0.0)                   # log10, 既に O(1)
     psa_u = trial.user_attrs.get('psa_u_0_shortfall', 0.0)
     psa_f = trial.user_attrs.get('psa_feed_shortfall', 0.0)                    # binary
@@ -203,13 +209,14 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
         psa_t + psa_u + psa_f + rx_sv_raw + rx_ot +
         prod_under_raw + prod_over_raw +
         mem_ph + mem_bp_raw + mem_phase + mem_other +
-        tb_psa_raw + tb_mem_raw
+        tb_psa_raw + tb_mem_raw + d2_cond_raw
     )
     unknown_failure = 1.0 if (not is_feasible and raw_total == 0.0) else 0.0
+    # [22] dist2_cond_shortfall : HYSYS Dist2 塔頂が凝縮可能下限を下回る量 (2026-05-28 追加)
     return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
             psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over,
             mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem,
-            unknown_failure]
+            unknown_failure, d2_cond]
 
 
 def make_sampler(

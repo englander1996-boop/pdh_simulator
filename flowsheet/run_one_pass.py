@@ -15,6 +15,7 @@ PDH プロセスの 1 パス計算 (リサイクル収束の 1 反復に相当)�
 
 import math
 import os
+import re
 import warnings
 from typing import Dict, Tuple
 
@@ -456,7 +457,8 @@ def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, 
     col_design: ColumnTunables (N_stages を持つ)
     """
     idx = col_key[-1]
-    out = {f'dist{idx}_N_shortfall': 0.0, f'dist{idx}_dT_shortfall': 0.0}
+    out = {f'dist{idx}_N_shortfall': 0.0, f'dist{idx}_dT_shortfall': 0.0,
+           f'dist{idx}_cond_shortfall': 0.0}
     eq = getattr(col_result, 'equipment', None)
     if eq is None:
         return out
@@ -472,6 +474,18 @@ def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, 
         # スケールが過大なので log 圧縮で 0-10 程度に抑える。
         # 例: dT_max=56K → log10(56/0.05) ≈ log10(1120) ≈ 3.05
         out[f'dist{idx}_dT_shortfall'] = math.log10(max(dT_max / _RIG_TOL_K, 1.0))
+    # 設計判断 (2026-05-28): HYSYS Dist2 の cold-top 失敗 (凝縮器ΔT不成立) は N_needed/dT_max が
+    # ともに 0 で、TPE には「方向不明 infeasible」としか伝わっていなかった (r2 失敗の 86%=125件)。
+    # 塔頂温度が凝縮可能下限 (最冷媒供給温度 +10K = utility 戻り温度) を何K下回るかを連続シグナル化し、
+    # TPE が col2_p↑ / reflux↓ で塔頂を暖める勾配を学習できるようにする。失敗 message
+    # ("...condenser ΔT 不成立 (T_top=-99.4°C, T_util=-100.0°C)") に埋め込まれた値から復元する
+    # (HYSYS 経路は T_top を equipment に構造化保存しないため message パースで取得)。
+    msg = getattr(eq, 'message', '') or ''
+    if 'condenser' in msg and 'T_top=' in msg and 'T_util=' in msg:
+        m = re.search(r'T_top=(-?\d+(?:\.\d+)?).*?T_util=(-?\d+(?:\.\d+)?)', msg)
+        if m:
+            t_top = float(m.group(1)); t_util = float(m.group(2))
+            out[f'dist{idx}_cond_shortfall'] = max(0.0, (t_util + 10.0) - t_top)
     return out
 
 
