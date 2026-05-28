@@ -22,10 +22,12 @@ Bayesian Optimization で探索する。main.py (FUG/rigorous, 全フローシ�
   Dist2(4) : col2_p_kpa, col2_n_stages, col2_feed_ratio, col2_reflux_ratio (HYSYS)
   Dist3(3) : col3_p_kpa, col3_n_stages, col3_feed_ratio                    (SM, spec なし)
 
-出力:
-  outputs/special_<ts>_trials.csv     : 全 trial の params + 診断
-  outputs/special_<ts>_best.json      : best trial 要約
-  outputs/special_<ts>_top{1..N}_*.txt: 上位候補の詳細レポート (CAPEX/OPEX/spec/HI 内訳)
+出力 (main.py 流に run ごとの subdir へ集約):
+  outputs/special_<ts>/README.md            : 結果の見方ガイド (最初に開く)
+  outputs/special_<ts>/trials.csv           : 全 trial の params + 診断
+  outputs/special_<ts>/best.json            : best trial 要約
+  outputs/special_<ts>/top{1..N}_trial*.txt : 上位候補の詳細レポート (CAPEX/OPEX/spec/HI 内訳)
+  outputs/special_<ts>/optuna.db            : Optuna SQLite (USE_SQLITE_STORAGE or 並列時のみ)
   stdout(リダイレクト推奨): compact callback による trial 毎ライブログ
 
 使い方:  .\.venv\Scripts\python.exe special.py > outputs\special_run.log 2>&1
@@ -372,10 +374,11 @@ def _save_trials_csv(study: optuna.Study, path: str) -> None:
             w.writerow(row)
 
 
-def _save_best_reports(study: optuna.Study, base_path: str, top_n: int) -> list:
+def _save_best_reports(study: optuna.Study, out_dir: str, top_n: int) -> list:
     """上位 top_n 候補を再評価して exp3 形式の詳細レポート (CAPEX/OPEX/spec/HI 内訳) を保存。
 
     main.py の display_best_full / top-k レポート相当。feasible 優先、無ければ TAC 最小。
+    レポートは out_dir 直下に top{rank}_trial{N}.txt として書き出す。
     """
     comp = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
             and t.value is not None]
@@ -407,7 +410,7 @@ def _save_best_reports(study: optuna.Study, base_path: str, top_n: int) -> list:
                 show_input_snapshot(design, _CONFIG, eval_kwargs)
                 display_full_results(res, design, _CONFIG)
             report_text = buf.getvalue()
-            path = f"{base_path}_top{rank}_trial{t.number}.txt"
+            path = os.path.join(out_dir, f"top{rank}_trial{t.number}.txt")
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(report_text)
             saved.append(path)
@@ -424,17 +427,75 @@ def _save_best_reports(study: optuna.Study, base_path: str, top_n: int) -> list:
     return saved
 
 
+def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_reports: list) -> None:
+    """run subdir に README.md を出力 (結果の見方ガイド、main.py の _write_readme 相当)。"""
+    complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    feasible = [t for t in complete if t.user_attrs.get('is_feasible', False)]
+    top1_name = os.path.basename(saved_reports[0]) if saved_reports else None
+
+    L = []
+    L.append(f"# special.py (HYSYS+SM 全21変数 BO) run — {ts}")
+    L.append("")
+    L.append("Dist1/Dist3 = SM (学習済み GPR), Dist2 = HYSYS / 反応器・PSA・膜・F_fresh も変数化。")
+    L.append("")
+    L.append("## まず見るべきファイル (推奨順)")
+    L.append("")
+    if top1_name:
+        L.append(f"1. **`{top1_name}`** ─ ★最終結果。ベスト候補の再評価詳細 "
+                 "(CAPEX/OPEX/spec/HI 内訳 + 入力スナップショット)。")
+        L.append(f"   - `top2_*` / `top3_*` は次点候補。同じ形式で比較できる。")
+    else:
+        L.append("1. **`top*_trial*.txt`** ─ ★最終結果 (今回は feasible 無しで未生成)。")
+    L.append("2. **`best.json`** ─ BO 単体ベスト trial の params + 診断値。再現・簡易確認用。")
+    L.append("3. **`trials.csv`** ─ 全 trial 履歴。Excel/pandas で散布図・統計解析。")
+    if (USE_SQLITE_STORAGE or N_WORKERS > 1):
+        L.append("4. **`optuna.db`** ─ Optuna SQLite。可視化: "
+                 "`optuna-dashboard sqlite:///optuna.db`")
+    L.append("")
+    L.append("## この run の設定")
+    L.append("")
+    L.append(f"- N_TRIALS = {N_TRIALS}, N_STARTUP(QMC) = {N_STARTUP}, N_TOPK = {N_TOPK}")
+    L.append(f"- SAMPLER = tpe, SEED = {SEED}, N_WORKERS = {N_WORKERS}")
+    L.append(f"- 探索変数数 = {len(SEARCH_SPACE)} (反応器4 + PSA3 + 膜2 + 原料1 + Dist1/2/3 各4/4/3)")
+    L.append(f"- Dist1 = SM, Dist2 = HYSYS, Dist3 = SM (spec なし)")
+    L.append(f"- purity 閾値 = 99.45 wt% (SM Dist3 の 99.5 mol%=99.497 wt% を尊重した緩和)")
+    L.append("")
+    L.append("## ベスト要約")
+    L.append("")
+    L.append(f"- 完了 trial = {len(complete)} / feasible = {len(feasible)}")
+    if best is not None:
+        tag = "feasible ✓" if best.user_attrs.get('is_feasible', False) else "infeasible ✗ (feasible 無し、TAC 最小)"
+        L.append(f"- ベスト: **trial #{best.number}** ({tag})")
+        L.append(f"- effective_TAC = **{best.value:.3f}** 億円/年")
+        try:
+            _pur  = float(best.user_attrs.get('c3h6_purity_wtfrac'))
+            _prod = float(best.user_attrs.get('production_kmol_h'))
+            _ff   = float(best.params.get('F_C3H8_fresh_kmol_h'))
+            L.append(f"- purity = {_pur*100:.2f} wt%, 生産量 = {_prod:.1f} kmol/h, "
+                     f"F_fresh = {_ff:.1f} kmol/h, 収率 = {_prod/_ff*100:.1f}%")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    else:
+        L.append("- 完了 trial なし")
+    L.append("")
+    with open(os.path.join(out_dir, 'README.md'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(L) + '\n')
+
+
 def main():
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     print(f"==== special.py: PDH HYSYS+SM 全21変数 制約付き BO ====", flush=True)
     print(f"  N_TRIALS={N_TRIALS}, N_STARTUP(QMC)={N_STARTUP}, seed={SEED}, top-k report={N_TOPK}", flush=True)
     print(f"  Dist1/Dist3 = SM, Dist2 = HYSYS / 上流(反応器・PSA・膜)・F_fresh も変数化", flush=True)
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # 設計判断 (2026-05-28): main.py 流に run ごとの subdir へ成果物を集約。
+    # outputs/special_<ts>/{trials.csv, best.json, top*.txt, optuna.db, README.md}
+    out_dir = os.path.join(OUTPUT_DIR, f'special_{ts}')
+    os.makedirs(out_dir, exist_ok=True)
 
     sampler = make_sampler('tpe', SEED, N_STARTUP, constraints_func=constraints_func)
     # 設計判断 (2026-05-26): 並列(N_WORKERS>1)時は worker 間で study 共有のため SQLite 必須。
     _use_sqlite = USE_SQLITE_STORAGE or N_WORKERS > 1
-    _db_path = os.path.join(OUTPUT_DIR, f'special_{ts}.db')
+    _db_path = os.path.join(out_dir, 'optuna.db')
     storage = f"sqlite:///{_db_path}" if _use_sqlite else None
     study = optuna.create_study(
         study_name=f"{STUDY_NAME}_{ts}" if _use_sqlite else STUDY_NAME,
@@ -450,7 +511,7 @@ def main():
         spawn_workers(
             kind='special', study_name=study.study_name, storage_url=storage,
             db_path=_db_path, n_workers=N_WORKERS, n_trials_total=N_TRIALS,
-            n_startup=N_STARTUP, base_seed=SEED, out_dir=OUTPUT_DIR,
+            n_startup=N_STARTUP, base_seed=SEED, out_dir=out_dir,
         )
     else:
         run_optimization(
@@ -483,20 +544,38 @@ def main():
         except Exception:
             pass
 
-    # ---- 保存 ----
-    base = os.path.join(OUTPUT_DIR, f'special_{ts}')
-    _save_trials_csv(study, base + '_trials.csv')
-    print(f"\n  trial 履歴 CSV: {base}_trials.csv", flush=True)
+    # ---- 保存 (run subdir に集約) ----
+    trials_csv = os.path.join(out_dir, 'trials.csv')
+    _save_trials_csv(study, trials_csv)
+    print(f"\n  trial 履歴 CSV: {trials_csv}", flush=True)
+    saved_reports: list = []
     if best is not None:
-        with open(base + '_best.json', 'w', encoding='utf-8') as f:
+        with open(os.path.join(out_dir, 'best.json'), 'w', encoding='utf-8') as f:
             json.dump({'number': best.number, 'effective_TAC': best.value,
                        'params': best.params,
                        'user_attrs': {k: v for k, v in best.user_attrs.items()}},
                       f, ensure_ascii=False, indent=2, default=str)
-        print(f"  best JSON: {base}_best.json", flush=True)
+        print(f"  best JSON: {os.path.join(out_dir, 'best.json')}", flush=True)
         # 上位候補の詳細レポート (CAPEX/OPEX/spec/HI 内訳)
         print(f"\n  上位 {N_TOPK} 候補の詳細レポートを生成中...", flush=True)
-        _save_best_reports(study, base, N_TOPK)
+        saved_reports = _save_best_reports(study, out_dir, N_TOPK)
+
+    # ---- README (結果の見方ガイド) ----
+    _write_readme(out_dir, ts, study, best, saved_reports)
+
+    # ---- 成果物サマリ (main.py 相当) ----
+    print()
+    print("=" * 72, flush=True)
+    print(f"成果物: {os.path.abspath(out_dir)}/", flush=True)
+    print("=" * 72, flush=True)
+    print(f"  📌 README.md       … 結果の見方ガイド (最初に開いて)", flush=True)
+    if saved_reports:
+        print(f"  ★ top1_*.txt      … ベスト候補の詳細 (★最終結果はここ)", flush=True)
+    print(f"  ・ best.json       … BO ベスト trial (JSON、簡易)", flush=True)
+    print(f"  ・ trials.csv      … 全 {N_TRIALS} trial 履歴 (Excel/pandas で解析)", flush=True)
+    if (USE_SQLITE_STORAGE or N_WORKERS > 1):
+        print(f"  ・ optuna.db       … SQLite (中断・再開・dashboard 用)", flush=True)
+    print("=" * 72, flush=True)
 
     try:
         from units.vle.hysys.provider import shutdown_default_provider
