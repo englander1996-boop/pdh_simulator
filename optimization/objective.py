@@ -156,8 +156,9 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         # 一括計算済み。constraints_func (study.py) でこれを TPE に渡す。
         # 正常完走時は 0.0、infeasible 時は連続値 (FUG: N 不足比、Rigorous: log(dT/tol))。
         op = result.solver.one_pass
+        # 'cond' = HYSYS Dist2 cold-top (凝縮器ΔT不成立) の連続シグナル (2026-05-28 追加)。
         for col_idx in ('1', '2', '3'):
-            for kind in ('N', 'dT'):
+            for kind in ('N', 'dT', 'cond'):
                 key = f'dist{col_idx}_{kind}_shortfall'
                 v = op.get(key, 0.0) or 0.0
                 if v > 0:
