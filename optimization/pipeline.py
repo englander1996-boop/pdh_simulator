@@ -303,8 +303,9 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
             # workers が DB に trial を書き込む → 以降の top-k/レポートは study.trials
             # (= DB 再クエリ) でそのまま全 trial を見られる。
             from optimization.parallel import spawn_workers
+            # kind='sub1': このパイプラインを使うのは sub/sub1.py (旧 main.py, FUG/rigorous) のみ。
             spawn_workers(
-                kind='main', study_name=study_name, storage_url=storage_url,
+                kind='sub1', study_name=study_name, storage_url=storage_url,
                 db_path=str(paths['db']), n_workers=cfg.n_workers,
                 n_trials_total=cfg.n_trials, n_startup=cfg.n_startup,
                 base_seed=cfg.seed, out_dir=str(out_dir),

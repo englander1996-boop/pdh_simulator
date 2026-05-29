@@ -16,15 +16,17 @@ TAC が下げ止まる/反転する点を探す。下振れ側 (920-930) は rec
 使い方:  .\.venv\Scripts\python.exe -u exp\exp_tin_sweep.py
 """
 import os, sys, json, time, datetime
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'sub'))   # 旧 final.py → sub/sub2.py へ移動
 try: sys.stdout.reconfigure(encoding='utf-8')
 except Exception: pass
 
 def log(msg):
     print(f"[{datetime.datetime.now():%H:%M:%S}] {msg}", flush=True)
 
-log("import final (config/モデル ロード中)...")
-import final  # _build_design / _CONFIG / evaluate / 評価オプションを流用
+log("import sub2 (旧 final.py。config/モデル ロード中)...")
+import sub2 as final  # sub/sub2.py (旧 final.py) の _build_design / _CONFIG / evaluate / 評価オプションを流用
 log("import 完了")
 
 BEST = json.load(open('outputs/final_20260527_091743/best.json', encoding='utf-8'))

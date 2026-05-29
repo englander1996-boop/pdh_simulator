@@ -5,7 +5,7 @@ comparing/ — 過去レポートの「問題のある最適化のやり方」�
 目的 (2026-05-28 ユーザ合意):
   「最適化方法論の問題点_詳細レポート.md」が指摘する P01〜P12 の方法論的欠陥を、
   素朴な最適化器を作ることではなく **欠陥そのものを忠実に再現** して走らせ、
-  BO (special.py の既存 best) を基準に「この欠陥は年間 X 億円損している (+Y%)」と
+  BO (main.py 旧special の既存 best) を基準に「この欠陥は年間 X 億円損している (+Y%)」と
   定量的に示す。これにより BO 採用の有用性を逆説的に立証する。
 
 構成 (2026-05-29 ユーザ指示で確定):
@@ -13,10 +13,10 @@ comparing/ — 過去レポートの「問題のある最適化のやり方」�
   中央ディスパッチャ (まとめて比較する main.py) は作らない (= エラーの元なので廃止)。
   共通の土台だけ shared/ に置いて流用する。
 
-  shared/space.py     : 21 変数の探索空間 + build_design (special.py から移植)
+  shared/space.py     : 21 変数の探索空間 + build_design (main.py 旧special から移植)
   shared/simulator.py : flowsheet.evaluate の薄いラッパ + CONFIG (purity 緩和)
-  shared/reporting.py : special.py の I/O 機構 (ライブログ/trials.csv/top-N/README) の忠実移植
-  shared/harness.py   : enqueue 駆動 Optuna study エンジン (実行・記録を special と揃える)
+  shared/reporting.py : main.py 旧special の I/O 機構 (ライブログ/trials.csv/top-N/README) の忠実移植
+  shared/harness.py   : enqueue 駆動 Optuna study エンジン (実行・記録を main.py 旧special と揃える)
 
   caseN = PN (1 case = 1 problem)。実装済み (この sim で再現可能なもの):
   case_p01_subsystem/main.py  : P01 部分最適化 (サブシステム別)           [subsystem]
@@ -45,7 +45,7 @@ comparing/ — 過去レポートの「問題のある最適化のやり方」�
 実行: 各 case を個別に  `.\.venv\Scripts\python.exe comparing\caseN\main.py`
   結果は comparing/results/<method>_<ts>/ に出る。BO との比較はユーザ側で best.json を突合。
 
-バックエンド: 本丸 special.py と同じ Dist1=SM / Dist2=HYSYS / Dist3=SM。**FUG は使わない**。
+バックエンド: 本丸 main.py (旧 special.py) と同じ Dist1=SM / Dist2=HYSYS / Dist3=SM。**FUG は使わない**。
   HYSYS は単一 COM・並列不可・~150s/eval なので、各手法はレポートが実際に行った粗いサンプリングを
   忠実に再現し評価回数を抑える。なお HYSYS はマシン依存で、無い PC では実行できない (import は可)。
 """

@@ -1,6 +1,6 @@
 # comparing/ 引継ぎ — 進捗と今後の詳細方針
 
-最終更新: 2026-05-29 (命名統一・実在レポート14本・P10/FUG・各case内に欠陥部品節 まで) / 作成者: Claude
+最終更新: 2026-05-29 (命名統一・実在レポート14本・P10/FUG・各case内に欠陥部品節 / 夕: リポジトリ改名 special→main・main→sub1・final→sub2 と全参照更新 §0.5) / 作成者: Claude
 
 このドキュメントは **再開のための引き継ぎ書 (なぜ/経緯/設計判断/再開手順)**。
 **全 case の最新一覧は `CASES.md`**、**実在レポートの手法分析は `REPORT_METHODS_ANALYSIS.md`** が正
@@ -25,6 +25,38 @@
 - 次の一手: **HYSYS のある PC で各 `comparing\<case>\main.py` を実行 → 各 results を BO (outputs/special_*) と突合し ΔTAC**。
   内容調整 (掃引変数・点数) は各 case 先頭の設定定数 (`VARS_ORDER`/`GRID_VARS`/`BLOCKS` 等) を編集するだけ。
   テーマ追加は `REPORT_METHODS_ANALYSIS.md` の手順に従い `case_rep_*` を増やす (手法はテーマ非依存)。
+
+---
+
+## 0.5 リポジトリ改名・退避 (2026-05-29 夕、comparing/ とは別の repo 直下作業) — 後任向け
+
+このセッションで **最適化ファイルを改名・退避**した。対応:
+- 旧 `special.py` (HYSYS+SM の BO 本丸) → **`main.py` に改名**。= 今後 BO を回すのはこれ。
+- 旧 `main.py` (FUG/rigorous, 全フローシート) → **`sub/sub1.py`** に退避 (削除でなくアーカイブ)。
+- 旧 `final.py` (SM/rigorous/SM + Stage2 全trial) → **`sub/sub2.py`** に退避。
+- 並列 worker の kind を `main`(旧special) / `sub1`(旧main) / `sub2`(旧final) に統一 (optimization/parallel.py)。
+
+**更新済み (検証: py_compile 全OK + main/sub1/sub2/optimization.parallel の実 import OK)**:
+- `main.py`: 内部の special→main 全面改名 (STUDY_NAME=`pdh_hysys_sm_main`、出力先 `outputs/main_<ts>`、
+  `_make_main_callback`、レポート/README/ヘッダ文言、spawn `kind='main'`)。旧main言及→sub1・旧final言及→sub2。
+- `optimization/parallel.py`・`pipeline.py`: kind 体系を main/sub1/sub2 に統一、`sub/` を sys.path 追加。
+- `exp/{exp4,exp_tin_sweep,exp_dist2_pressure,exp_recost_359}.py`: `import final`→`import sub2` (`sub/` をパス追加)。
+- `sub/sub1.py`・`sub/sub2.py`: sys.path を repo root(1階層上)に修正=**単独実行可に復旧**、退避注記、sub2 spawn `kind='sub2'`。
+- `tools/monitor_main.py`・`top_designs.py`: sub1/sub2 監視向けに更新、`default_total`=`import sub1`。
+- `comparing/shared/{space,reporting,simulator,harness}.py`・`__init__.py`: 同期元/backend 参照を `main.py(旧special)` に更新。
+- 本ファイル D5・「リポジトリ構成」節 (§2 下) も更新済み。
+
+**環境**: venv が別マシン参照で壊れていたため `fix_venv.ps1` で Python 3.13.13 に向け直し済 (可逆・site-packages 不変)。
+
+**未対応 (ユーザー判断待ち・勝手に変えない)**:
+- A. comparing/ の **22 個の `case_*/main.py` docstring** に残る「special.py と同じ backend」「BO (special.py) best」表記
+  (機能影響なし・記述のみ)。一括で `main.py(旧special)` に直すか未定。
+- B. comparing/ 各所の **`outputs/special_*/best.json` 突合先パス** (CASES.md・各 case・本ファイル)。
+  **歴史的 special_* run (#294 等) が現行 BO ベースラインなので今は正しい**。新 `main.py` を再実行して
+  `outputs/main_*` を作った時点で、ベースラインを `main_*` に切替える (今は据え置きが正解)。
+- C. `CASES.md` / `REPORT_METHODS_ANALYSIS.md` の他の `special` 言及。
+
+注: このセッションで pdh_simulator 全ファイル (src/units/flowsheet/optimization/simulation/comparing/exp/tools/modelling/tests) を通読済み。
 
 ---
 
@@ -58,7 +90,7 @@
 | D2 | **`special.py` の I/O・ライブログ・結果保存・ファイル構成を忠実再現** | special のファイル構成はエラー調査・分析がしやすい。`reporting.py` がその移植 |
 | D3 | 各手法 = **enqueue 駆動の Optuna study (RandomSampler、決定的)** | special の作り込んだ資産 (callback / trials.csv / top-N 詳細 / README / `_store_diagnostics`) は study/trial 前提。enqueue で探索点を与えれば全部流用できる |
 | D4 | backend は **Dist1=SM / Dist2=HYSYS / Dist3=SM 固定** (special.py:225-232 と一致 = 公平比較) | BO も素朴手法も同一 backend・同一目的でないと「手法だけの差」が切り出せない |
-| D5 | `comparing/` は **`special.py` を import しない**。`space.py` は SEARCH_SPACE / build_design の **手動コピー (単一の真実)** | `special.py` → `main.py` 改名・`final.py`/旧`main.py` 削除予定。改名に巻き込まれない疎結合に |
+| D5 | `comparing/` は **`main.py`(旧 special.py) を import しない**。`space.py` は SEARCH_SPACE / build_design の **手動コピー (単一の真実)** | **(2026-05-29 実施済)** 旧 `special.py`→`main.py` 改名、旧 `main.py`→`sub/sub1.py`・旧 `final.py`→`sub/sub2.py` 退避。改名に巻き込まれない疎結合のため影響なし |
 | D6 | purity は **99.45 wt% に緩和** (`simulator.CONFIG`) | special.py の決定A (2026-05-25)。SM Dist3 の 99.5mol%=99.497wt% を尊重 |
 | D7 | BO ベースラインは **`special.py` の既存 run (`outputs/special_*/best.json`) を流用**。再走不要 | 同一 backend で既に走っているので公平。比較時にユーザが突合 |
 | D8 | **FUG は既定では使わない**。例外: **P10 (case_p10_fug) のみ FUG を使い、その精度問題を可視化する** | ユーザ指示 (2026-05-29)。FUG を黙って既定にするのが NG (proxy_penalty が乗り無意味)。ただし「FUG を使うなら精度問題を必ず見せる」= P10 の本質。case_p10_fug は同設計を FUG と HYSYS真値で二重評価し乖離を出す |
@@ -70,10 +102,13 @@
 | D14 | **各 case_rep の docstring に「含まれる欠陥部品」節を必ず書く** (◎=sim再現→case_p##、△=検出だが sim非対応)。分析は分析 doc でなく各 case 内 | ユーザ指示 (2026-05-29)。レポート再現は欠陥部品の束なのでそれを各 case 内で明示 |
 | D15 | **テーマを PDH に偏らせない**。問題点レポートの**成熟度スコア (12−検出問題数)** を軸に低〜高成熟度を横断 | ユーザ指示 (2026-05-29)。手法はテーマ非依存なのでいろいろなテーマを写す。低成熟度ほど欠陥多→ΔTAC大 |
 
-### リポジトリ側の予定 (背景として重要)
-- `Z:\pdh_simulator\final.py` と `Z:\pdh_simulator\main.py` は **削除予定**。
-- `Z:\pdh_simulator\special.py` を **`main.py` に改名して最適化の本丸**にする。
-- → だから `comparing/` は `special.py` に依存させていない (D5)。
+### リポジトリ構成 (2026-05-29 改名・退避 実施済み)
+- 旧 `Z:\pdh_simulator\main.py` → `Z:\pdh_simulator\sub\sub1.py` に退避 (FUG/rigorous 版、アーカイブ)。
+- 旧 `Z:\pdh_simulator\final.py` → `Z:\pdh_simulator\sub\sub2.py` に退避 (SM/rigorous/SM 版、アーカイブ)。
+  → 削除ではなく `sub/` へ格納。並列 worker の kind は `sub1`/`sub2` に統一 (optimization/parallel.py)。
+- 旧 `Z:\pdh_simulator\special.py` → `Z:\pdh_simulator\main.py` に改名 = **最適化の本丸 (HYSYS+SM の BO 実行ファイル)**。
+- → `comparing/` は `main.py`(旧 special.py) に import 依存せず手動コピーなので影響なし (D5)。
+  shared/space.py・reporting.py の同期元は今後 `main.py` (旧 special.py)。
 
 ---
 

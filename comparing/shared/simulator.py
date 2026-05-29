@@ -1,14 +1,14 @@
 r"""
 comparing.shared.simulator — sim 評価の薄いラッパ + 設定保持 (問題点レポート §4.2 IntegratedSimulator 相当)。
 
-special.py (最適化の本丸) と同じ CONFIG (SM Dist3 の 99.5mol%=99.497wt% を尊重した
+main.py (最適化の本丸、旧 special.py) と同じ CONFIG (SM Dist3 の 99.5mol%=99.497wt% を尊重した
 purity 99.45wt% 緩和) と評価オプション (apply_hi / hi_dT_min_K / apply_stage2) を 1 箇所に集約。
 
 harness はここの raw_evaluate で FlowsheetResult を取得し、_store_diagnostics と
 display_full_results にそのまま渡す (= special.py と同じ忠実な診断・レポート経路)。
 
 バックエンドは space.DEFAULT_BACKEND (Dist2=HYSYS) が既定。HYSYS は単一 COM インスタンス・
-並列不可なので、評価は必ず単一プロセス・直列で行うこと (special.py が N_WORKERS=1 の理由と同じ)。
+並列不可なので、評価は必ず単一プロセス・直列で行うこと (main.py 旧special が N_WORKERS=1 の理由と同じ)。
 """
 
 import os

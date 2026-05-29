@@ -1,6 +1,7 @@
-r"""monitor_main.py — main.py 並列 run の「全体進捗」をざっくり表示。
+r"""monitor_main.py — sub1(旧main)/sub2(旧final) 並列 run の「全体進捗」をざっくり表示。
 
 別ターミナルで実行して、6 worker 合算の進捗 (X/N trial・feasible・best・ETA) を見る。
+(旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py。本 main.py=旧special は HYSYS 単一プロセスで本ツール対象外。)
 共有 SQLite を read-only で読むだけなので最適化には干渉しない (WAL で並行読取り可)。
 個別 worker の 1 trial 詳細を見たい時は従来どおり _worker*.log を tail。
 
@@ -16,7 +17,9 @@ import time
 import argparse
 import datetime
 
-sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..')))
+_REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'sub'))   # 旧 main.py→sub/sub1.py を import するため
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
@@ -42,8 +45,9 @@ def study_name_from_db(db):
 
 
 def default_total():
+    # sub1(旧 main.py)/sub2(旧 final.py) の並列 run を監視する用途なので sub1 の N_TRIALS を既定に。
     try:
-        import main as M
+        import sub1 as M
         return M.N_TRIALS
     except Exception:
         return None

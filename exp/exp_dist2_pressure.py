@@ -12,15 +12,17 @@ trials.csv の corr(col2_p,TAC)=-0.357 で方向は確実、高圧側は recycle
 使い方:  .\.venv\Scripts\python.exe -u exp\exp_dist2_pressure.py
 """
 import os, sys, json, time, datetime
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'sub'))   # 旧 final.py → sub/sub2.py へ移動
 try: sys.stdout.reconfigure(encoding='utf-8')
 except Exception: pass
 
 def log(msg):
     print(f"[{datetime.datetime.now():%H:%M:%S}] {msg}", flush=True)
 
-log("import final ...")
-import final
+log("import sub2 (旧 final.py) ...")
+import sub2 as final
 log("import 完了")
 
 BEST = json.load(open('outputs/final_20260527_091743/best.json', encoding='utf-8'))
