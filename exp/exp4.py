@@ -1,11 +1,11 @@
-r"""exp4.py — (SM, rigorous, SM) 構成の 1 点評価。final.py の BO を回す前の収束 smoke test。
+r"""exp4.py — (SM, rigorous, SM) 構成の 1 点評価。sub2 (旧 final.py) の BO を回す前の収束 smoke test。
 
-final.py の _build_design / _CONFIG / 評価オプションを**そのまま流用**するので、
-本スクリプトの 1 評価は final.py の BO 1 trial と**同一の計算**(Dist1=SM, Dist2=rigorous,
+sub2 (旧 final.py = sub/sub2.py) の _build_design / _CONFIG / 評価オプションを**そのまま流用**するので、
+本スクリプトの 1 評価は sub2 の BO 1 trial と**同一の計算**(Dist1=SM, Dist2=rigorous,
 Dist3=SM, Stage2(HEN)=実行)になる。狙いは「1 点が高速に収束するか」「rigorous Dist2 +
 リサイクルが per-trial 予算 120s に収まるか」を、360 trial 並列 BO を回す前に確かめること。
 
-下の PARAMS (final.SEARCH_SPACE のキー、物理単位) を編集して再実行:
+下の PARAMS (sub2.SEARCH_SPACE のキー、物理単位) を編集して再実行:
   .\.venv\Scripts\python.exe exp\exp4.py
 """
 
@@ -24,9 +24,11 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(__file__), '..')))
+_REPO = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'sub'))   # 旧 final.py → sub/sub2.py へ移動
 
-import final as F                       # ← final.py の _build_design / _CONFIG を流用
+import sub2 as F                        # ← sub/sub2.py (旧 final.py) の _build_design / _CONFIG を流用
 from flowsheet import evaluate
 from simulation import display_full_results, show_input_snapshot, hdr
 

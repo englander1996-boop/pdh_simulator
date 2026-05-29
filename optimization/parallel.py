@@ -13,11 +13,15 @@
   控えめな worker 数(3-4)でほぼ逐次同等の品質に到達し、wall-clock は ~N 倍速。
 
 役割:
-  - coordinator (run_pipeline / special.main 内から呼ぶ): study を SQLite で作成 →
-    spawn_workers() で N worker を起動・待機 → 既存の top-k/レポートをそのまま実行。
+  - coordinator (sub1 の run_pipeline / main(旧special).main / sub2.main 内から呼ぶ): study を
+    SQLite で作成 → spawn_workers() で N worker を起動・待機 → 既存の top-k/レポートをそのまま実行。
   - worker (本ファイルを `python -m optimization.parallel --worker ...` で起動):
     共有 study を load_study し、自前の sampler(TPE constant_liar + QMC seed=base+i) で
     担当 n_trials を最適化。
+
+注 (2026-05-29 改名): 旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py, 旧 special.py→main.py。
+  kind は新ファイル名に合わせて 'main'(旧special, HYSYS+SM) / 'sub1'(旧main, FUG) / 'sub2'(旧final)。
+  本 main(HYSYS) は単一 COM で並列不可 (N_WORKERS=1) のため kind='main' 経路は実質 sub1/sub2 用。
 """
 from __future__ import annotations
 
@@ -32,6 +36,10 @@ from typing import Callable
 _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+# 旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py に退避済み。worker から bare import するため path 追加。
+_SUB = os.path.join(_ROOT, 'sub')
+if _SUB not in sys.path:
+    sys.path.insert(0, _SUB)
 
 
 # ---------------------------------------------------------------------------
@@ -74,12 +82,14 @@ def _storage_with_timeout(storage_url: str):
 def _build_objective(kind: str) -> Callable:
     """worker プロセスで objective 関数を再構築する。
 
-    kind='main'   : main.SEARCH_SPACE / SOLVER_BO 等から make_objective で構築。
-    kind='special': special.objective をそのまま使う (HYSYS/SM、module global 依存)。
-    import 時に pipeline/main() は走らない (どちらも if __name__=='__main__' ガード)。
+    kind='sub1' : sub1(旧 main.py).SEARCH_SPACE / SOLVER_BO 等から make_objective で構築 (FUG)。
+    kind='main' : main.py(旧 special).objective をそのまま使う (HYSYS/SM、module global 依存)。
+    kind='sub2' : sub2(旧 final.py).objective をそのまま使う (SM/rigorous/SM + Stage2 全trial)。
+    import 時に pipeline/main() は走らない (どれも if __name__=='__main__' ガード)。
+    (旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py, 旧 special.py→main.py に改名済み。)
     """
-    if kind == 'main':
-        import main as M
+    if kind == 'sub1':
+        import sub1 as M
         from config.load import load_operating_config
         from optimization.objective import make_objective
         cfg = load_operating_config()
@@ -94,15 +104,15 @@ def _build_objective(kind: str) -> Callable:
             recovery_tolerance=M.RECOVERY_TOLERANCE,
             n_trials_total=M.N_TRIALS,
         )
-    if kind == 'special':
-        import special as S
+    if kind == 'main':
+        import main as S
         return S.objective
-    if kind == 'final':
-        # 設計判断 (2026-05-27): final.py = (sm, rigorous, sm) + Stage2 全trial。
-        # special と同じく module global (penalty_scale) 依存だが worker はプロセス分離で安全。
-        import final as Fm
+    if kind == 'sub2':
+        # 設計判断 (2026-05-27): sub2 (旧 final.py) = (sm, rigorous, sm) + Stage2 全trial。
+        # main(旧special) と同じく module global (penalty_scale) 依存だが worker はプロセス分離で安全。
+        import sub2 as Fm
         return Fm.objective
-    raise ValueError(f"未知の kind: {kind!r} ('main' | 'special' | 'final')")
+    raise ValueError(f"未知の kind: {kind!r} ('main' | 'sub1' | 'sub2')")
 
 
 # ---------------------------------------------------------------------------
@@ -128,15 +138,15 @@ def _run_worker(kind: str, study_name: str, storage_url: str,
     # compact callback (任意): live ログを worker 個別ファイル(=stdout)へ。
     callbacks = []
     try:
-        if kind == 'main':
+        if kind == 'sub1':
             from optimization.callbacks import make_compact_callback
             callbacks = [make_compact_callback(n_trials_total=n_trials)]
-        elif kind == 'final':
-            import final as Fm
+        elif kind == 'sub2':
+            import sub2 as Fm
             callbacks = [Fm._make_final_callback(n_trials)]
-        else:
-            import special as S
-            callbacks = [S._make_special_callback(n_trials)]
+        else:  # kind == 'main' (旧 special, HYSYS+SM)
+            import main as S
+            callbacks = [S._make_main_callback(n_trials)]
     except Exception:
         callbacks = []
 
@@ -200,7 +210,7 @@ def spawn_workers(
         ]
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
-        # 設計判断: special の worker は各々 HYSYS インスタンスを立てるので
+        # 設計判断: main(旧special) の worker は各々 HYSYS インスタンスを立てるので
         # PDH_PER_UNIT_LOG 等の env はそのまま継承させる。
         p = subprocess.Popen(cmd, stdout=fout, stderr=subprocess.STDOUT,
                              env=env, cwd=_ROOT)
@@ -261,7 +271,7 @@ def _print_parallel_progress(storage_url: str, study_name: str,
 def _main_cli() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--worker", action="store_true")
-    ap.add_argument("--kind", choices=["main", "special", "final"], required=True)
+    ap.add_argument("--kind", choices=["main", "sub1", "sub2"], required=True)
     ap.add_argument("--study-name", required=True)
     ap.add_argument("--storage", required=True)
     ap.add_argument("--n-trials", type=int, required=True)
@@ -277,15 +287,15 @@ def _main_cli() -> None:
     if args.worker:
         _run_worker(args.kind, args.study_name, args.storage,
                     args.n_trials, args.seed, args.n_startup)
-        # special の worker は HYSYS を確実にクローズ
-        if args.kind == "special":
+        # main(旧special, HYSYS) の worker は HYSYS を確実にクローズ
+        if args.kind == "main":
             try:
                 from units.vle.hysys.provider import shutdown_default_provider
                 shutdown_default_provider()
             except Exception:
                 pass
     else:
-        ap.error("--worker なしの直接実行は未対応 (coordinator は main.py/special.py から)")
+        ap.error("--worker なしの直接実行は未対応 (coordinator は main.py / sub/sub1.py / sub/sub2.py から)")
 
 
 if __name__ == "__main__":

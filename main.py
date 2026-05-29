@@ -1,476 +1,591 @@
 r"""
-main.py — PDH プロセスの多変数最適化 (Optuna ベース)
+main.py — HYSYS + SM バックエンドでの PDH プロセス全変数最適化 (制約付き Optuna BO)
 
-使い方:
-  1. 下の § 1〜5 ブロックを編集 (試行数・ソルバ・探索範囲・出力設定)
-  2. `.\.venv\Scripts\python.exe main.py` で実行
-  3. outputs/main_<timestamp>_*.csv / *.json / *.txt に結果が出力される
+exp3.py を評価関数として、**全 21 設計変数**(反応器・PSA・膜・原料 + 蒸留塔 3 つ)を
+Bayesian Optimization で探索する。**BO を実行する本丸ファイル**。
+  (旧 main.py = FUG/rigorous 全フローシート版は sub/sub1.py、
+   旧 final.py = SM/rigorous/SM 版は sub/sub2.py に退避済み。
+   本 main は旧 special.py を改名したもの = HYSYS+SM 版。)
 
-設計判断 (2026-05-14, 相談時の合意):
-  - BO ループ: 全塔 FUG で高速化 (1 eval ~3 秒)
-  - top-k 再評価: 上位 k 候補だけ rigorous + Stage 2 (HEN synthesis) で精密評価
-  - 18 設計変数 (整数 N_stages × 3 含む)。N_feed は core 内で Kirkbride 自動採用、
-    P_L は 1 atm 固定、P_dist3 と mem.P_dist は同期で 1 変数扱い
-  - SEARCH_SPACE の行をコメントアウトすると、その変数は baseline 固定になる
-  - 'sm' 蒸留塔モデル追加時は SOLVER_BO/TOPK の値を 'sm' に書き換えるだけで動く
+設計判断 (2026-05-25): sub1 (旧 main.py) の BO 成功インフラを移植 + HYSYS/SM 特性に適応。
+  借用 (sub1 = 旧 main.py): QMC→TPE 2相サンプラ・constraints_func(連続制約)・penalty_scale・
+    _store_diagnostics・compact callback(flush 付きライブログ, callbacks.py)・
+    詳細レポート保存(display_full_results)。
+  適応 (HYSYS/SM): Dist1/Dist3=SM(学習済み GPR, ~瞬時)、Dist2=HYSYS。
+    探索 bounds は sub1 (旧 main.py) の forensic 値 ∩ SM 分類器 feasible 領域。
+    純度は SM Dist3 が 99.5 mol%=99.497 wt% 固定 → spec を 99.45 wt% に緩和(決定A)。
+    塔本体 CAPEX は provider 側で FUG と同式で計算済み(N/還流が CAPEX に効く)。
 
-進捗:
-  - Optuna の show_progress_bar=True で tqdm 表示
-  - SQLite storage に履歴保存 (中断・再開可、optuna-dashboard で可視化可)
+21 変数:
+  反応器(4): T_in_K, z_cat_m, t_cyc_min, D_reactor_m
+  PSA(3)   : D_psa_col_m, L_psa_bed_m, desorption_target
+  膜(2)    : P_H_Pa, A_mem_m2   (P_L=1atm 固定、mem.P_dist=Dist3圧 同期)
+  原料(1)  : F_C3H8_fresh_kmol_h
+  Dist1(4) : col1_p_kpa, col1_n_stages, col1_feed_stage, col1_comp_frac_2  (SM)
+  Dist2(4) : col2_p_kpa, col2_n_stages, col2_feed_ratio, col2_reflux_ratio (HYSYS)
+  Dist3(3) : col3_p_kpa, col3_n_stages, col3_feed_ratio                    (SM, spec なし)
 
-出力:
-  - outputs/main_<ts>.db        : Optuna SQLite (全 trial 履歴)
-  - outputs/main_<ts>_trials.csv: 全 trial の params + 診断情報
-  - outputs/main_<ts>_best.json : ベスト trial の要約
-  - outputs/main_<ts>_topk.txt  : top-k 候補の BO vs 再評価 比較レポート
+出力 (sub1 = 旧 main.py 流に run ごとの subdir へ集約):
+  outputs/main_<ts>/README.md            : 結果の見方ガイド (最初に開く)
+  outputs/main_<ts>/trials.csv           : 全 trial の params + 診断
+  outputs/main_<ts>/best.json            : best trial 要約
+  outputs/main_<ts>/top{1..N}_trial*.txt : 上位候補の詳細レポート (CAPEX/OPEX/spec/HI 内訳)
+  outputs/main_<ts>/optuna.db            : Optuna SQLite (USE_SQLITE_STORAGE or 並列時のみ)
+  stdout(リダイレクト推奨): compact callback による trial 毎ライブログ
+
+使い方:  .\.venv\Scripts\python.exe main.py > outputs\main_run.log 2>&1
+  (Python は 3.13。flush 付きログなのでリダイレクトでも live に書き出される。)
 """
 
 import os
 import sys
+import csv
+import json
+import time
+import datetime
+import contextlib
+import io
+from typing import Optional
 
-# Windows コンソール (cp932) で記号も出せるように
+os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '300')
+
 try:
     sys.stdout.reconfigure(encoding='utf-8')
 except Exception:
     pass
 
-# 設計判断 (2026-05-21): per-trial 時間予算を 60s → 120s に引き上げ。
-# 旧 60s では rigorous Dist2 + recycle iter が回るボーダーラインの trial が
-# わずかなオーバーヘッドで timeout 打ち切り → CAPEX 扱いになり、本来 soft fail
-# (生産量未達等) として TPE に方向シグナルが渡るはずの trial を取りこぼしていた
-# (例: main_20260521_160951 trial 3 は 55.1s で完走 (TAC=390.81) → 同 params の
-# 173003 trial 3 は 68.7s で timeout → CAPEX hit に劣化)。
-# setdefault なのでユーザーが環境変数で別途上書き可能。
-os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '120')
-
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import optuna
 
-# ===========================================================================
-# § 1. 最適化ハイパラ
-# ===========================================================================
-# 設計判断 (2026-05-26): 300 → 360 に増量 (N_WORKERS=6 と対)。
-# 並列 6 worker = async TPE 実効バッチ 6。バッチ>1 は in-flight trial を見ずに提案する
-# ため僅かに sample 効率が落ちる (staleness)。これを試行数 +20% で過補償し、最終品質を
-# 4-worker/300 以上に保つ。6 worker = 計算 1.5 倍速なので 360÷1.5 ≈ 旧 240 trial 相当の
-# wall-clock < 旧 300 → 品質↑ かつ時間↓ の両立。QMC startup(=50) は不変。
-N_TRIALS    = 360            # Optuna 試行回数 (旧 300、6 worker staleness を過補償)
-# 設計判断 (2026-05-22 forensic, 施策 3b): 50 → 25 に縮小。
-# 旧 50 は「QMC で広域 1/6 を網羅 → TPE 起動」の意図だったが、214750 run で 50 trial
-# 全部 feas=0 のまま消費 (= QMC は constraints_func を使わない)。25 に下げて TPE を
-# 早期起動、QMC で得た shortfall 情報を TPE が早く活用する。
-# 設計判断 (2026-05-23 forensic, main_20260523_190747, 施策 R): 25 → 50 に拡大。
-# 旧 25 への縮小判断は 214750 時点 (feas 率 0%) の状況、現状は施策 A/B/C/E/F で
-# 190747 run feas 率 26% (9/35) に改善済み。QMC 50 trial なら feasible ~13 件期待。
-# 真の狙い: QMC 25 trial では A_mem 上限近傍 (>2e5) の Sobol 点が 1-2 件しか出ず、
-# TPE が「A_mem 大」を学習素材不足で異常値扱いしていた (190747 best #18 A_mem=2.84e5 を
-# TPE が再現できず TAC 1007→1068+ に劣化した構造的原因)。
-# 50 trial に拡張で A_mem ∈ [2e5, 3e5] の feasible が 3-5 件期待、TPE 起動時の素材確保。
-# 副作用: best 収束が QMC 段階の長期化でやや遅れる (TPE 学習開始が trial 50 から)。
-N_STARTUP   = 50             # TPE startup 数 (旧 25→50、A_mem 高領域の Sobol 素材確保)
-N_TOPK      = 10             # top-k 再評価候補数
-SEED        = 42             # 乱数シード (再現用)
-SAMPLER     = 'tpe'          # 'tpe' | 'cmaes' | 'random'
-# 設計判断 (2026-05-21): n_jobs=1 デフォルト。並列化したい場合 2-4 (SQLite ロック注意)。
-# penalty_scale が thread-local でないため最終評価は 1 推奨、中間探索は 2-4 で時短可。
-N_JOBS      = 1
-# 設計判断 (2026-05-26): マルチプロセス並列 worker 数。>1 で N プロセスが共有 SQLite study
-# を分担 (要 SAVE_SQLITE=True)。各 worker 単スレッドで penalty_scale/GIL 問題なし、
-# constant_liar=True で冗長サンプリング抑制。8コアなら 4 が目安 (sample 効率と速度の両立)。
-# 1 で従来の単一プロセス。N_JOBS(スレッド)とは別物 — 並列は必ず N_WORKERS を使う。
-# 設計判断 (2026-05-26): 4 → 6 (本機 i5-13400 の P-core 数ちょうど)。
-# 品質劣化の唯一原因は「TPE フェーズの同時 worker 数 = async バッチサイズ」で、これは
-# ロードバランスで消せない async BO 固有の staleness。constant_liar 込みでバッチ 6 は
-# 「ほぼ逐次同等」圏の上端 (parallel.py 設計ノート: 控えめ 3-4 がほぼ逐次)。
-# 8+ は E-core(約半速)に worker が載り (a)静的均等分割で straggler 律速 (b)バッチ膨張で
-# staleness 増 の二重劣化なので不可。QMC startup フェーズは Sobol が結果非依存のため
-# 何 worker でも品質ゼロ劣化 (50 QMC は共有 study の総完了数で切替: study.py の
-# _PhaseSwitchSampler)。残る僅かな TPE staleness は N_TRIALS 増量側で過補償する。
-N_WORKERS   = 6
+from config.load import load_operating_config
+from flowsheet import FlowsheetDesignVars, evaluate, FlowsheetResult
+from src.distillation_core import ColumnTunables
+from units.reactors.swing import DesignVars as SwingDesign
+from units.separators.psa.psa_system import PSADesignVars
+from units.separators.membrane.membrane_system import MemDesignVars
+
+from optimization.study import make_sampler, run_optimization, _default_constraints_func
+from optimization.objective import _store_diagnostics
+from optimization.penalty_scale import set_scale, default_schedule
+from simulation import display_full_results, show_input_snapshot
 
 
 # ===========================================================================
-# § 2. ソルバ選択 (各塔独立、'fug' | 'rigorous' | 'sm')
+# § 1. BO 設定
 # ===========================================================================
-#   - BO ループは速度優先 → 全塔 FUG 推奨 (旧方針)
-#   - top-k 再評価は精度優先 → rigorous 推奨
-#   - 'sm' は近日実装予定。実装後は文字列を 'sm' に変えるだけで切替可
-#
-# 設計判断 (2026-05-20): Dist2 のみ BO ループでも rigorous に切替。
-#   FUG path では _split_streams が N_stages を流量計算に使わず、recovery 仕様
-#   から直接 split を決定する (= N が CAPEX しか影響しない)。これにより BO が
-#   常に N_dist2 下限 (=20) を選び、partial cond の C3H6 漏れが rigorous で
-#   発覚しても BO ループ中は見えない構造になっていた (main_20260520_124508
-#   BO best #246 = N=22 で top-10 全 rigorous infeasible が直接症状)。
-#   Dist2 は N=20-40 / R=5-10 の探索範囲で rigorous でも軽量 (数秒/eval) のため
-#   BO ループに組み込んでも全体時間は許容範囲。これで N が物理的に流量に効く
-#   ようになり、Dist2 厚化の経済合理性が BO に見えるようになる。
-#   Dist1/Dist3 は今のところ FUG 維持 (Dist1 は narrow-margin で FUG check 機能、
-#   Dist3 は N が大きいため rigorous は重い)。
-SOLVER_BO   = {
-    'dist1': 'fug',
-    'dist2': 'rigorous',     # 設計判断 (2026-05-20): FUG-rigorous gap の根源だったため切替
-    'dist3': 'fug',
-}
-SOLVER_TOPK = {
-    'dist1': 'rigorous',
-    'dist2': 'rigorous',
-    'dist3': 'rigorous',
-}
+N_TRIALS    = 300            # sub1(旧main.py) 準拠。全21変数なので 300 推奨 (~1-1.5h 目安)
+N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (以降 TPE)
+SEED        = 42
+N_JOBS      = 1              # HYSYS COM + penalty_scale global のため 1 (スレッド並列は不可)
+# 設計判断 (2026-05-26): マルチプロセス並列 worker 数。>1 で N プロセスが共有 SQLite study を
+# 分担し、各 worker が自前の HYSYS インスタンスを起動する (重い: 各 ~数百MB + 起動 ~1分。
+# RAM 次第で 3 worker 程度が現実的)。各 worker 単スレッドで penalty_scale/GIL 問題なし、
+# constant_liar=True で冗長サンプリング抑制。1 で従来の単一プロセス。
+# 設計判断 (2026-05-26): 本 main (HYSYS+SM) は N_WORKERS=1 のみ正しい。HYSYS.Application は
+# ユーザーセッションに単一インスタンスの COM サーバーで、複数 worker が Dispatch しても
+# 同じ HYSYS を共有 → ケース切替(Close+Open)が跨プロセスで割り込み結果汚染する (実証済)。
+# 並列化できるのは HYSYS 不使用の sub1(旧main)/sub2(旧final) のみ。本 main は SM 化で元々高速(~30分)。
+N_WORKERS   = 1
+N_TOPK      = 3              # 詳細レポートを出す上位候補数
+
+USE_SQLITE_STORAGE = False
+STUDY_NAME         = "pdh_hysys_sm_main"
 
 
 # ===========================================================================
-# § 3. 評価オプション
+# § 2. 固定値 / 評価オプション
 # ===========================================================================
-APPLY_HI                 = True    # pinch targeting (BO・top-k 共通、軽量、ms オーダー)
-APPLY_STAGE2_TOPK        = True    # HEN synthesis (top-k のみ、greedy + tick-off)
-HI_DT_MIN_K              = 10.0    # ピンチ最小接近温度差 [K] (textbook 標準)
-STRICT_RECOVERY_BO       = False   # 全塔 FUG (Gilliland check 入り) なので無効化が高速 — top-k で rigorous 検査
-STRICT_RECOVERY_TOPK     = True    # top-k rigorous の non-spec 解を catch
-RECOVERY_TOLERANCE       = 0.10    # spec ±10% 許容 (top-k で使用)
+P_L_Pa       = 1.0e5         # 膜透過側圧力 (大気圧固定、sub1 旧main と同じ)
+APPLY_HI     = True
+APPLY_STAGE2 = True
+HI_DT_MIN_K  = 10.0
 
 
 # ===========================================================================
-# § 4. 探索空間 — 19 変数 (元 18 + F_fresh 1)
-#       形式: (low, high, scale, type)
-#         scale: 'linear' | 'log'
-#         type:  'float'  | 'int'
-#       行をコメントアウトすればその変数は baseline 固定に
-#
-# Bounds 出典の凡例:
-#   出典: <文献/規定>      → 物理/規定値に基づく
-#   制約:                   → コードや物理から導出される境界
-#   !仮置き                  → 経験的に置いた範囲 (要見直し対象)
+# § 3. 探索範囲 — 全 21 変数  形式: (low, high, scale, type)
+#   bounds は sub1(旧main) の forensic 調整値 ∩ SM 分類器 feasible 領域 (2026-05-25 プローブ)。
+#   SM 崖 (予測不能域) は除外、解の縁 (収束ぎりぎり) は含める。
 # ===========================================================================
 SEARCH_SPACE = {
-    # ----- 反応器 (Swing) -----
-    # 設計判断 (2026-05-21 D-plan): 過去 run 履歴解析で「5/20 午前の bounds 縮小で
-    # best が 167→641 に劣化」が判明。124508 run (best=167.74) と同等の b1712d1
-    # bounds + N_dist3 下限 80 (124508 best は N=93) に巻き戻し、過去 top feas を
-    # warm-start で先頭注入する戦略へ移行。
-    # 設計判断 (2026-05-23 forensic, main_20260523_085918): 上限 970→940K に縮小。
-    # 085918 で TPE が高 T_in (940-970K) に 95% 集中 + F×D clip で実 F=927 (= F_min 1380 を
-    # 大幅に下回る) → spec_production_under 50 件の主因に。
-    # 高 T_in dead zone を物理的に切って TPE を低 T_in 領域 (880-920K = 黄金帯) へ強制誘導。
-    # 黄金帯エビデンス: QMC で T_in<920K の 4 件が TAC 1054-1333 (#12, #26, #30, #5)。
-    # 旧 970K 上限は「過去 best 940K 等を含める」目的だったが、085918 forensic で
-    # 高 T_in は production 維持できないと判明、上限切り詰めが正解。
-    'T_in_K':            (880.0,  940.0,  'linear', 'float'),  # K (上限 970→940, 高 T_in dead zone 排除)
-    'z_cat_m':           (15.0,   40.0,   'linear', 'float'),  # m
-    't_cyc_min':         (12.0,   25.0,   'linear', 'float'),  # min
-    # 設計判断 (2026-05-23 forensic, main_20260523_172800 撤退): bounds 縮小 (7.5, 9.5) は失敗。
-    # 試行: 165334 で r_rx=4件 (D≤7.6 / D=9.81) を切るため (7.0,10.0)→(7.5,9.5) に縮小。
-    # 結果: 172800 trial 0-44 で r_rx=13件に悪化 (3.25倍)。TPE が新下限 D=7.5-8.2 に張り付き、
-    #   小 V_cat 象限 (z_cat=15-22m, t_cyc=12-15min) と組み合わさり SV>3 を連発。
-    #   旧 bounds の「D=9.5-10.0 = SV 安全帯」を切ったことで TPE の逃げ場が消えた。
-    # 教訓: bounds で切るより constraint (reactor_sv_shortfall) で学習させるべき罠。
-    #   F×D SV カップリング廃止 (5/23 085918) と同じく「過剰介入」のパターン。
-    # 撤退: 旧 (7.0, 10.0) に巻き戻し、SV violation は constraints_func の信号に委ねる。
-    'D_reactor_m':       (7.0,    10.0,   'linear', 'float'),  # m (撤退、SV は constraint 側で学習)
+    # ----- 反応器 (Swing) — sub1(旧main.py) 準拠 -----
+    # 設計判断 (2026-05-26): 940→925 に下げたら feas 0/61 に激減 → 940 へ戻す。
+    # 理由: 本 main は Dist3 が固定スペック(99.5mol%/~1200製品)で、高い C3H6 throughput を
+    # 維持するには高転化=高 T_in が必須。前回 feasible は全て T_in 929-940。925 で全除外された。
+    # sub1(旧main) は自由Dist3で低Tでも1129生産できる(選択率↑で収率79%)が、本 main では低T=production不足。
+    # → 本 main の収率は固定1200 Dist3 demand により高T(~76%)で構造的に頭打ち。T_in は下げない。
+    "T_in_K":              (880.0,  940.0,  'linear', 'float'),
+    "z_cat_m":             (15.0,   40.0,   'linear', 'float'),
+    "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
+    "D_reactor_m":         (7.0,    10.0,   'linear', 'float'),
 
-    # ----- PSA -----
-    # 設計判断 (2026-05-23 forensic, main_20260523_001237): PSA bounds 縮小。
-    # 根拠: 45 trial run の直近 20 trial で r_psa.t_abs_below_min が 12 件 (60%)、
-    # TPE が「D_psa≈3.2 + L≈22 + des≈0.23」の局所最適に張り付き、PSA 規模が
-    # 物理的に足りない領域から抜けられなかった (#43/#44 でほぼ同じ params 再試行)。
-    # feas 2 件は L≥17 + des≥0.22。下限を「既知 feas の下限 + 余裕」に上げ、
-    # 規模不足ゾーンを物理的に削除する。
-    'D_psa_col_m':       (2.9,    5.0,    'linear', 'float'),  # m (下限 2.5 → 2.9, feas #15 の 2.97 を救う)
-    'L_psa_bed_m':       (22.0,   30.0,   'linear', 'float'),  # m (下限 15 → 22, feas #15 の 25.3 内側)
-    'desorption_target': (0.22,   0.40,   'linear', 'float'),  # - (下限 0.15 → 0.22, feas 2件は 0.23-0.24)
+    # ----- PSA — sub1(旧main.py) 準拠 -----
+    "D_psa_col_m":         (2.9,    5.0,    'linear', 'float'),
+    "L_psa_bed_m":         (22.0,   30.0,   'linear', 'float'),
+    "desorption_target":   (0.22,   0.40,   'linear', 'float'),
 
-    # ----- 膜 (P_L は 1 atm 固定、P_dist は Dist3 と同期) -----
-    'P_H_Pa':            (7.5e5,  9.5e5,  'linear', 'float'),  # Pa
-    # 設計判断 (2026-05-22 E-plan): A_mem 下限を 3e4 → 5e4 に引上げ。
-    # 根拠: main_20260522_005631 forensic 解析で A_mem ∈ [3e4, 5e4) の 42 trial が
-    #   97.6% (41 件) PSA/Mem CAPEX sentinel hit。膜 ODE が小面積で発散 or 透過量
-    #   不足で Dist3 starvation 経路に入って silent penalty 化していた。
-    # 履歴 best (TAC=167.74, A_mem=2.84e5) は新範囲内、TAC=641 安全装置 (A_mem=6.39e4) も維持。
-    'A_mem_m2':          (5.0e4,  3.0e5,  'log',    'float'),  # m² (124508 best は 2.84e5)
+    # ----- 膜 (P_L 固定、P_dist は Dist3 圧と同期) — sub1(旧main.py) 準拠 -----
+    "P_H_Pa":              (7.5e5,  9.5e5,  'linear', 'float'),
+    "A_mem_m2":            (5.0e4,  3.0e5,  'log',    'float'),
 
-    # ----- Dist1 (脱ブタン塔) -----
-    # 設計判断 (2026-05-23 forensic, main_20260523_165334 trial 0-38):
-    # r1 fail 12件 (= 全体 31%) は「P_dist1 ∈ [20.5, 25.0] bar × R_dist1 ∈ [1.55, 2.17]」
-    # の組合せに全件集中。高 P → α 縮小 → R_min↑ → 与えた R が R_min ぎりぎり →
-    # Gilliland N_needed = 26-37 が爆発、N_dist1 上限 30 で届かない罠。
-    # 物理的解釈: 「P↑したら R↑も必要」という相関が独立 suggest に反映されない構造。
-    # 過去 best (124508 P=20.5/R=2.20, 050049 P=12.6/R=1.58) は P×R 平面の
-    # 「低P低R or 中P高R」帯。高P低R 象限は経済的にも非報酬域。
-    # 上限 25→20 bar で右端切除、R 下限 1.5→2.0 で低 R 切除して罠 A を物理排除。
-    'P_dist1_Pa':        (12.0e5, 20.0e5, 'linear', 'float'),  # Pa (上限 25→20, 高P罠切除)
-    # 設計判断 (2026-05-23 forensic, main_20260523_085918): 下限 16→20 に引上げ。
-    # r1 fail 11 件中 7 件が N_dist1≤18 (= Gilliland N_needed 不足)。これが低 T_in 帯に
-    # 集中したため、TPE は「低 T_in = r1 fail = 悪い」と spurious correlation で誤学習し、
-    # 黄金帯 (低 T_in) を 95% 避ける挙動に。N_dist1≥20 にすることで r1 fail を構造的に
-    # 削減、TPE の誤学習素材を除去。過去 best (#12 N=29, #272 N=28) は新範囲内。
-    'N_dist1':           (20,     30,     'linear', 'int'  ),  # - (下限 16→20, r1 fail 削減)
-    # 設計判断 (2026-05-23 forensic, main_20260523_165334): 下限 1.5→2.0 に引上げ。
-    # 165334 run で R≤2.0 の r1 fail が連発 (12件中 9件が R<2.0)。R=1.5-2.0 は
-    # 過去 best (124508 R=2.20, 050049 R=1.58) のうち 050049 の 1.58 だけ切るが、
-    # 050049 系は Dist1 narrow margin で rigorous 再現性が怪しい設計のため切捨て妥協。
-    'reflux_dist1':      (2.0,    3.0,    'linear', 'float'),  # -  (下限 1.5→2.0, r1 fail 削減)
+    # ----- 原料 (外側ループ skip、override) -----
+    # 設計判断 (2026-05-26): (1380,1500) → (1500,1750) に上げる。
+    # 根拠: HYSYS+SM フローの実効収率は ~72% (観測 66-77%) と FUG/sub1(旧main) より低い。
+    #   旧上限 1500 では F×yield = 1500×0.72 ≈ 1083 で生産量下限 1128.6 (target 1188 の -5%)
+    #   すら割り、special_run_20260526_125938 で Dist2 を通過した 28 trial の 27 件が
+    #   prod_under、feasible は 1/154 に留まった。中央収率で target 1188 を満たすには
+    #   F ≈ 1188/0.72 ≈ 1645 が必要。sub1(旧main) の縮小前 (1200,1700) 寄りに戻す方向で、
+    #   feasible 生産量帯 [1128.6, 1247.4] を F×yield の範囲で到達可能にする。
+    "F_C3H8_fresh_kmol_h": (1500.0, 1750.0, 'linear', 'float'),
 
-    # ----- Dist2 (脱エタン塔, partial cond) -----
-    # 設計判断 (2026-05-21 D-plan revert): P_dist2 を b1712d1 (5.0, 7.0)e5 に戻す。
-    # 124508 best は P_dist2=5.41e5、5/20 縮小の下限 5.5e5 で切られてた。
-    # 設計判断 (2026-05-26): 上限 7e5 → 8e5 に拡大。Dist2 partial-cond コンデンサ熱量を
-    # 厳密エネルギー収支に改修 (src/distillation_core.py、+190億の深冷冷凍費) したことで、
-    # 「塔頂を浅冷化して安い冷媒に乗せる」のが強い TAC レバーになった。高 P → 塔頂温度↑
-    # → −100°C エチレン(14373円/GJ) より暖かい tier に移れる。膜依存 (P_H≥P_dist2+0.5e5,
-    # P_H 上限 9.5e5) より P_dist2 上限は 8e5 が上限実用値。BO に浅冷化の余地を与える。
-    'P_dist2_Pa':        (5.0e5,  8.0e5,  'linear', 'float'),  # Pa (上限 7→8, 浅冷化レバー)
-    # 設計判断 (2026-05-22 forensic 反映、214750 run): N_dist2 上限を 50 → 40 に戻す。
-    # 根拠: 5/22 改良 3 で 40→50 拡張したが、main_20260522_214750 (n=130 stopped)
-    # で TPE phase 80 trial の 45% が N_dist2 ≥ 45 領域に張り付き、dist2_dT_shortfall
-    # NZ 14 件全てが N=45-50 で Wang-Henke 不収束 (dT_max≈20K)。物理的に収束不可な
-    # 領域に TPE が誤誘導された罠。上限 40 に戻して罠を物理的に閉鎖。
-    # 124508 best (N=22) は新範囲内、下限 20 維持。
-    'N_dist2':           (20,     40,     'linear', 'int'  ),  # - (124508 best は 22)
-    'reflux_dist2':      (6.0,    10.0,   'linear', 'float'),  # -  維持 (Wang-Henke 収束、yield 中立)
+    # ----- Dist1 (SM model1: N30-60/P1600-2200/feed_stage10-39/CF0.9-0.999) -----
+    # feed_stage は SM feas ≥22 (プローブ: <21 で 0%)。範囲は (22,28) 固定: N 下限 30 でも
+    # N-2=28 以下で常に有効になり、動的 search space を避けて TPE(multivariate) をフル活用。
+    # (SM feas 域 ≤39 のうち 22-28 を採用。Dist1 は cost driver でないため探索損失は許容。)
+    "col1_p_kpa":          (1600.0, 2000.0, 'linear', 'float'),
+    "col1_n_stages":       (30,     60,     'linear', 'int'  ),
+    "col1_feed_stage":     (22,     28,     'linear', 'int'  ),
+    "col1_comp_frac_2":    (0.90,   0.999,  'linear', 'float'),
 
-    # ----- Dist3 (C3 スプリッタ, narrow-α) -----
-    # 設計判断 (2026-05-23 forensic, main_20260523_004243): P_dist3 上限 25→19 + 下限 17→16。
-    # 根拠: 004243 run で TPE が P_dist3 中央値 22-23 bar に向かい、α 悪化で N_dist3 が
-    # 171 まで爆増、Dist3 CAPEX 414 億円 (全 CAPEX の 70%) になった。
-    # 過去 best (TAC=167.74, P_dist3=16.72bar, N_dist3=93) を含めるため下限 17→16、
-    # かつ「TPE が高 P_dist3 罠に再び向かう」のを防ぐため上限 25→19 に縛る。
-    # 補完: mem_bp_shortfall 対策は 16bar 帯でも shortfall シグナルが TPE に渡るので
-    # 自動学習を期待 (P_dist3 を 16→17 bar 上げると Mem が楽になる方向シグナルは残る)。
-    'P_dist3_Pa':        (16.0e5, 19.0e5, 'linear', 'float'),  # Pa (過去 best 16.72 を含む)
-    # 設計判断 (2026-05-21 D-plan): N_dist3 下限を 80 に。124508 best (TAC=167.74) は N=93。
-    # 設計判断 (2026-05-23 forensic, main_20260523_172800): 下限 80→90 に引上げ。
-    # 根拠: 172800 run trial #26 で N=80 + rec_HK_bot_dist3=0.982 (下限近傍) の組合せで
-    # Gilliland N_needed=103 が爆発、N=80 では届かない罠を踏んだ。
-    # rec_HK_bot_dist3 変数化 (5/23 004243) の副作用で「N 下限 + 低 rec」象限に
-    # 新たな N不足罠が生まれていた。下限を 124508 best (N=93) より少し下 (90) まで
-    # 詰めることで罠象限を排除。過去 best 93 は内側、TAC=247(050049) 系の N=132 等も影響なし。
-    # 設計判断 (2026-05-23 forensic, main_20260523_182527): 上限 250→150 に縮小。
-    # 根拠: 182527 run TPE phase (#26-29) が N_dist3=246-249 (上限張付き) で TAC=1156-1196 に
-    # 集中、同 run の QMC best #18 (N=135, TAC=1011.78) を捨てて N 上限方向に学習。
-    # 「N 大 → 純度安定 → feasible」を施策 A (spec ±5% 緩和) と組み合わせて強く学習した結果。
-    # 過去 best (124508 N=93, 050049 N=132, 182527 #18 N=135) は全て N≤135 で、N=200+ は
-    # 物理現実 (C3 splitter 標準 N=80-150) と乖離。塔高 60m 超は工業的に許容不可。
-    # 上限 150 で過去 best 全部内側、TPE の「N 上限逃げ」経路を物理的に閉鎖。
-    # 副作用: N>150 必要な低 P + 低 rec 設計は r3 (Gilliland N不足) で infeas 化。
-    # これは施策 F (reflux_dist3 下限 ↑) で軽減。
-    'N_dist3':           (90,    150,    'linear', 'int'  ),  # - (上限 250→150, N 上限逃げ閉鎖)
-    # 設計判断 (2026-05-23 forensic, main_20260523_004243): 下限 11→9 に拡張。
-    # 根拠: 004243 best (#272) は R=11.17 で R_min=8.46 → margin 32%。下限 11 だと
-    # 「R ぎりぎり」の小型 Dist3 設計を TPE が試せない構造になっていた。
-    # 9.0 ≈ R_min×1.07 まで下げれば、TPE が Gilliland の物理境界近傍を探索可能。
-    # 副作用は Wang-Henke 不収束 (= dist3_dT_shortfall) だが信号化済みで TPE 学習可能。
-    # 期待効果: Dist3 N↓ → 全 CAPEX 414→200 億円台。
-    # 設計判断 (2026-05-23 forensic, main_20260523_182527): 下限 9.0→10.0 に引上げ。
-    # 根拠: N_dist3 上限を 250→150 に縮小したため、R ぎりぎり (R≈R_min×1.07) 設計で
-    # Gilliland N_needed が 150 を超えると r3 N不足罠を踏みやすい。
-    # 過去 best (124508 R=11.50, 050049 R=11.52, 182527 #18 R=10.03) は全て R≥10、
-    # 下限 10.0 で過去 best 全部内側、かつ Gilliland safe margin (≈R_min×1.18) を確保。
-    # 副作用: R↑→ OPEX 増 (リボイラー熱負荷↑) だが、N 上限縮小と組合せで Dist3 CAPEX
-    # 純減方向 (= TAC 純減方向)。R/N トレードオフは TPE に委ねる。
-    'reflux_dist3':      (10.0,   20.0,   'linear', 'float'),  # - (下限 9→10, N=150 上限と整合)
+    # ----- Dist2 (HYSYS 脱エタン塔)。収束 envelope 狭、縁を含む (N≈45 安/N=75-80 頑健) -----
+    # 設計判断 (2026-05-26): 上限 620→700。Dist2(HYSYS) 塔頂を浅冷化(高P→塔頂温度↑)して
+    # 深冷コンデンサ費(エチレン-100C 17731円/GJ)を下げるレバー。P_H 下限 750kPa 未満を維持(膜 ph_le_pfeed 回避)。
+    "col2_p_kpa":          (500.0,  700.0,  'linear', 'float'),  # 膜 P_H 未満 (上限 620→700, 浅冷化)
+    "col2_n_stages":       (44,     80,     'linear', 'int'  ),
+    "col2_feed_ratio":     (0.40,   0.60,   'linear', 'float'),
+    # 設計判断 (2026-05-26): 上限 13→10.5。Dist2(HYSYS) 深冷コンデンサ(−83°C, エチレン-100C)
+    # が 本 main TAC の ~25%(427億)の最大コスト。還流比↓ = 凝縮 duty↓ = 直接削減。
+    # 高還流(13)を切って低還流帯へ誘導。下限 8 は維持(HYSYS 収束 envelope + C3 封じ込め)。
+    "col2_reflux_ratio":   (8.0,    10.5,   'linear', 'float'),
 
-    # ----- Fresh LPG (BO 直接指定、外側ループ skip) -----
-    # 設計判断 (2026-05-22 forensic, 214750 run): 範囲を 1200-1700 → 1380-1500 に縮小。
-    # 根拠: 214750 run で prod_under (中央 F=1620) と prod_over (中央 F=1480) が二極化、
-    # 21 件 (16%) が F_fresh 範囲端での生産量逸脱で死亡。1380-1500 は履歴 best
-    # (F=1424.1, 1414.1, 1433.2) を全部含み、prod_over/under 両側の dead zone を切る。
-    # 5/22 forensic 解析の F_fresh 別ヒストグラム支持。
-    'F_C3H8_fresh_kmol_h': (1380.0, 1500.0, 'linear', 'float'),  # kmol/h
+    # ----- Dist3 (SM model3: N69-200/P1600-2200, spec なし)。feas: N≥115, P≤1900 -----
+    "col3_p_kpa":          (1600.0, 1900.0, 'linear', 'float'),
+    "col3_n_stages":       (115,    160,    'linear', 'int'  ),
+    "col3_feed_ratio":     (0.60,   0.90,   'linear', 'float'),
+}
 
-    # ----- 蒸留塔 recovery -----
-    # 設計判断 (2026-05-20): rec_HK_bot_dist2 の下限を 0.998 → 0.9995 に再タイト化。
-    # 根拠: main_20260520_003551 trials.csv 分析より、
-    #   - topk infeasible 3/3 (#32, #258, #208) は rec_HK_bot < 0.9995
-    #   - topk feasible    2/2 (#115, #231)        は rec_HK_bot ≥ 0.9995
-    #   - バケット 0.9995-0.9999 の中央 TAC は他バケット比 -25%
-    # 「鋭利な feasibility 境界」が 0.9995 にあり、下限引き上げで sweet spot
-    # 集中探索ができる。失う最小 TAC (#32 = 294.87) は実は infeasible なので実害なし。
-    # 補完施策: PSA/Mem trace bypass の閾値超過に連続 penalty (runner.py
-    # _TRACE_BYPASS_PENALTY_COEF_OKUYEN) を導入し、Dist2 の C3 漏れ自体に BO 中の
-    # シグナルを与える。recovery 制約 + 連続 penalty の二段構えで「漏れない設計」へ誘導。
-    # rec_LK_top_dist2 は柔軟に 0.95-0.999 とし、BO に C2H6 のリサイクル比を
-    # 経済性で選ばせる。
-    # 'rec_LK_top_dist1':  (0.90, 0.999, 'linear', 'float'),
-    # 'rec_HK_bot_dist1':  (0.90, 0.999, 'linear', 'float'),
-    'rec_LK_top_dist2':  (0.95, 0.999, 'linear', 'float'),    # C2H6 → top (柔軟)
-    # 設計判断 (2026-05-21 D-plan revert): 0.9995 → 0.998 に戻す。
-    # 124508 best (trial 247, TAC=167.74) は rec_HK_bot=0.9997、5/20 縮小の下限 0.9995 で
-    # 切られてないものの、TAC 247.37 の 050049 trial 294 (in-bounds 最良) は 0.998 ≤ rec ≤ 0.9999 領域。
-    # 設計判断 (2026-05-23 forensic, main_20260523_165334): 上限 0.9999→0.9995 に縮小。
-    # r3 (Dist3 feed flow ≤ 0) が 4件 (10%) 発生、rec_HK_bot_dist2 が高い設計で Dist2 が
-    # C3H8 を bot に過剰回収 → Dist3 入側 C3 ストリームが numeric 縮退。
-    # 上限 0.9999 は実装上 numeric 縮退を引き起こしやすい (浮動小数 epsilon 帯)。
-    # 過去 best (124508 0.9997) は新 bounds 内、TAC=247(050049) 系も 0.9995 系。
-    'rec_HK_bot_dist2':  (0.998, 0.9995, 'linear', 'float'),  # C3H8 → bot (上限 0.9999→0.9995, r3 fail 削減)
-    # 設計判断 (2026-05-23 forensic, main_20260523_004243): Dist3 recovery を BO 変数化。
-    # 根拠: 004243 best (#272 rigorous, TAC=1055) は purity 99.88wt% (spec 99.5%+0.38pp over-design)
-    # で Dist3 CAPEX が 414 億円 (全 CAPEX の 69.6%)。ハードコード 0.99 で TPE が
-    # 「purity ぎりぎり 99.5%」の Dist3 縮小設計を探れない構造になっていた。
-    # 変数化することで TPE が「purity 99.5% ギリギリ → N_dist3↓, R_dist3↓ → CAPEX↓」を
-    # 探索できる。期待効果: Dist3 CAPEX 414 → 200 億円台、TAC 1055 → 800 程度。
-    # 範囲:
-    #   rec_LK_top_dist3 (C3H6 → top): 0.985-0.999、C3H6 の製品側回収率
-    #     - 下限 0.985: C3H6 1.5% が bot へ漏れて recycle = production loss が増える上限
-    #     - 上限 0.999: 現状ハードコード相当
-    #   rec_HK_bot_dist3 (C3H8 → bot): 0.95-0.999、C3H8 の bot 側回収率 = purity 直接制御
-    #     - 下限 0.95: C3H8 5% が top へ漏れて purity ~95% = spec 違反確定
-    #     - 上限 0.999: 現状ハードコード相当 (= over-purity 設計)
-    #     - sweet spot 推定: 0.99 付近 (= purity 99.5% spec ギリギリ)
-    'rec_LK_top_dist3':  (0.985, 0.999, 'linear', 'float'),  # - C3H6 → top
-    # 設計判断 (2026-05-23 forensic, main_20260523_172800): 下限 0.95→0.97 に引上げ。
-    # 根拠: 172800 run trial #8 (rec_HK=0.981, N=101, R=10.4 で N_needed=121) と trial #26
-    # (rec_HK=0.982, N=80, R=12.5 で N_needed=103) で Dist3 N_needed 爆発罠を観測。
-    # rec_HK 低下は purity 制御として有用だが、低 rec × 中 R では Gilliland N_needed が
-    # 急増 (Underwood R_min 自体は低 rec で下がるものの、Gilliland 必要 N が伸びる構造)。
-    # 下限 0.97 は purity ~97% bot で C3H6 top 純度 ~99.5-99.8% を達成できる帯、
-    # かつ N_needed 爆発を回避できる物理的妥協点。
-    # 副作用: 「purity ぎりぎり 99.5%」狙いの極小型 Dist3 設計 (rec_HK=0.95-0.97 帯) を
-    # 探索から外す。期待効果は元の Dist3 CAPEX 削減狙い (004243 forensic) より小さくなるが、
-    # N不足罠を許容するよりは妥当。
-    'rec_HK_bot_dist3':  (0.97,  0.999, 'linear', 'float'),  # - C3H8 → bot (下限 0.95→0.97, N不足罠切除)
+# SM/HYSYS の feed_stage 絶対 bounds (ratio→絶対段変換後に clamp)。
+_FEED_STAGE_ABS = {
+    "col2": (2, 9999),    # HYSYS は N-2 のみ
+    "col3": (70, 180),    # model3 feas 域 (feed_stage ≥70)
 }
 
 
 # ===========================================================================
-# § 5. 出力 / 保存
+# § 4. 出力
 # ===========================================================================
-OUTPUT_DIR        = 'outputs'         # 出力先ディレクトリ (リポジトリ root 直下)
-SAVE_SQLITE       = True              # Optuna SQLite (中断・再開・dashboard 用)
-SAVE_TRIALS_CSV   = True              # 全 trial の履歴 CSV
-SAVE_BEST_JSON    = True              # ベスト trial の要約 JSON
-SAVE_TOPK_REPORT  = True              # top-k 比較レポート txt
-SHOW_PROGRESS     = True              # Optuna の tqdm 進捗バー
-DISPLAY_BEST_FULL = True              # top-k ベスト候補について exp1 と同じ詳細レポート出力
-
-# ----- L1: Feasibility 分類解析 (BO 終了後の post-hoc 解析) -----
-RUN_FEASIBILITY_ANALYSIS = True       # False で無効化 (sklearn 未インストール時も自動無効)
-FEASIBILITY_TARGET       = 'convergence'  # 'convergence' | 'spec' | 'both'
-FEASIBILITY_MODEL        = 'rf'       # 'rf' | 'logreg'
+OUTPUT_DIR = 'outputs'
 
 
 # ===========================================================================
-# § 6. Warm-start trials (BO 開始前に先頭注入する既知良 params)
-# ===========================================================================
-# 設計判断 (2026-05-21): warm-start は無効化 (空リスト)。
-#  理由 (ユーザー判断): 既知 best 周辺を最初に注入するのは「筋が悪い」=
-#   - TPE が anchor された設計近傍に張り付く局所最適化バイアス
-#   - 真に広い探索ができてるか不明 (warm-start が無いと出ない解は埋もれる)
-#   - bounds + constraints_func + 適切な penalty 係数で十分なはずという信頼
-#  以前の値を残す場合は下の cfg.warm_start_trials に list を渡せば動作する。
-WARM_START_TRIALS: list = []
-
-# 過去の warm-start 候補は参考までに残す (= 必要時に WARM_START_TRIALS に追加可)
-_HISTORICAL_TOP_FEAS = [
-    # main_20260520_124508/trial 247: TAC=167.74 (in-bounds best)
-    {
-        'T_in_K': 919.162410801484, 'z_cat_m': 16.803549423523734, 't_cyc_min': 19.69164234748162,
-        'D_reactor_m': 9.517486109487328,
-        'D_psa_col_m': 3.9615839767333703, 'L_psa_bed_m': 25.659406494276993,
-        'desorption_target': 0.27240098624226927,
-        'P_H_Pa': 843411.8987304909, 'A_mem_m2': 283966.3274966522,
-        'P_dist1_Pa': 2049317.0549986823, 'N_dist1': 26, 'reflux_dist1': 2.1953437279306693,
-        'P_dist2_Pa': 541106.4588241655, 'N_dist2': 22, 'reflux_dist2': 8.029650060703085,
-        'P_dist3_Pa': 1672002.5591798534, 'N_dist3': 93, 'reflux_dist3': 11.497473089123655,
-        'F_C3H8_fresh_kmol_h': 1424.1352972956554,
-        'rec_LK_top_dist2': 0.9633748276747837, 'rec_HK_bot_dist2': 0.9997484430398813,
-    },
-    # main_20260520_124508/trial 248: TAC=190.98 (近傍 backup)
-    {
-        'T_in_K': 918.6227596868657, 'z_cat_m': 32.35969190835653, 't_cyc_min': 19.537051530398376,
-        'D_reactor_m': 7.300460542156422,
-        'D_psa_col_m': 4.001546050784177, 'L_psa_bed_m': 25.106352415496023,
-        'desorption_target': 0.2729969985836635,
-        'P_H_Pa': 843053.5687630774, 'A_mem_m2': 288953.37568181066,
-        'P_dist1_Pa': 2085871.3610249786, 'N_dist1': 26, 'reflux_dist1': 2.2209824419850914,
-        'P_dist2_Pa': 542883.3064569046, 'N_dist2': 22, 'reflux_dist2': 7.982540367890286,
-        'P_dist3_Pa': 1818604.3843922198, 'N_dist3': 97, 'reflux_dist3': 11.553720803472697,
-        'F_C3H8_fresh_kmol_h': 1414.0869419679552,
-        'rec_LK_top_dist2': 0.9615480667075005, 'rec_HK_bot_dist2': 0.9997669495172944,
-    },
-    # main_20260520_124508/trial 250: TAC=195.77 (多様性、D_reactor=9.6 系)
-    {
-        'T_in_K': 917.228952528507, 'z_cat_m': 16.967494368089916, 't_cyc_min': 19.565596891185617,
-        'D_reactor_m': 9.621697682208614,
-        'D_psa_col_m': 3.920435945695369, 'L_psa_bed_m': 26.21306488402171,
-        'desorption_target': 0.27244944212922584,
-        'P_H_Pa': 849094.1932881174, 'A_mem_m2': 283383.2669744636,
-        'P_dist1_Pa': 2068252.044189943, 'N_dist1': 26, 'reflux_dist1': 2.214558942500414,
-        'P_dist2_Pa': 538758.100140692, 'N_dist2': 22, 'reflux_dist2': 8.060007316066612,
-        'P_dist3_Pa': 1814383.9318691527, 'N_dist3': 101, 'reflux_dist3': 11.662553018381193,
-        'F_C3H8_fresh_kmol_h': 1433.1511420033776,
-        'rec_LK_top_dist2': 0.961580680788127, 'rec_HK_bot_dist2': 0.9997596686478493,
-    },
-    # main_20260520_050049/trial 294: TAC=247.37 (異なる cluster、T_in 高め)
-    {
-        'T_in_K': 940.6098665828874, 'z_cat_m': 33.22636519308083, 't_cyc_min': 21.2270426215022,
-        'D_reactor_m': 8.223882145618532,
-        'D_psa_col_m': 3.8719518101730284, 'L_psa_bed_m': 25.05409417641251,
-        'desorption_target': 0.16377284557754657,
-        'P_H_Pa': 803588.3583963995, 'A_mem_m2': 267750.35312782833,
-        'P_dist1_Pa': 1256273.724291345, 'N_dist1': 19, 'reflux_dist1': 1.577742825591651,
-        'P_dist2_Pa': 652996.4549965357, 'N_dist2': 30, 'reflux_dist2': 8.796035492833141,
-        'P_dist3_Pa': 1680012.7124771352, 'N_dist3': 132, 'reflux_dist3': 11.520174810668923,
-        'F_C3H8_fresh_kmol_h': 1617.146158989106,
-        'rec_LK_top_dist2': 0.9747687346169066, 'rec_HK_bot_dist2': 0.9995878730438948,
-    },
-    # main_20260520_225416/trial 12: TAC=641.00 (現 in-bounds best、reflux_dist3=21.71 → clamp to 20.0)
-    # 安全装置: 上記 4 件がすべて infeasible でも 641 を確実に再現できる
-    {
-        'T_in_K': 935.1845965173634, 'z_cat_m': 29.422597115658977, 't_cyc_min': 18.40273001964523,
-        'D_reactor_m': 7.585728963394134,
-        'D_psa_col_m': 4.3061302881537635, 'L_psa_bed_m': 19.211585436612836,
-        'desorption_target': 0.15607899160786345,
-        'P_H_Pa': 879094.4591814335, 'A_mem_m2': 63914.77412250522,
-        'P_dist1_Pa': 2422596.1596587887, 'N_dist1': 30, 'reflux_dist1': 2.8552694633747624,
-        'P_dist2_Pa': 605523.8050383166, 'N_dist2': 30, 'reflux_dist2': 9.641592812938626,
-        'P_dist3_Pa': 1928184.1483173142, 'N_dist3': 196, 'reflux_dist3': 20.0,  # clamped from 21.71
-        'F_C3H8_fresh_kmol_h': 1626.50472773368,
-        'rec_LK_top_dist2': 0.9644279957114097, 'rec_HK_bot_dist2': 0.9996540390914408,
-    },
-]
-
-
-# ===========================================================================
-# ↑↑↑ 編集領域はここまで。以下はパイプライン呼び出し (通常触らない) ↑↑↑
+# ↓↓↓ 以下はパイプライン (通常触らない) ↓↓↓
 # ===========================================================================
 
-from optimization import PipelineConfig, run_pipeline
+import dataclasses as _dc
+_CONFIG = load_operating_config()
+# 決定A (2026-05-25): SM Dist3 は 99.5 mol%=99.497 wt% 固定。mol↔wt 差 0.003pp を吸収するため
+# purity 閾値を 99.45 wt% に緩和 (SM の実力を尊重)。詳細は project_sm_integration メモ。
+_CONFIG = _dc.replace(_CONFIG, spec=_dc.replace(_CONFIG.spec, c3h6_min_wtfrac=0.9945))
 
 
-if __name__ == '__main__':
-    run_pipeline(PipelineConfig(
-        # § 1
-        n_trials   = N_TRIALS,
-        n_startup  = N_STARTUP,
-        n_topk     = N_TOPK,
-        seed       = SEED,
-        sampler    = SAMPLER,
-        n_jobs     = N_JOBS,
-        n_workers  = N_WORKERS,
-        # § 2
-        solver_bo   = SOLVER_BO,
-        solver_topk = SOLVER_TOPK,
-        # § 3
-        apply_hi              = APPLY_HI,
-        apply_stage2_topk     = APPLY_STAGE2_TOPK,
-        hi_dT_min_K           = HI_DT_MIN_K,
-        strict_recovery_bo    = STRICT_RECOVERY_BO,
-        strict_recovery_topk  = STRICT_RECOVERY_TOPK,
-        recovery_tolerance    = RECOVERY_TOLERANCE,
-        # § 4
-        search_space = SEARCH_SPACE,
-        # § 5
-        output_dir       = OUTPUT_DIR,
-        save_sqlite      = SAVE_SQLITE,
-        save_trials_csv  = SAVE_TRIALS_CSV,
-        save_best_json   = SAVE_BEST_JSON,
-        save_topk_report = SAVE_TOPK_REPORT,
-        show_progress    = SHOW_PROGRESS,
-        display_best_full = DISPLAY_BEST_FULL,
-        # L1
-        run_feasibility_analysis = RUN_FEASIBILITY_ANALYSIS,
-        feasibility_target       = FEASIBILITY_TARGET,
-        feasibility_model        = FEASIBILITY_MODEL,
-        # § 6
-        warm_start_trials        = WARM_START_TRIALS,
-    ))
+def _feed_stage_from_ratio(ratio: float, n: int, lo: int, hi: int) -> int:
+    fs = int(round(ratio * n))
+    hi_eff = min(hi, n - 2)
+    lo_eff = min(lo, hi_eff)
+    return max(lo_eff, min(fs, hi_eff))
+
+
+def _suggest_params(trial: optuna.trial.Trial) -> dict:
+    """SEARCH_SPACE 全変数を suggest して params dict を返す。
+
+    全変数が固定範囲なので multivariate TPE をフル活用できる (動的 search space なし)。
+    col2/col3 の feed は ratio で suggest し、_build_design で絶対段に変換 (N 依存 clamp)。
+    """
+    p: dict = {}
+    for name, (low, high, scale, typ) in SEARCH_SPACE.items():
+        if typ == 'int':
+            p[name] = trial.suggest_int(name, int(low), int(high), log=(scale == 'log'))
+        else:
+            p[name] = trial.suggest_float(name, float(low), float(high), log=(scale == 'log'))
+    return p
+
+
+def _build_design(p: dict) -> FlowsheetDesignVars:
+    """params dict (21 変数) から FlowsheetDesignVars を構築。trial 非依存 (best 再評価でも使用)。"""
+    n1 = int(p['col1_n_stages']); fs1 = int(p['col1_feed_stage'])
+    n2 = int(p['col2_n_stages']); fs2 = _feed_stage_from_ratio(p['col2_feed_ratio'], n2, *_FEED_STAGE_ABS['col2'])
+    n3 = int(p['col3_n_stages']); fs3 = _feed_stage_from_ratio(p['col3_feed_ratio'], n3, *_FEED_STAGE_ABS['col3'])
+    p3_kpa = float(p['col3_p_kpa'])
+    return FlowsheetDesignVars(
+        swing=SwingDesign(T_in=p['T_in_K'], z_cat=p['z_cat_m'],
+                          t_cyc=p['t_cyc_min'], D=p['D_reactor_m']),
+        psa=PSADesignVars(D_col=p['D_psa_col_m'], L_bed=p['L_psa_bed_m'],
+                          desorption_target=p['desorption_target']),
+        mem=MemDesignVars(P_H=p['P_H_Pa'], P_L=P_L_Pa, A_mem=p['A_mem_m2'],
+                          P_dist=p3_kpa * 1000.0),
+        dist1=ColumnTunables(
+            P_col=float(p['col1_p_kpa']) * 1000.0, N_stages=n1, N_feed=1, reflux_ratio=2.0,
+            solver_method='sm', hysys_spec_value=float(p['col1_comp_frac_2']), hysys_feed_stage=fs1),
+        dist2=ColumnTunables(
+            P_col=float(p['col2_p_kpa']) * 1000.0, N_stages=n2, N_feed=1,
+            reflux_ratio=float(p['col2_reflux_ratio']),
+            solver_method='hysys', hysys_spec_value=float(p['col2_reflux_ratio']), hysys_feed_stage=fs2),
+        dist3=ColumnTunables(
+            P_col=p3_kpa * 1000.0, N_stages=n3, N_feed=1, reflux_ratio=12.0,
+            solver_method='sm', hysys_spec_value=0.99, hysys_feed_stage=fs3),  # spec は SM 未使用
+    )
+
+
+def objective(trial: optuna.trial.Trial) -> float:
+    scale = default_schedule(trial.number, N_TRIALS)
+    set_scale(scale)
+    trial.set_user_attr('penalty_scale', scale)
+
+    params = _suggest_params(trial)
+    design = _build_design(params)
+    F_fresh = float(params['F_C3H8_fresh_kmol_h'])
+
+    t0 = time.perf_counter()
+    result: FlowsheetResult = evaluate(
+        design, _CONFIG, verbose=False,
+        apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K, apply_stage2=APPLY_STAGE2,
+        F_C3H8_override=F_fresh,
+    )
+    trial.set_user_attr('wallclock_sec', time.perf_counter() - t0)
+    _store_diagnostics(trial, result)
+    trial.set_user_attr('F_C3H8_fresh_used_kmol_h', F_fresh)
+    return result.effective_TAC
+
+
+def constraints_func(trial: optuna.trial.FrozenTrial):
+    """sub1(旧main) 由来の連続制約 (feas / 生産量方向 / 反応器SV / PSA / 膜 / 塔 shortfall)。
+
+    全変数最適化なので反応器/PSA/膜の shortfall 信号も活性化し、TPE が上流の方向も学習する。
+    純度は SM で不変のため制約化しない (定数=無意味)。
+    """
+    return _default_constraints_func(trial)
+
+
+# ===========================================================================
+# ライブログ用 compact callback (sub1=旧main の make_compact_callback 相当、flush 付き)
+# ===========================================================================
+from collections import Counter as _Counter, deque as _deque
+import time as _time
+from optimization.callbacks import _fmt_dur, _fmt_reason_from_trial, _fmt_tally
+
+_BAR_W = 30
+
+
+def _make_main_callback(n_total: int):
+    state = {'start': None, 'prev_best': float('inf'), 'n_feas': 0,
+             'n_done': 0, 'recent': _deque(maxlen=20), 'tally': _Counter()}
+
+    def cb(study, trial):
+        if state['start'] is None:
+            state['start'] = _time.monotonic()
+        dur = 0.0
+        if trial.datetime_start is not None and trial.datetime_complete is not None:
+            dur = (trial.datetime_complete - trial.datetime_start).total_seconds()
+        state['recent'].append(dur); state['n_done'] += 1
+        a = trial.user_attrs
+        is_feas = bool(a.get('is_feasible', False))
+        if is_feas:
+            state['n_feas'] += 1
+        fu = a.get('failure_unit', '') or ('legacy' if not is_feas else '')
+        if fu:
+            state['tally'][fu] += 1
+        val = trial.value if trial.value is not None else float('inf')
+        new_best = is_feas and val < state['prev_best']
+        delta = state['prev_best'] - val if new_best else None
+        if new_best:
+            state['prev_best'] = val
+        badge = '★ BEST  ' if new_best else ('✓ feas  ' if is_feas else '✗ infeas')
+        val_s = '   ----' if val >= 9999.0 else f"{val:9.2f}"
+        delta_s = f" (Δ-{delta:.1f})" if (delta is not None and delta < 1e9) else ""
+        reason_s = ("  reason=" + _fmt_reason_from_trial(trial)) if not is_feas else ""
+        line0 = f"[#{trial.number:03d}] {badge}  TAC={val_s}{delta_s}{reason_s}  {dur:5.1f}s"
+
+        p = trial.params
+        v0 = (f"Rx: T={p.get('T_in_K',0):.0f}K z={p.get('z_cat_m',0):.1f} t={p.get('t_cyc_min',0):.1f} "
+              f"D={p.get('D_reactor_m',0):.2f} | PSA: D={p.get('D_psa_col_m',0):.2f} L={p.get('L_psa_bed_m',0):.1f} "
+              f"des={p.get('desorption_target',0):.3f} | Mem: P_H={p.get('P_H_Pa',0)/1e5:.2f}bar "
+              f"A={p.get('A_mem_m2',0):.2e} | F={p.get('F_C3H8_fresh_kmol_h',0):.0f}")
+        v1 = (f"Dist1(SM): P={p.get('col1_p_kpa',0):.0f}kPa N={p.get('col1_n_stages',0)} "
+              f"feed={p.get('col1_feed_stage',0)} cf={p.get('col1_comp_frac_2',0):.3f}")
+        v2 = (f"Dist2(HY): P={p.get('col2_p_kpa',0):.0f}kPa N={p.get('col2_n_stages',0)} "
+              f"fr={p.get('col2_feed_ratio',0):.2f} R={p.get('col2_reflux_ratio',0):.1f}")
+        v3 = (f"Dist3(SM): P={p.get('col3_p_kpa',0):.0f}kPa N={p.get('col3_n_stages',0)} "
+              f"fr={p.get('col3_feed_ratio',0):.2f}")
+        pur = a.get('c3h6_purity_wtfrac'); prod = a.get('production_kmol_h')
+        fused = a.get('F_C3H8_fresh_used_kmol_h')
+        outs = ""
+        if pur and prod:
+            outs = f"       -> purity={float(pur)*100:.2f}wt% prod={float(prod):.0f}kmol/h"
+            if fused:
+                outs += f" yield={float(prod)/float(fused)*100:.1f}%"
+
+        elapsed = _time.monotonic() - state['start']; n = state['n_done']
+        med = (sorted(state['recent'])[len(state['recent']) // 2] if state['recent'] else 0.0)
+        eta = max(n_total - n, 0) * med
+        pct = 100.0 * n / max(n_total, 1)
+        filled = int(_BAR_W * n / max(n_total, 1))
+        bar = '█' * filled + '░' * (_BAR_W - filled)
+        feas_pct = 100.0 * state['n_feas'] / max(n, 1)
+        best_s = f"{state['prev_best']:.2f}" if state['prev_best'] < 1e9 else '----'
+        prog = (f"       [{bar}] {n}/{n_total} ({pct:.0f}%)  feas {state['n_feas']}/{n} "
+                f"({feas_pct:.0f}%)  elapsed {_fmt_dur(elapsed)} ETA {_fmt_dur(eta)} "
+                f"pace {med:.1f}s best {best_s}")
+        tally_s = _fmt_tally(state['tally'], 5)
+
+        print(line0, flush=True)
+        print("       " + v0, flush=True)
+        print("       " + v1, flush=True)
+        print("       " + v2, flush=True)
+        print("       " + v3, flush=True)
+        if outs:
+            print(outs, flush=True)
+        print(prog, flush=True)
+        if tally_s:
+            print(f"       top fails: {tally_s}", flush=True)
+        print('', flush=True)
+
+    return cb
+
+
+# ===========================================================================
+# レポート / 保存
+# ===========================================================================
+
+def _save_trials_csv(study: optuna.Study, path: str) -> None:
+    param_keys: list = []
+    attr_keys: list = []
+    for t in study.trials:
+        for k in t.params:
+            if k not in param_keys:
+                param_keys.append(k)
+        for k in t.user_attrs:
+            if k not in attr_keys:
+                attr_keys.append(k)
+    header = ['number', 'value', 'state'] + param_keys + [f'attr.{k}' for k in attr_keys]
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for t in study.trials:
+            row = [t.number, (t.value if t.value is not None else ''), t.state.name]
+            row += [t.params.get(k, '') for k in param_keys]
+            row += [t.user_attrs.get(k, '') for k in attr_keys]
+            w.writerow(row)
+
+
+def _save_best_reports(study: optuna.Study, out_dir: str, top_n: int) -> list:
+    """上位 top_n 候補を再評価して exp3 形式の詳細レポート (CAPEX/OPEX/spec/HI 内訳) を保存。
+
+    sub1(旧main) の display_best_full / top-k レポート相当。feasible 優先、無ければ TAC 最小。
+    レポートは out_dir 直下に top{rank}_trial{N}.txt として書き出す。
+    """
+    comp = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+            and t.value is not None]
+    feas = [t for t in comp if t.user_attrs.get('is_feasible', False)]
+    # 設計判断: display_full_results は economics 前提なので feasible のみ対象。
+    # feasible が無ければスキップ (penalty result でのクラッシュ回避)。
+    if not feas:
+        print("  feasible trial が無いため詳細レポートはスキップ (CSV/JSON は保存済み)", flush=True)
+        return []
+    cand = sorted(feas, key=lambda t: t.value)[:top_n]
+    eval_kwargs = dict(apply_hi=APPLY_HI, apply_stage2=APPLY_STAGE2, hi_dT_min_K=HI_DT_MIN_K)
+    saved = []
+    for rank, t in enumerate(cand, 1):
+        try:
+            design = _build_design(t.params)
+            F_fresh = float(t.params.get('F_C3H8_fresh_kmol_h'))
+            res = evaluate(design, _CONFIG, verbose=False,
+                           apply_hi=APPLY_HI, hi_dT_min_K=HI_DT_MIN_K,
+                           apply_stage2=APPLY_STAGE2, F_C3H8_override=F_fresh)
+            # 設計判断 (2026-05-26): レポート本文を一度 StringIO に組み立て、ファイル保存と
+            # コンソール出力で共用する。top1 は sub1(旧main) (pipeline._display_best_full) と同様に
+            # コンソールにも全文を出す (ファイルだけだと分析しづらいという指摘に対応)。
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                print(f"# main.py top{rank}  trial #{t.number}  "
+                      f"effective_TAC(BO)={t.value:.2f} 億円/年  "
+                      f"feasible={t.user_attrs.get('is_feasible')}")
+                print("#" + "=" * 70)
+                show_input_snapshot(design, _CONFIG, eval_kwargs)
+                display_full_results(res, design, _CONFIG)
+            report_text = buf.getvalue()
+            path = os.path.join(out_dir, f"top{rank}_trial{t.number}.txt")
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(report_text)
+            saved.append(path)
+            if rank == 1:
+                # top1 のみコンソールにも全文出力 (sub1=旧main の最終詳細レポート相当)。
+                print("\n" + "=" * 72, flush=True)
+                print(f"  ★ ベスト候補 詳細レポート (top1 / trial #{t.number}) ─ コンソール表示",
+                      flush=True)
+                print("=" * 72, flush=True)
+                print(report_text, flush=True)
+            print(f"  top{rank} 詳細レポート(CAPEX/OPEX/spec内訳): {path}", flush=True)
+        except Exception as e:
+            print(f"  top{rank} レポート生成失敗 (trial #{t.number}): {type(e).__name__}: {e}", flush=True)
+    return saved
+
+
+def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_reports: list) -> None:
+    """run subdir に README.md を出力 (結果の見方ガイド、sub1=旧main の _write_readme 相当)。"""
+    complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    feasible = [t for t in complete if t.user_attrs.get('is_feasible', False)]
+    top1_name = os.path.basename(saved_reports[0]) if saved_reports else None
+
+    L = []
+    L.append(f"# main.py (HYSYS+SM 全21変数 BO) run — {ts}")
+    L.append("")
+    L.append("Dist1/Dist3 = SM (学習済み GPR), Dist2 = HYSYS / 反応器・PSA・膜・F_fresh も変数化。")
+    L.append("")
+    L.append("## まず見るべきファイル (推奨順)")
+    L.append("")
+    if top1_name:
+        L.append(f"1. **`{top1_name}`** ─ ★最終結果。ベスト候補の再評価詳細 "
+                 "(CAPEX/OPEX/spec/HI 内訳 + 入力スナップショット)。")
+        L.append(f"   - `top2_*` / `top3_*` は次点候補。同じ形式で比較できる。")
+    else:
+        L.append("1. **`top*_trial*.txt`** ─ ★最終結果 (今回は feasible 無しで未生成)。")
+    L.append("2. **`best.json`** ─ BO 単体ベスト trial の params + 診断値。再現・簡易確認用。")
+    L.append("3. **`trials.csv`** ─ 全 trial 履歴。Excel/pandas で散布図・統計解析。")
+    if (USE_SQLITE_STORAGE or N_WORKERS > 1):
+        L.append("4. **`optuna.db`** ─ Optuna SQLite。可視化: "
+                 "`optuna-dashboard sqlite:///optuna.db`")
+    L.append("")
+    L.append("## この run の設定")
+    L.append("")
+    L.append(f"- N_TRIALS = {N_TRIALS}, N_STARTUP(QMC) = {N_STARTUP}, N_TOPK = {N_TOPK}")
+    L.append(f"- SAMPLER = tpe, SEED = {SEED}, N_WORKERS = {N_WORKERS}")
+    L.append(f"- 探索変数数 = {len(SEARCH_SPACE)} (反応器4 + PSA3 + 膜2 + 原料1 + Dist1/2/3 各4/4/3)")
+    L.append(f"- Dist1 = SM, Dist2 = HYSYS, Dist3 = SM (spec なし)")
+    L.append(f"- purity 閾値 = 99.45 wt% (SM Dist3 の 99.5 mol%=99.497 wt% を尊重した緩和)")
+    L.append("")
+    L.append("## ベスト要約")
+    L.append("")
+    L.append(f"- 完了 trial = {len(complete)} / feasible = {len(feasible)}")
+    if best is not None:
+        tag = "feasible ✓" if best.user_attrs.get('is_feasible', False) else "infeasible ✗ (feasible 無し、TAC 最小)"
+        L.append(f"- ベスト: **trial #{best.number}** ({tag})")
+        L.append(f"- effective_TAC = **{best.value:.3f}** 億円/年")
+        try:
+            _pur  = float(best.user_attrs.get('c3h6_purity_wtfrac'))
+            _prod = float(best.user_attrs.get('production_kmol_h'))
+            _ff   = float(best.params.get('F_C3H8_fresh_kmol_h'))
+            L.append(f"- purity = {_pur*100:.2f} wt%, 生産量 = {_prod:.1f} kmol/h, "
+                     f"F_fresh = {_ff:.1f} kmol/h, 収率 = {_prod/_ff*100:.1f}%")
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    else:
+        L.append("- 完了 trial なし")
+    L.append("")
+    with open(os.path.join(out_dir, 'README.md'), 'w', encoding='utf-8') as f:
+        f.write('\n'.join(L) + '\n')
+
+
+def main():
+    ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    print(f"==== main.py: PDH HYSYS+SM 全21変数 制約付き BO ====", flush=True)
+    print(f"  N_TRIALS={N_TRIALS}, N_STARTUP(QMC)={N_STARTUP}, seed={SEED}, top-k report={N_TOPK}", flush=True)
+    print(f"  Dist1/Dist3 = SM, Dist2 = HYSYS / 上流(反応器・PSA・膜)・F_fresh も変数化", flush=True)
+    # 設計判断 (2026-05-28): sub1(旧main) 流に run ごとの subdir へ成果物を集約。
+    # outputs/main_<ts>/{trials.csv, best.json, top*.txt, optuna.db, README.md}
+    out_dir = os.path.join(OUTPUT_DIR, f'main_{ts}')
+    os.makedirs(out_dir, exist_ok=True)
+
+    sampler = make_sampler('tpe', SEED, N_STARTUP, constraints_func=constraints_func)
+    # 設計判断 (2026-05-26): 並列(N_WORKERS>1)時は worker 間で study 共有のため SQLite 必須。
+    _use_sqlite = USE_SQLITE_STORAGE or N_WORKERS > 1
+    _db_path = os.path.join(out_dir, 'optuna.db')
+    storage = f"sqlite:///{_db_path}" if _use_sqlite else None
+    study = optuna.create_study(
+        study_name=f"{STUDY_NAME}_{ts}" if _use_sqlite else STUDY_NAME,
+        sampler=sampler, direction='minimize',
+        storage=storage, load_if_exists=bool(storage),
+    )
+
+    if N_WORKERS > 1 and storage is not None:
+        # 設計判断 (2026-05-26): N worker プロセスで共有 study を分担。各 worker は自前の
+        # HYSYS を起動 (重い)。完了後は study.trials(DB) を読んでサマリ/レポートを生成する。
+        print(f"  並列実行: {N_WORKERS} worker (各々 HYSYS 起動)。worker ログ: outputs/_worker*.log", flush=True)
+        from optimization.parallel import spawn_workers
+        spawn_workers(
+            kind='main', study_name=study.study_name, storage_url=storage,
+            db_path=_db_path, n_workers=N_WORKERS, n_trials_total=N_TRIALS,
+            n_startup=N_STARTUP, base_seed=SEED, out_dir=out_dir,
+        )
+    else:
+        run_optimization(
+            study, objective, n_trials=N_TRIALS,
+            show_progress_bar=False, n_jobs=N_JOBS,
+            callbacks=[_make_main_callback(N_TRIALS)],
+        )
+
+    # ---- 結果サマリ ----
+    complete = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    feasible = [t for t in complete if t.user_attrs.get('is_feasible', False)]
+    print("\n==== 結果 ====", flush=True)
+    print(f"  完了 trial: {len(complete)} / feasible: {len(feasible)}", flush=True)
+    best = None
+    if feasible:
+        best = min(feasible, key=lambda t: t.value); tag = "feasible best"
+    elif complete:
+        best = min(complete, key=lambda t: t.value); tag = "best (feasible 無し)"
+    if best is not None:
+        print(f"  {tag}: trial #{best.number}  effective_TAC={best.value:.2f} 億円/年", flush=True)
+        # 設計判断 (2026-05-26): 生 params の羅列 (float 21 行) は撤去。見やすい入力
+        # スナップショットは下の top1 詳細レポート (show_input_snapshot) に出力され、
+        # 再現用の生 params は best JSON に保存される。ここでは要点 1 行のみ。
+        try:
+            _pur  = float(best.user_attrs.get('c3h6_purity_wtfrac'))
+            _prod = float(best.user_attrs.get('production_kmol_h'))
+            _ff   = float(best.params.get('F_C3H8_fresh_kmol_h'))
+            print(f"    purity={_pur*100:.2f}wt%  prod={_prod:.1f}kmol/h  "
+                  f"F_fresh={_ff:.1f}kmol/h", flush=True)
+        except Exception:
+            pass
+
+    # ---- 保存 (run subdir に集約) ----
+    trials_csv = os.path.join(out_dir, 'trials.csv')
+    _save_trials_csv(study, trials_csv)
+    print(f"\n  trial 履歴 CSV: {trials_csv}", flush=True)
+    saved_reports: list = []
+    if best is not None:
+        with open(os.path.join(out_dir, 'best.json'), 'w', encoding='utf-8') as f:
+            json.dump({'number': best.number, 'effective_TAC': best.value,
+                       'params': best.params,
+                       'user_attrs': {k: v for k, v in best.user_attrs.items()}},
+                      f, ensure_ascii=False, indent=2, default=str)
+        print(f"  best JSON: {os.path.join(out_dir, 'best.json')}", flush=True)
+        # 上位候補の詳細レポート (CAPEX/OPEX/spec/HI 内訳)
+        print(f"\n  上位 {N_TOPK} 候補の詳細レポートを生成中...", flush=True)
+        saved_reports = _save_best_reports(study, out_dir, N_TOPK)
+
+    # ---- README (結果の見方ガイド) ----
+    _write_readme(out_dir, ts, study, best, saved_reports)
+
+    # ---- 成果物サマリ (sub1=旧main 相当) ----
+    print()
+    print("=" * 72, flush=True)
+    print(f"成果物: {os.path.abspath(out_dir)}/", flush=True)
+    print("=" * 72, flush=True)
+    print(f"  📌 README.md       … 結果の見方ガイド (最初に開いて)", flush=True)
+    if saved_reports:
+        print(f"  ★ top1_*.txt      … ベスト候補の詳細 (★最終結果はここ)", flush=True)
+    print(f"  ・ best.json       … BO ベスト trial (JSON、簡易)", flush=True)
+    print(f"  ・ trials.csv      … 全 {N_TRIALS} trial 履歴 (Excel/pandas で解析)", flush=True)
+    if (USE_SQLITE_STORAGE or N_WORKERS > 1):
+        print(f"  ・ optuna.db       … SQLite (中断・再開・dashboard 用)", flush=True)
+    print("=" * 72, flush=True)
+
+    try:
+        from units.vle.hysys.provider import shutdown_default_provider
+        shutdown_default_provider()
+    except Exception:
+        pass
+
+
+if __name__ == "__main__":
+    main()

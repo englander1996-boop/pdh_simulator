@@ -1,4 +1,4 @@
-r"""top_designs.py — main.py 並列 run の feasible 設計を「収率・Dist3段数・利益」軸で一覧。
+r"""top_designs.py — sub1(旧main)/sub2(旧final) 並列 run の feasible 設計を「収率・Dist3段数・利益」軸で一覧。
 
 BO の目的関数は effective_TAC だが、設計上注目したい 収率 / N_dist3 / 利益 を並べて
 feasible 上位を確認する。共有 SQLite を read-only 参照 (最適化に干渉しない)。

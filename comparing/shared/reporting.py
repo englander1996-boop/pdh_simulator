@@ -1,8 +1,8 @@
 r"""
-comparing.shared.reporting — special.py の I/O 機構の忠実移植。
+comparing.shared.reporting — main.py (旧 special.py) の I/O 機構の忠実移植。
 
-special.py 内のモジュール関数 (_make_special_callback / _save_trials_csv /
-_save_best_reports / _write_readme) を、special.py→main.py 改名に巻き込まれないよう
+main.py (旧 special.py) 内のモジュール関数 (_make_main_callback / _save_trials_csv /
+_save_best_reports / _write_readme) を、ファイル改名 (2026-05-29: 旧 special.py→main.py) に巻き込まれないよう
 ここへ忠実に移植する。ライブログの体裁・CSV 列・top-N 詳細レポート・README ガイドの
 出力形式は special と同一に保ち、エラー調査・分析のしやすさを引き継ぐ。
 

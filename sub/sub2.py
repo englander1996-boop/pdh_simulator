@@ -1,24 +1,28 @@
 r"""
-final.py — (SM, rigorous, SM) バックエンドでの PDH 全変数 制約付き BO (マルチコア並列)
+sub/sub2.py (旧 final.py) — (SM, rigorous, SM) バックエンドでの PDH 全変数 制約付き BO (マルチコア並列)
 
-special.py (sm, hysys, sm) のフォーク。**Dist2 を HYSYS → rigorous に置換**することで
+【2026-05-29 退避】旧 final.py を sub/sub2.py へ移動。現行 BO の本丸は ../main.py (旧 special, HYSYS+SM)。
+本ファイルは並列対応アーカイブ (parallel kind='sub2')。exp4 / exp_tin_sweep / exp_dist2_pressure /
+exp_recost_359 は本ファイル(sub2)を import して感度解析に使う。
+
+main.py(旧 special.py; sm, hysys, sm) のフォーク。**Dist2 を HYSYS → rigorous に置換**することで
 全塔が pure Python になり、HYSYS の単一 COM 制約から解放されて **マルチプロセス並列**
 (N_WORKERS>1) が可能になる。Dist1/Dist3 は学習済み SM(GPR)、Dist2 は in-house rigorous
-(Wang-Henke)。Stage2(HEN 合成)を **全 trial で実行**(special と同じ apply_stage2=True)
+(Wang-Henke)。Stage2(HEN 合成)を **全 trial で実行**(main(旧special) と同じ apply_stage2=True)
 するので、BO の目的関数が「本物のプラント TAC」= top-k 再評価とほぼ一致する。
-  
+
 なぜこの構成 (2026-05-27, ユーザー決定):
-  - special(sm,hysys,sm): 精度◎だが HYSYS COM で並列不可・遅い。
-  - main(fug,rig,fug→top-k rig): 並列可だが BO ループの Dist1/Dist3 が fug(低精度)、
+  - main(旧special; sm,hysys,sm): 精度◎だが HYSYS COM で並列不可・遅い。
+  - sub1(旧main; fug,rig,fug→top-k rig): 並列可だが BO ループの Dist1/Dist3 が fug(低精度)、
     Stage2 は top-k のみ。BO↔再評価に乖離。
-  - final(sm,rig,sm)+Stage2 全 trial: SM が Dist1/Dist3 を HYSYS 精度・fug 速度で置換、
+  - 本ファイル sub2(旧final; sm,rig,sm)+Stage2 全 trial: SM が Dist1/Dist3 を HYSYS 精度・fug 速度で置換、
     Dist2 は精度保護のため rigorous 据え置き、全部 pure Python ゆえ 6 worker 並列可。
-    → special の精度構造 × main の並列性 × Stage2 を毎回。
+    → main(旧special) の精度構造 × sub1(旧main) の並列性 × Stage2 を毎回。
 
 Dist1 SM レンジ事情 (2026-05-27):
-  SM column1 は N=30-60 で学習。main の Dist1 (N=20-30) はレンジ非適合だったが、
-  本ファイルは special 同様 col1_n_stages=(30,60) を採用し SM 学習域に合わせる。
-  「main の Dist1 が上限 30 に張り付く(fug 精度も微妙)」観測への対処でもある。
+  SM column1 は N=30-60 で学習。sub1(旧main) の Dist1 (N=20-30) はレンジ非適合だったが、
+  本ファイルは main(旧special) 同様 col1_n_stages=(30,60) を採用し SM 学習域に合わせる。
+  「sub1(旧main) の Dist1 が上限 30 に張り付く(fug 精度も微妙)」観測への対処でもある。
 
 21 変数 (special と同一、ただし Dist2 ブロックを rigorous 用に組み替え):
   反応器(4): T_in_K, z_cat_m, t_cyc_min, D_reactor_m
@@ -34,7 +38,7 @@ Dist1 SM レンジ事情 (2026-05-27):
   optuna.db / _worker{0..N}.log(並列時の worker 別ライブログ)
   進捗の俯瞰は別ターミナルで:  python tools\monitor_main.py   /   tools\top_designs.py
 
-使い方:  .\.venv\Scripts\python.exe final.py > outputs\final_run.log 2>&1
+使い方:  .\.venv\Scripts\python.exe sub\sub2.py > outputs\sub2_run.log 2>&1
 """
 
 import os
@@ -58,7 +62,8 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# sub/ へ退避済み。repo root は 1 階層上 (旧 final.py は repo 直下だった)。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import optuna
 
@@ -459,7 +464,7 @@ def main():
               f"worker ログ: {out_dir}/_worker*.log", flush=True)
         from optimization.parallel import spawn_workers
         spawn_workers(
-            kind='final', study_name=study_name, storage_url=storage,
+            kind='sub2', study_name=study_name, storage_url=storage,
             db_path=_db_path, n_workers=N_WORKERS, n_trials_total=N_TRIALS,
             n_startup=N_STARTUP, base_seed=SEED, out_dir=out_dir,
         )

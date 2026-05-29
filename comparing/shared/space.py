@@ -1,11 +1,11 @@
 r"""
 comparing.shared.space — 21 設計変数の探索空間と design 構築。
 
-special.py (= 最適化の本丸) の SEARCH_SPACE / _build_design を **移植** したもの。
-import で special.py に依存させない (special.py→main.py 改名・削除予定に巻き込まれないため)。
+main.py (= 最適化の本丸、旧 special.py) の SEARCH_SPACE / _build_design を **移植** したもの。
+import で main.py に依存させない (ファイル改名に巻き込まれないため。2026-05-29: 旧 special.py→main.py 改名済)。
 BO も素朴手法も「同じ変数集合・同じ design 構築」を使うことで、手法だけの差を切り出す。
 
-NOTE: special.py を更新したらここも手で同期する (単一の真実をここに置く方針)。
+NOTE: main.py (旧 special.py) を更新したらここも手で同期する (単一の真実をここに置く方針)。
 """
 
 from typing import Optional

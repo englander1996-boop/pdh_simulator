@@ -2,7 +2,7 @@ r"""
 comparing.shared.harness — 素朴手法を「enqueue 駆動の Optuna study」として走らせる共通エンジン。
 
 問題のあるやり方 (逐次1次元・グリッド・部分最適化・後置ピンチ) は「探索点をどう生成して
-enqueue するか」で表現する。実行・記録は special.py と同じ Optuna 経路に乗せることで、
+enqueue するか」で表現する。実行・記録は main.py (旧 special.py) と同じ Optuna 経路に乗せることで、
 ライブログ・trials.csv・top-N 詳細レポート・README を忠実に流用する。
 
 学習はしない (BO ではない) ので sampler は RandomSampler。各手法は **全 21 変数を enqueue** する

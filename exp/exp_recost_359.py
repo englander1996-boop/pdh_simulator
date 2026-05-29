@@ -9,7 +9,9 @@ cost_parameters.py を変更した後、best #359 (固定設計) を再評価し
 使い方:  .\.venv\Scripts\python.exe -u exp\exp_recost_359.py
 """
 import os, sys, json, time, datetime
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _REPO)
+sys.path.insert(0, os.path.join(_REPO, 'sub'))   # 旧 final.py → sub/sub2.py へ移動
 try: sys.stdout.reconfigure(encoding='utf-8')
 except Exception: pass
 def log(m): print(f"[{datetime.datetime.now():%H:%M:%S}] {m}", flush=True)
@@ -20,8 +22,8 @@ log(f"steam LP/MP/HP = {cp.LP_STEAM_JPY_PER_GJ}/{cp.MP_STEAM_JPY_PER_GJ}/{cp.HP_
     f"(日本補正={cp.JAPAN_STEAM_FUEL_CORRECTION})")
 log(f"refrig -100C = {cp.ETHYLENE_REFRIG_M100C_JPY_PER_GJ} 円/GJ,  fuel = {cp.FUEL_JPY_PER_GJ} 円/GJ")
 
-log("import final ...")
-import final
+log("import sub2 (旧 final.py) ...")
+import sub2 as final
 log("import 完了")
 
 BEST = json.load(open('outputs/final_20260527_091743/best.json', encoding='utf-8'))
