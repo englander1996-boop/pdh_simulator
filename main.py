@@ -76,7 +76,14 @@ from simulation import display_full_results, show_input_snapshot
 # ===========================================================================
 N_TRIALS    = 300            # sub1(旧main.py) 準拠。全21変数なので 300 推奨 (~1-1.5h 目安)
 N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (以降 TPE)
-SEED        = 42
+# 設計判断 (2026-05-29): SEED/SAMPLER を env で上書き可能にする(既定は従来どおり tpe/42)。
+#   単体起動 (`python main.py`) は env 未設定なので挙動完全不変。
+#   seed散らし/対照群バッチ (verification/run_seed_robustness.py) だけが run ごとに
+#   PDH_SEED(ランダムシード)・PDH_SAMPLER('tpe' or 'random') を設定して切り替える。
+#   狙い: 「どの初期引きでも同じ解に収束するか(再現性)」と「BO が学習なし random 探索を
+#   安定して上回るか(BO の正当性)」を検証する。
+SEED        = int(os.environ.get('PDH_SEED', '42'))
+SAMPLER     = os.environ.get('PDH_SAMPLER', 'tpe')   # 'tpe'(既定) | 'random'(学習なし対照群)
 N_JOBS      = 1              # HYSYS COM + penalty_scale global のため 1 (スレッド並列は不可)
 # 設計判断 (2026-05-26): マルチプロセス並列 worker 数。>1 で N プロセスが共有 SQLite study を
 # 分担し、各 worker が自前の HYSYS インスタンスを起動する (重い: 各 ~数百MB + 起動 ~1分。
@@ -458,7 +465,7 @@ def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_report
     L.append("## この run の設定")
     L.append("")
     L.append(f"- N_TRIALS = {N_TRIALS}, N_STARTUP(QMC) = {N_STARTUP}, N_TOPK = {N_TOPK}")
-    L.append(f"- SAMPLER = tpe, SEED = {SEED}, N_WORKERS = {N_WORKERS}")
+    L.append(f"- SAMPLER = {SAMPLER}, SEED = {SEED}, N_WORKERS = {N_WORKERS}")
     L.append(f"- 探索変数数 = {len(SEARCH_SPACE)} (反応器4 + PSA3 + 膜2 + 原料1 + Dist1/2/3 各4/4/3)")
     L.append(f"- Dist1 = SM, Dist2 = HYSYS, Dist3 = SM (spec なし)")
     L.append(f"- purity 閾値 = 99.45 wt% (SM Dist3 の 99.5 mol%=99.497 wt% を尊重した緩和)")
@@ -488,14 +495,14 @@ def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_report
 def main():
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     print(f"==== main.py: PDH HYSYS+SM 全21変数 制約付き BO ====", flush=True)
-    print(f"  N_TRIALS={N_TRIALS}, N_STARTUP(QMC)={N_STARTUP}, seed={SEED}, top-k report={N_TOPK}", flush=True)
+    print(f"  N_TRIALS={N_TRIALS}, N_STARTUP(QMC)={N_STARTUP}, sampler={SAMPLER}, seed={SEED}, top-k report={N_TOPK}", flush=True)
     print(f"  Dist1/Dist3 = SM, Dist2 = HYSYS / 上流(反応器・PSA・膜)・F_fresh も変数化", flush=True)
     # 設計判断 (2026-05-28): sub1(旧main) 流に run ごとの subdir へ成果物を集約。
     # outputs/main_<ts>/{trials.csv, best.json, top*.txt, optuna.db, README.md}
     out_dir = os.path.join(OUTPUT_DIR, f'main_{ts}')
     os.makedirs(out_dir, exist_ok=True)
 
-    sampler = make_sampler('tpe', SEED, N_STARTUP, constraints_func=constraints_func)
+    sampler = make_sampler(SAMPLER, SEED, N_STARTUP, constraints_func=constraints_func)
     # 設計判断 (2026-05-26): 並列(N_WORKERS>1)時は worker 間で study 共有のため SQLite 必須。
     _use_sqlite = USE_SQLITE_STORAGE or N_WORKERS > 1
     _db_path = os.path.join(out_dir, 'optuna.db')
