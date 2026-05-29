@@ -105,7 +105,15 @@ STUDY_NAME         = "pdh_hysys_sm_main"
 # ===========================================================================
 P_L_Pa       = 1.0e5         # 膜透過側圧力 (大気圧固定、sub1 旧main と同じ)
 APPLY_HI     = True
-APPLY_STAGE2 = True
+# 設計判断 (2026-05-29 ユーザー決定): Stage2(HEN greedy 合成) を外し HI(targeting) のみで評価する。
+#   (1) HI の経済的本体=OPEX 削減は Stage1 (Q_H_min/Q_C_min = MER 理論最少) が既に正確に捉える。
+#       現 greedy Stage2 は under-recover (95%許容) で OPEX をむしろ過大評価する。
+#   (2) Stage2 が追加するのは「回収網 CAPEX」= ΔTmin の energy-capital トレードオフの capital 側。
+#       本構成は ΔTmin=10K 固定で最適化しないため、その CAPEX は ~一定オフセットで BO ランキングを
+#       歪めず、省いても実害が小さい (回収 CAPEX を課す意味が出るのは ΔTmin を最適化する時のみ)。
+#   (3) 目的関数が滑らかになり TPE/GP に優しい。greedy HEN (optimization/hen_synthesis.py) は残置・実害なし。
+#   注: HI-only は回収網 CAPEX を計上しないターゲティング水準の評価。レポートにその旨を明記すること。
+APPLY_STAGE2 = False
 HI_DT_MIN_K  = 10.0
 
 

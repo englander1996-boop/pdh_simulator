@@ -111,7 +111,10 @@ F_C3H8_fresh_kmol_h = 1523.3995
 #  HI オプション (exp1 と同じ)
 # ===========================================================================
 APPLY_HI     = True
-APPLY_STAGE2 = True
+# 設計判断 (2026-05-29 ユーザー決定): Stage2(HEN greedy) を外し HI(targeting) のみで評価。
+# 理由は main.py の同コメント参照: HI(=Q_H_min/Q_C_min=MER) が OPEX 本体を正確に捉え、Stage2 が
+# 足す回収網 CAPEX は ΔTmin 固定では ~一定オフセットで実害小。exp3 を main と同基準に揃える。
+APPLY_STAGE2 = False
 HI_DT_MIN_K  = 10.0
 
 
