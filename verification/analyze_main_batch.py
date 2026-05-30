@@ -50,9 +50,13 @@ except Exception:
 
 REPO = Path(__file__).resolve().parents[1]
 
-# main.py SEARCH_SPACE の 21 変数 (best 設計の変数分布解析に使う)。
+# main.py SEARCH_SPACE の変数 (best 設計の変数分布解析に使う)。
+# 反応器は REACTOR_KIND で軸流(z_cat/D_reactor)/径方向流(D_inner/bed_thickness/H)が
+# 切り替わるため、両方のキーを列挙する (使われない側は CSV で空欄)。
 PARAM_COLS = [
-    'T_in_K', 'z_cat_m', 't_cyc_min', 'D_reactor_m',
+    'T_in_K', 't_cyc_min',
+    'z_cat_m', 'D_reactor_m',                    # 軸流
+    'D_inner_m', 'bed_thickness_m', 'H_m',       # 径方向流
     'D_psa_col_m', 'L_psa_bed_m', 'desorption_target',
     'P_H_Pa', 'A_mem_m2', 'F_C3H8_fresh_kmol_h',
     'col1_p_kpa', 'col1_n_stages', 'col1_feed_stage', 'col1_comp_frac_2',

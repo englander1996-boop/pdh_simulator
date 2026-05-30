@@ -50,8 +50,16 @@ def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
     print("=" * 72)
     print()
     sw = design.swing
-    print("[反応器 (Swing)]")
-    print(f"  T_in = {sw.T_in} K, z_cat = {sw.z_cat} m, t_cyc = {sw.t_cyc} min, D = {sw.D} m")
+    # 反応器モデルの種別で表示を分岐 (2026-05-30: 径方向流対応)。
+    # 径方向流 (RadialDesignVars) は z_cat/D を持たず D_inner/bed_thickness/H を持つ。
+    if hasattr(sw, 'bed_thickness'):
+        print("[反応器 (Radial flow 径方向流)]")
+        print(f"  T_in = {sw.T_in} K, t_cyc = {sw.t_cyc} min, "
+              f"D_inner = {sw.D_inner} m, bed_thickness = {sw.bed_thickness} m, H = {sw.H} m "
+              f"(r_i={sw.r_i:.2f}m, r_o={sw.r_o:.2f}m)")
+    else:
+        print("[反応器 (Axial swing 軸流)]")
+        print(f"  T_in = {sw.T_in} K, z_cat = {sw.z_cat} m, t_cyc = {sw.t_cyc} min, D = {sw.D} m")
     print()
     psa = design.psa
     print("[PSA]")
@@ -210,9 +218,16 @@ def show_unit_details(R: dict) -> None:
     perf = R['r_rx'].performance
     eff  = R['r_rx'].effluent
     # V_cat per vessel (= 触媒だけの体積、200 m³ 制約対象) と
-    # V_vessel per vessel (= 容器の物理体積、V_cat / (1-eps)) を両方表示
-    eps_assumed = 0.5  # FixedParams.eps と整合
-    v_cat_per_vessel = eq.V_vessel_actual * (1.0 - eps_assumed)
+    # V_vessel per vessel (= 容器の物理体積) を両方表示。
+    # 設計判断 (2026-05-30): 軸流は V_cat=V_vessel·(1-eps) だが、径方向流は
+    #   V_vessel=πr_o²H が中心捕集管 void を含むため V_cat/V_vessel≠(1-eps)。
+    #   どちらの幾何でも正しい W_cat から逆算する (W_cat=V_cat_total×N_swing×ρ_b)。
+    rho_b = 900.0  # FixedParams.rho_b と整合
+    if eq.N_swing_sets > 0 and eq.N_parallel > 0:
+        v_cat_total = eq.Catalyst_Weight_Total / (eq.N_swing_sets * rho_b)
+        v_cat_per_vessel = v_cat_total / eq.N_parallel
+    else:
+        v_cat_per_vessel = 0.0
     print(f"  [Reactor]    {eq.N_parallel}並列 × {eq.N_swing_sets} swing = "
           f"{eq.N_reactors_total} 基  "
           f"V_cat/基={v_cat_per_vessel:.0f} m³ (≤200制約)  "

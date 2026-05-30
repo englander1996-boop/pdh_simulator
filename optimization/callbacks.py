@@ -217,10 +217,18 @@ def _fmt_vars(params: dict, user_attrs: dict | None = None) -> list[str]:
     """
     g = params.get
 
-    rx = (
-        f"Reactor: T={g('T_in_K', 0):.0f}K z={g('z_cat_m', 0):.1f}m "
-        f"t={g('t_cyc_min', 0):.1f}min D={g('D_reactor_m', 0):.2f}m"
-    )
+    # 反応器: 軸流 (z_cat_m/D_reactor_m) か 径方向流 (D_inner_m/bed_thickness_m/H_m) かを
+    # params のキーで判定して表示を切替 (2026-05-30 径方向流対応)。
+    if 'z_cat_m' in params:
+        rx = (
+            f"Reactor(axial): T={g('T_in_K', 0):.0f}K z={g('z_cat_m', 0):.1f}m "
+            f"t={g('t_cyc_min', 0):.1f}min D={g('D_reactor_m', 0):.2f}m"
+        )
+    else:
+        rx = (
+            f"Reactor(radial): T={g('T_in_K', 0):.0f}K t={g('t_cyc_min', 0):.1f}min "
+            f"Di={g('D_inner_m', 0):.1f}m dr={g('bed_thickness_m', 0):.2f}m H={g('H_m', 0):.1f}m"
+        )
     psa = (
         f"PSA: D={g('D_psa_col_m', 0):.2f}m L={g('L_psa_bed_m', 0):.1f}m "
         f"des={g('desorption_target', 0):.3f}"

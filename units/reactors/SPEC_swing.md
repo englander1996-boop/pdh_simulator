@@ -433,7 +433,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 
 | # | 仮定 | 根拠・影響 |
 |---|---|---|
-| 1 | **圧力損失なし**（$P = P_{in} = \mathrm{const}$） | 各成分分圧を $P_i = (F_i/F_{total}) \times P_{in}$ で計算 |
+| 1 | ~~圧力損失なし~~ → **Ergun 式で圧損連成** (2026-05-30 Phase 1)。状態に全圧 $P$ を追加し $dP/dz = -(150\frac{(1-\varepsilon_b)^2\mu u}{\varepsilon_b^3(\phi d_p)^2} + 1.75\frac{(1-\varepsilon_b)\rho u^2}{\varepsilon_b^3 \phi d_p})$ で減衰。分圧は局所 $P$ で計算。$\varepsilon_b$=粒子間空隙率, $d_p$=粒径, $\phi$=形状係数, $u$=1基あたり空塔速度($=Q_{vol}/(A\cdot N_{parallel})$), $\rho$=理想気体組成平均密度, $\mu$=ガス粘度(!仮置き近似) | 出口 $P_{out}$ を下流に伝播。$\Delta P/P_{in}>$ `dP_over_P_max`(既定0.10) で infeasible |
 | 2 | **断熱壁**（外部熱移動なし） | $dT/dz$ に対流・輻射項なし |
 | 3 | **1次元プラグフロー**（軸方向拡散・径方向勾配なし） | PFR モデルの基本仮定 |
 | 4 | **理想気体** | 分圧が mol 分率で線形 |
@@ -474,8 +474,13 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | `V_cat_max_per_vessel` | 200.0 | m³ | 1基最大触媒量 |
 | `eps` | 0.5 | — | 空隙率 |
 | `rho_b` | 900.0 | kg/m³ | 触媒 bulk density (Cr2O3-Al2O3 / Catofin 相当)。出典: Chauruka 2021 博士論文 (University of Leeds) γ-Al2O3 担体物性表 Packed Bulk Density 800-1000 g/L の中央値 |
+| `SV_min_m_per_s` / `SV_max_m_per_s` | 0.5 / 3.0 | m/s | 空塔速度の許容範囲 (範囲外で infeasible) |
+| `d_p_m` | 0.003 | m | 触媒粒径 (!仮置き Catofin Cr2O3-Al2O3 ペレット 3mm)。Ergun 圧損に効く |
+| `eps_bed` | 0.40 | — | 粒子間空隙率 ε_b (!仮置き)。**`eps`〔床/容器比〕とは別物**。ρ_b=900 と整合(粒子真密度≈1500) |
+| `sphericity` | 0.9 | — | 形状係数 φ (!仮置き 成形ペレット。球=1.0) |
+| `dP_over_P_max` | 0.10 | — | ΔP/P_in ハード制約閾値 (超過で infeasible) |
 
-> `FixedParams` は `__post_init__` で全フィールドが正値であることを検証する。
+> `FixedParams` は `__post_init__` で全フィールドが正値であること、および `eps_bed`∈(0,1)・`sphericity`∈(0,1]・`dP_over_P_max`∈(0,1) を検証する。
 
 ### 出力
 

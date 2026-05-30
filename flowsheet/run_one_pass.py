@@ -33,6 +33,9 @@ from units.reactors.swing import (
     FeedStream as SwingFeed, FixedParams as SwingFixed,
     simulate_swing_reactor_system,
 )
+from units.reactors.radial_flow import (
+    RadialDesignVars, simulate_radial_flow_reactor_system,
+)
 from units.separators.psa.psa_system import (
     PSAFeedStream, PSAFixedParams, simulate_psa_system,
 )
@@ -279,6 +282,8 @@ _PSA_U0_MAX_MS   = 1.0
 # Reactor SV penalty 連続シグナルの基準 (swing.py の FixedParams.SV_{min,max}_m_per_s と同期)
 _REACTOR_SV_MIN_MS = 0.5
 _REACTOR_SV_MAX_MS = 3.0
+# Reactor ΔP penalty 連続シグナルの基準 (swing.py の FixedParams.dP_over_P_max と同期)
+_REACTOR_DP_OVER_P_MAX = 0.10
 # Mem penalty 連続シグナル用の安全マージン (2026-05-22)
 #   ph_le_pfeed:  P_H が feed.P_in に何倍近いか → log10 比
 #   bp_le_cold:   bp が cold_out に何 K 不足か → 対数比 (T 単位)
@@ -303,6 +308,7 @@ def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
     """
     out = {
         'reactor_sv_shortfall':    0.0,
+        'reactor_dp_shortfall':    0.0,
         'reactor_other_shortfall': 0.0,
     }
     eq = getattr(r_rx, 'equipment', None)
@@ -319,6 +325,11 @@ def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
             out['reactor_sv_shortfall'] = math.log10(max(sv / _REACTOR_SV_MAX_MS, 1.0))
         else:
             out['reactor_sv_shortfall'] = 1.0  # 想定外 (SV=0 等)
+    elif reason == 'dP_excess':
+        # 設計判断 (2026-05-30): ΔP/P_in が閾値超過した分を連続シグナル化。
+        # 超過量 (ratio - max) を返し、BO に z_cat↓ / D↑ / 粒径↑ 方向を学習させる。
+        dp = getattr(eq, 'dP_over_P_actual', 0.0) or 0.0
+        out['reactor_dp_shortfall'] = max(dp - _REACTOR_DP_OVER_P_MAX, 0.0)
     else:
         # input_invalid / sim_failure / volume_zero / capex_exception
         out['reactor_other_shortfall'] = 1.0
@@ -823,7 +834,14 @@ def run_one_pass(
         T_feed=reactor_inlet.T_in,
         P_in=reactor_inlet.P_in,
     )
-    r_rx = simulate_swing_reactor_system(design.swing, swing_feed, SwingFixed())
+    # 反応器モデルの選択 (2026-05-30): design.swing に SwingDesign(軸流) が入っていれば
+    # 軸流固定床、RadialDesignVars(径方向流) が入っていれば径方向流を実行。型でディスパッチ
+    # するため既存の軸流コンストラクタは無改修で動く。両者とも (DesignVars, FeedStream,
+    # FixedParams) → SimulationResult の同一インターフェースで、出力 dataclass も共有。
+    if isinstance(design.swing, RadialDesignVars):
+        r_rx = simulate_radial_flow_reactor_system(design.swing, swing_feed, SwingFixed())
+    else:
+        r_rx = simulate_swing_reactor_system(design.swing, swing_feed, SwingFixed())
 
     # 設計判断 (2026-05-17): reactor が penalty 返却 (例: SV 範囲外、V_cat 異常等で
     # _penalty_result()) のとき、effluent は F=0, T=0, P=0。このまま下流の cooler/

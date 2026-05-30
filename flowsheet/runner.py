@@ -128,7 +128,7 @@ _SHORTFALL_KEYS_FOR_TAC = (
     'dist1_N_shortfall', 'dist2_N_shortfall', 'dist3_N_shortfall',
     'dist1_dT_shortfall', 'dist2_dT_shortfall', 'dist3_dT_shortfall',
     'psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall',
-    'reactor_sv_shortfall', 'reactor_other_shortfall',
+    'reactor_sv_shortfall', 'reactor_dp_shortfall', 'reactor_other_shortfall',
     'mem_ph_shortfall', 'mem_bp_shortfall',
     'mem_phase_shortfall', 'mem_other_shortfall',
     'trace_bypass_psa_excess', 'trace_bypass_mem_excess',
