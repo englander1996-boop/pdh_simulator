@@ -175,7 +175,7 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         # 設計判断 (2026-05-21): Reactor SV silent penalty も同パターンで連続シグナル化。
         # swing.py の SV 範囲外チェックで penalty_reason='sv_out_of_range' を埋め、
         # run_one_pass._compute_reactor_shortfall が log10 比で reactor_sv_shortfall を生成。
-        for rx_key in ('reactor_sv_shortfall', 'reactor_other_shortfall'):
+        for rx_key in ('reactor_sv_shortfall', 'reactor_dp_shortfall', 'reactor_other_shortfall'):
             v = op.get(rx_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(rx_key, float(v))

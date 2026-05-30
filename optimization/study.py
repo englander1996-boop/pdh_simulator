@@ -128,6 +128,7 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
                                        同上、Mem 経路の非 C3 混入率)
       [21] unknown_failure           : is_feasible=False かつ全 shortfall=0 で 1.0 (silent infeas 保険)
       [22] dist2_cond_shortfall      : HYSYS Dist2 cold-top (凝縮器ΔT不成立) の塔頂温度不足 [K]×0.1 (2026-05-28 追加、col2_p↑/reflux↓ 方向シグナル)
+      [23] reactor_dp_shortfall      : Reactor Ergun 圧損 ΔP/P が閾値(0.10)超過した量 ×5 (2026-05-30 追加、z_cat↓/D↑/粒径↑ 方向シグナル)
 
     設計判断 (2026-05-20): 旧版は [proxy, feas_flag] の 2 制約のみで、ValueError
     (Dist1 FUG 全ゼロ)・Wang-Henke 失敗 (Dist2) 等の異種 infeasibility が同じ
@@ -182,6 +183,11 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     # ×20 後の典型値: 0.4-2.6 で他信号と同水準。期待: r_rx 11 件 → 5-7 件 (172800 撤退後ベース)。
     rx_sv = rx_sv_raw * 20.0                                                   # log10 ratio が小さいため強拡大
     rx_ot = trial.user_attrs.get('reactor_other_shortfall', 0.0)               # binary
+    # 設計判断 (2026-05-30): Reactor 圧損 (Ergun) ΔP/P が閾値 (0.10) 超過した分。
+    # raw は超過 fraction (例: ΔP/P=0.30 → 0.20)。×5 で 0.20 超過 = 1.0 に正規化。
+    # z_cat が大きい設計は ΔP 数 bar → P_floor 張付きで raw~0.9 → 強信号で z_cat↓ 誘導。
+    rx_dp_raw = trial.user_attrs.get('reactor_dp_shortfall', 0.0)
+    rx_dp = rx_dp_raw * 5.0
     prod_under_raw = trial.user_attrs.get('production_under_pp', 0.0)
     prod_under = prod_under_raw * 0.2                                          # 5 pp = 1.0
     prod_over_raw  = trial.user_attrs.get('production_over_pp', 0.0)
@@ -206,17 +212,18 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     # raw 値で判定 (normalize 後の値だと小さい raw 値が「silent」誤判定するため)
     raw_total = (
         proxy_raw + d1_N + d2_N + d3_N + d1_dT + d2_dT + d3_dT +
-        psa_t + psa_u + psa_f + rx_sv_raw + rx_ot +
+        psa_t + psa_u + psa_f + rx_sv_raw + rx_dp_raw + rx_ot +
         prod_under_raw + prod_over_raw +
         mem_ph + mem_bp_raw + mem_phase + mem_other +
         tb_psa_raw + tb_mem_raw + d2_cond_raw
     )
     unknown_failure = 1.0 if (not is_feasible and raw_total == 0.0) else 0.0
     # [22] dist2_cond_shortfall : HYSYS Dist2 塔頂が凝縮可能下限を下回る量 (2026-05-28 追加)
+    # [23] reactor_dp_shortfall : Reactor Ergun 圧損 ΔP/P が閾値超過した量 (2026-05-30 追加)
     return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
             psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over,
             mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem,
-            unknown_failure, d2_cond]
+            unknown_failure, d2_cond, rx_dp]
 
 
 def make_sampler(

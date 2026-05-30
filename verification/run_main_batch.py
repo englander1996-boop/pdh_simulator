@@ -1,4 +1,4 @@
-r"""run_main_batch.py — main.py(HYSYS+SM 全21変数 BO)を N 回逐次実行するバッチドライバ。
+r"""run_main_batch.py — main.py(HYSYS+SM 全変数 BO、反応器 REACTOR_KIND で軸流21/径方向流22)を N 回逐次実行するバッチドライバ。
 
 目的 (2026-05-29 ユーザー指示):
   同一シード(SEED=42)のまま main.py を 48 回回し、各 run の成果物を保存、

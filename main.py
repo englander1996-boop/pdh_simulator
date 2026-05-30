@@ -1,7 +1,8 @@
 r"""
 main.py — HYSYS + SM バックエンドでの PDH プロセス全変数最適化 (制約付き Optuna BO)
 
-exp3.py を評価関数として、**全 21 設計変数**(反応器・PSA・膜・原料 + 蒸留塔 3 つ)を
+exp3.py を評価関数として、**全設計変数**(反応器・PSA・膜・原料 + 蒸留塔 3 つ。反応器は
+REACTOR_KIND で軸流21変数/径方向流22変数を切替、既定=径方向流22)を
 Bayesian Optimization で探索する。**BO を実行する本丸ファイル**。
   (旧 main.py = FUG/rigorous 全フローシート版は sub/sub1.py、
    旧 final.py = SM/rigorous/SM 版は sub/sub2.py に退避済み。
@@ -16,8 +17,9 @@ Bayesian Optimization で探索する。**BO を実行する本丸ファイル**
     純度は SM Dist3 が 99.5 mol%=99.497 wt% 固定 → spec を 99.45 wt% に緩和(決定A)。
     塔本体 CAPEX は provider 側で FUG と同式で計算済み(N/還流が CAPEX に効く)。
 
-21 変数:
-  反応器(4): T_in_K, z_cat_m, t_cyc_min, D_reactor_m
+変数 (反応器は REACTOR_KIND で軸流/径方向流を切替。2026-05-30 圧損レビュー後 既定=radial):
+  反応器(軸流 4)    : T_in_K, z_cat_m, t_cyc_min, D_reactor_m
+  反応器(径方向流 5): T_in_K, t_cyc_min, D_inner_m, bed_thickness_m, H_m   (← 既定)
   PSA(3)   : D_psa_col_m, L_psa_bed_m, desorption_target
   膜(2)    : P_H_Pa, A_mem_m2   (P_L=1atm 固定、mem.P_dist=Dist3圧 同期)
   原料(1)  : F_C3H8_fresh_kmol_h
@@ -62,6 +64,7 @@ from config.load import load_operating_config
 from flowsheet import FlowsheetDesignVars, evaluate, FlowsheetResult
 from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
+from units.reactors.radial_flow import RadialDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 
@@ -74,7 +77,7 @@ from simulation import display_full_results, show_input_snapshot
 # ===========================================================================
 # § 1. BO 設定
 # ===========================================================================
-N_TRIALS    = 300            # sub1(旧main.py) 準拠。全21変数なので 300 推奨 (~1-1.5h 目安)
+N_TRIALS    = 300            # sub1(旧main.py) 準拠。全変数(径方向流で22)なので 300 推奨 (~1-1.5h 目安)
 N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (以降 TPE)
 # 設計判断 (2026-05-29): SEED/SAMPLER を env で上書き可能にする(既定は従来どおり tpe/42)。
 #   単体起動 (`python main.py`) は env 未設定なので挙動完全不変。
@@ -118,21 +121,41 @@ HI_DT_MIN_K  = 10.0
 
 
 # ===========================================================================
-# § 3. 探索範囲 — 全 21 変数  形式: (low, high, scale, type)
+# § 3. 探索範囲 — 反応器 REACTOR_KIND 依存 (軸流21/径方向流22)  形式: (low, high, scale, type)
 #   bounds は sub1(旧main) の forensic 調整値 ∩ SM 分類器 feasible 領域 (2026-05-25 プローブ)。
 #   SM 崖 (予測不能域) は除外、解の縁 (収束ぎりぎり) は含める。
 # ===========================================================================
+# ===========================================================================
+# 反応器モデル選択 (2026-05-30, 圧損レビュー後)
+#   'radial' = 径方向流 (薄い環状床を半径方向に通す。0.5bar 低圧でも圧損が桁で小さく、
+#              現実的な 3mm 触媒で feasible。実機 Oleflex/Catofin の設計思想)。本既定。
+#   'axial'  = 旧 軸流深床 (units/reactors/swing.py)。Ergun 圧損を入れると 0.5bar では
+#              現探索域 z_cat 15-40m が全 infeasible になる (= 比較用に残置)。
+#   詳細: monitor/reactor_pressure_drop_and_geometry.ipynb, units/reactors/SPEC_swing.md
+# ===========================================================================
+REACTOR_KIND = 'radial'   # 'radial' | 'axial'
+
+_REACTOR_SPACE = {
+    # 軸流深床 (旧、圧損で 0.5bar では成立しない。比較・回帰用)
+    'axial': {
+        "T_in_K":              (880.0,  940.0,  'linear', 'float'),
+        "z_cat_m":             (15.0,   40.0,   'linear', 'float'),
+        "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
+        "D_reactor_m":         (7.0,    10.0,   'linear', 'float'),
+    },
+    # 径方向流 (圧損レビュー後の既定)。bounds は _smoke_test_ergun / 圧損 nb の feasible 帯から。
+    'radial': {
+        "T_in_K":              (880.0,  940.0,  'linear', 'float'),
+        "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
+        "D_inner_m":           (4.0,    10.0,   'linear', 'float'),   # 中心捕集管径 (r_i=2-5m)
+        "bed_thickness_m":     (0.3,    1.5,    'linear', 'float'),   # 環状床厚 Δr (薄い=低圧損)
+        "H_m":                 (8.0,    30.0,   'linear', 'float'),   # 床高 (触媒量を稼ぐ)
+    },
+}[REACTOR_KIND]
+
 SEARCH_SPACE = {
-    # ----- 反応器 (Swing) — sub1(旧main.py) 準拠 -----
-    # 設計判断 (2026-05-26): 940→925 に下げたら feas 0/61 に激減 → 940 へ戻す。
-    # 理由: 本 main は Dist3 が固定スペック(99.5mol%/~1200製品)で、高い C3H6 throughput を
-    # 維持するには高転化=高 T_in が必須。前回 feasible は全て T_in 929-940。925 で全除外された。
-    # sub1(旧main) は自由Dist3で低Tでも1129生産できる(選択率↑で収率79%)が、本 main では低T=production不足。
-    # → 本 main の収率は固定1200 Dist3 demand により高T(~76%)で構造的に頭打ち。T_in は下げない。
-    "T_in_K":              (880.0,  940.0,  'linear', 'float'),
-    "z_cat_m":             (15.0,   40.0,   'linear', 'float'),
-    "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
-    "D_reactor_m":         (7.0,    10.0,   'linear', 'float'),
+    # ----- 反応器 (REACTOR_KIND で軸流/径方向流を切替。上の _REACTOR_SPACE 参照) -----
+    **_REACTOR_SPACE,
 
     # ----- PSA — sub1(旧main.py) 準拠 -----
     "D_psa_col_m":         (2.9,    5.0,    'linear', 'float'),
@@ -226,14 +249,22 @@ def _suggest_params(trial: optuna.trial.Trial) -> dict:
 
 
 def _build_design(p: dict) -> FlowsheetDesignVars:
-    """params dict (21 変数) から FlowsheetDesignVars を構築。trial 非依存 (best 再評価でも使用)。"""
+    """params dict (径方向流 22 / 軸流 21 変数) から FlowsheetDesignVars を構築。trial 非依存 (best 再評価でも使用)。"""
     n1 = int(p['col1_n_stages']); fs1 = int(p['col1_feed_stage'])
     n2 = int(p['col2_n_stages']); fs2 = _feed_stage_from_ratio(p['col2_feed_ratio'], n2, *_FEED_STAGE_ABS['col2'])
     n3 = int(p['col3_n_stages']); fs3 = _feed_stage_from_ratio(p['col3_feed_ratio'], n3, *_FEED_STAGE_ABS['col3'])
     p3_kpa = float(p['col3_p_kpa'])
+    # 反応器: REACTOR_KIND に応じて軸流 (SwingDesign) / 径方向流 (RadialDesignVars) を構築。
+    # run_one_pass が型でディスパッチする。
+    if REACTOR_KIND == 'radial':
+        reactor = RadialDesignVars(T_in=p['T_in_K'], t_cyc=p['t_cyc_min'],
+                                   D_inner=p['D_inner_m'], bed_thickness=p['bed_thickness_m'],
+                                   H=p['H_m'])
+    else:
+        reactor = SwingDesign(T_in=p['T_in_K'], z_cat=p['z_cat_m'],
+                              t_cyc=p['t_cyc_min'], D=p['D_reactor_m'])
     return FlowsheetDesignVars(
-        swing=SwingDesign(T_in=p['T_in_K'], z_cat=p['z_cat_m'],
-                          t_cyc=p['t_cyc_min'], D=p['D_reactor_m']),
+        swing=reactor,
         psa=PSADesignVars(D_col=p['D_psa_col_m'], L_bed=p['L_psa_bed_m'],
                           desorption_target=p['desorption_target']),
         mem=MemDesignVars(P_H=p['P_H_Pa'], P_L=P_L_Pa, A_mem=p['A_mem_m2'],
@@ -321,8 +352,13 @@ def _make_main_callback(n_total: int):
         line0 = f"[#{trial.number:03d}] {badge}  TAC={val_s}{delta_s}{reason_s}  {dur:5.1f}s"
 
         p = trial.params
-        v0 = (f"Rx: T={p.get('T_in_K',0):.0f}K z={p.get('z_cat_m',0):.1f} t={p.get('t_cyc_min',0):.1f} "
-              f"D={p.get('D_reactor_m',0):.2f} | PSA: D={p.get('D_psa_col_m',0):.2f} L={p.get('L_psa_bed_m',0):.1f} "
+        if 'z_cat_m' in p:   # 軸流
+            rx = (f"Rx(axial): T={p.get('T_in_K',0):.0f}K z={p.get('z_cat_m',0):.1f} "
+                  f"t={p.get('t_cyc_min',0):.1f} D={p.get('D_reactor_m',0):.2f}")
+        else:                # 径方向流
+            rx = (f"Rx(radial): T={p.get('T_in_K',0):.0f}K t={p.get('t_cyc_min',0):.1f} "
+                  f"Di={p.get('D_inner_m',0):.1f} dr={p.get('bed_thickness_m',0):.2f} H={p.get('H_m',0):.1f}")
+        v0 = (f"{rx} | PSA: D={p.get('D_psa_col_m',0):.2f} L={p.get('L_psa_bed_m',0):.1f} "
               f"des={p.get('desorption_target',0):.3f} | Mem: P_H={p.get('P_H_Pa',0)/1e5:.2f}bar "
               f"A={p.get('A_mem_m2',0):.2e} | F={p.get('F_C3H8_fresh_kmol_h',0):.0f}")
         v1 = (f"Dist1(SM): P={p.get('col1_p_kpa',0):.0f}kPa N={p.get('col1_n_stages',0)} "
@@ -452,7 +488,7 @@ def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_report
     top1_name = os.path.basename(saved_reports[0]) if saved_reports else None
 
     L = []
-    L.append(f"# main.py (HYSYS+SM 全21変数 BO) run — {ts}")
+    L.append(f"# main.py (HYSYS+SM 全{len(SEARCH_SPACE)}変数 BO, 反応器={REACTOR_KIND}) run — {ts}")
     L.append("")
     L.append("Dist1/Dist3 = SM (学習済み GPR), Dist2 = HYSYS / 反応器・PSA・膜・F_fresh も変数化。")
     L.append("")
@@ -474,7 +510,8 @@ def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_report
     L.append("")
     L.append(f"- N_TRIALS = {N_TRIALS}, N_STARTUP(QMC) = {N_STARTUP}, N_TOPK = {N_TOPK}")
     L.append(f"- SAMPLER = {SAMPLER}, SEED = {SEED}, N_WORKERS = {N_WORKERS}")
-    L.append(f"- 探索変数数 = {len(SEARCH_SPACE)} (反応器4 + PSA3 + 膜2 + 原料1 + Dist1/2/3 各4/4/3)")
+    L.append(f"- 探索変数数 = {len(SEARCH_SPACE)} "
+             f"(反応器[{REACTOR_KIND}]{len(_REACTOR_SPACE)} + PSA3 + 膜2 + 原料1 + Dist1/2/3 各4/4/3)")
     L.append(f"- Dist1 = SM, Dist2 = HYSYS, Dist3 = SM (spec なし)")
     L.append(f"- purity 閾値 = 99.45 wt% (SM Dist3 の 99.5 mol%=99.497 wt% を尊重した緩和)")
     L.append("")
@@ -502,7 +539,7 @@ def _write_readme(out_dir: str, ts: str, study: optuna.Study, best, saved_report
 
 def main():
     ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    print(f"==== main.py: PDH HYSYS+SM 全21変数 制約付き BO ====", flush=True)
+    print(f"==== main.py: PDH HYSYS+SM 全{len(SEARCH_SPACE)}変数 制約付き BO (反応器={REACTOR_KIND}) ====", flush=True)
     print(f"  N_TRIALS={N_TRIALS}, N_STARTUP(QMC)={N_STARTUP}, sampler={SAMPLER}, seed={SEED}, top-k report={N_TOPK}", flush=True)
     print(f"  Dist1/Dist3 = SM, Dist2 = HYSYS / 上流(反応器・PSA・膜)・F_fresh も変数化", flush=True)
     # 設計判断 (2026-05-28): sub1(旧main) 流に run ごとの subdir へ成果物を集約。
@@ -550,7 +587,7 @@ def main():
         best = min(complete, key=lambda t: t.value); tag = "best (feasible 無し)"
     if best is not None:
         print(f"  {tag}: trial #{best.number}  effective_TAC={best.value:.2f} 億円/年", flush=True)
-        # 設計判断 (2026-05-26): 生 params の羅列 (float 21 行) は撤去。見やすい入力
+        # 設計判断 (2026-05-26): 生 params の羅列 (float 20 数行) は撤去。見やすい入力
         # スナップショットは下の top1 詳細レポート (show_input_snapshot) に出力され、
         # 再現用の生 params は best JSON に保存される。ここでは要点 1 行のみ。
         try:

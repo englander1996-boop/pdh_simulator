@@ -44,6 +44,23 @@ Pt-Sn/Al2O3 (UOP Oleflex) は本来 CCR (連続触媒再生) 方式で日〜週�
   - 反応器内の温度プロファイルは断熱で T_in からどんどん下がる
   - 並列分割 (V_cat_max 制約) は計算するが、直列分割 (= 多段化) は未実装
 
+------------------------------------------------------------------------
+圧力損失 (Ergun 式) — 2026-05-30 反応器設計レビューを受け Phase 1 で実装済
+------------------------------------------------------------------------
+旧版は「圧損なし (P=P_in 一定)」と仮定していたが、0.5 bar abs の低圧・高温・
+大流量固定床ではこれが成立しない (ΔP が入口絶対圧の数十%〜数倍に達しうる) との
+指摘を受け、Ergun 式を軸方向 ODE に連成した:
+  - 状態に全圧 P を追加し dP/dz = -(粘性項 + 慣性項) で減衰させる
+  - 分圧・体積流量・空塔速度を局所 P で評価 (P-T-組成-流量の完全連成)
+  - 出口 P_out を下流 (cooler→Comp2) に伝播 → 圧損による圧縮比悪化が TAC に反映
+  - ΔP/P_in > FixedParams.dP_over_P_max (既定 10%) で infeasible 化 (ハード制約) +
+    BO 用連続シグナル reactor_dp_shortfall を生成
+所見 (実走検証): 触媒モデルで妥当な d_p=3mm では z_cat≳1m で 0.5bar が
+チョーキングし、現 main.py 探索域 (z_cat 15-40m) は全 infeasible。可行には
+大粒径 (~数十 mm) + 浅床、または径方向流/多段など反応器構成の見直しが要る。
+未実装の改修候補: 多段反応器モデル + 触媒粒径 dp の設計変数化 + 粒内拡散
+(Weisz-Prater) 事後チェック。
+
 結果として本モデルは **CAPEX/OPEX を過小評価** している可能性が高い:
   1. 反応器本体 CAPEX: 単段大型 < 多段小型 (面積効率の差)
   2. 段間ヒーター CAPEX: 計上なし
@@ -53,11 +70,15 @@ Pt-Sn/Al2O3 (UOP Oleflex) は本来 CCR (連続触媒再生) 方式で日〜週�
 レポートでは:
   - 「本研究の TAC / Profit は単段断熱 PFR 仮定下の値であり、
      実機の多段+段間 reheat 構成では追加 CAPEX/OPEX が見込まれる」旨を明記すること
-  - 改修候補: option C (多段反応器モデル + Ergun 圧損 + 触媒粒径 dp 変数化)
+  - 改修候補 (option C) の進捗: **Ergun 圧損は実装済 (下記、2026-05-30)**。
+    残: 多段反応器モデル + 触媒粒径 dp の設計変数化 + 粒内拡散 (Weisz-Prater) チェック。
+  - 圧損実装の結果、本軸流深床モデルは 0.5bar で全 infeasible と判明 → 径方向流モデル
+    (units/reactors/radial_flow.py) を別途追加した。詳細: monitor/reactor_pressure_drop_and_geometry.ipynb
 
-なお本実装には以下の制約は既に組み込み済 (2026-05-17 改修):
-  - **空塔速度 SV = 0.5〜3.0 m/s** (触媒設計慣行値、SV 範囲外で infeasible)
+なお本実装には以下の制約は既に組み込み済:
+  - **空塔速度 SV = 0.5〜3.0 m/s** (触媒設計慣行値、SV 範囲外で infeasible、2026-05-17)
   - **触媒最大量 V_cat_max = 200 m³/基** (大型固定床の物理上限、超過時並列分割)
+  - **Ergun 圧力損失** (軸方向 ODE 連成、ΔP/P>10% で infeasible、2026-05-30)
 ========================================================================
 """
 
@@ -80,6 +101,7 @@ from src.thermo import PDHThermo
 from src.kinetics import PDHKinetics
 from src.catalyst_model import calculate_activity_a
 from src.cost_calculator import calc_reactor_capex_okuyen
+from src.component_data import MW
 
 _thermo = PDHThermo()
 _kinetics = PDHKinetics()
@@ -100,6 +122,32 @@ _STOICH = np.array([
 ], dtype=float)
 
 _T_REF = 298.15  # [K] エンタルピー計算基準温度
+
+# ---------------------------------------------------------------------------
+# 圧力損失 (Ergun 式) 用の物性 / 数値ガード
+# ---------------------------------------------------------------------------
+# 設計判断 (2026-05-30): 反応器設計レビュー (圧損が 0.5 bar abs 低圧固定床で支配的に
+# なるとの指摘) を受け、Ergun 式を軸方向 ODE に連成。以下の物性は触媒モデル
+# (Cr2O3-Al2O3 / Catofin 相当、本ファイル冒頭ヘッダ参照) で「ありえそう」な代表値。
+#   - 粒径 d_p, 粒子間空隙率 ε_b, 形状係数 φ は FixedParams に持たせる (設計者調整可)。
+#   - ガス粘度 μ は下記ヘルパで温度依存近似。組成依存 (Wilke 則) は Phase 2 で精緻化。
+#   - ガス密度 ρ は理想気体 + 組成平均 MW から算出 (新規物性データ不要)。
+#
+# !仮置き: 高温 PDH 反応ガス (C3H8/C3H6/H2 主体) の代表混合粘度。
+#   反応器温度域 (600-670°C ≈ 870-940K) で H2 ~2.1e-5、C3H8 ~2.3e-5 Pa·s オーダー
+#   (化工便覧/NIST 概算) のため代表値 2.2e-5 Pa·s を基準温度 900K に置き、希ガスの
+#   T^0.7 則でスケール。Cr2O3-Al2O3 触媒固有値ではなくガス相物性なので触媒種に非依存。
+_MU_REF_PA_S = 2.2e-5    # !仮置き 代表ガス混合粘度 @ _T_MU_REF_K [Pa·s]
+_T_MU_REF_K  = 900.0     # [K] 粘度基準温度
+_R_GAS       = 8.314     # [J/(mol·K)] 理想気体定数 (SV 計算と同値で統一)
+# ODE 中の圧力下限ガード [Pa]。設計が破綻 (ΔP 過大) すると P がここに張り付き
+# dP_excess ハード制約で弾かれる。物理値ではなく発散防止の数値ガード。
+_P_FLOOR_PA  = 1.0e3     # 10 mbar
+
+
+def _gas_viscosity(T: float) -> float:
+    """反応ガス混合物の動粘度 [Pa·s]。!仮置き 温度依存近似 (μ ∝ T^0.7)。"""
+    return _MU_REF_PA_S * (max(T, 1.0) / _T_MU_REF_K) ** 0.7
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +244,29 @@ class FixedParams:
     SV_min_m_per_s:       float = 0.5
     SV_max_m_per_s:       float = 3.0
 
+    # -----------------------------------------------------------------------
+    # 圧力損失 (Ergun 式) パラメータ — 触媒モデル Cr2O3-Al2O3 (Catofin 相当) で妥当な値
+    # 設計判断 (2026-05-30): 反応器設計レビュー (0.5 bar 低圧固定床で圧損が支配的)
+    #   を受け Ergun 式を軸方向 ODE に連成。値は触媒モデルで「ありえそう」な代表値。
+    # -----------------------------------------------------------------------
+    # 触媒粒径 d_p [m]
+    #   !仮置き: Catofin 用 Cr2O3-Al2O3 触媒のペレット/球は概ね 3〜5 mm。活性確保のため
+    #   小径化し、浅い床で圧損を抑える実機慣行に従い中央域 3 mm を採用。
+    d_p_m:                float = 0.003
+    # 粒子間空隙率 ε_b [-] (= 床の voidage、FixedParams.eps〔床/容器比〕とは別物)
+    #   !仮置き: 3〜5 mm 粒の充填床で 0.37〜0.45 が典型。中央 0.40 を採用。
+    #   整合性: ρ_b (=900 kg/m³) と ε_b=0.40 から粒子真密度 ≈ 900/(1-0.40) = 1500 kg/m³ と
+    #   なり、多孔質 γ-アルミナ担持触媒ペレットとして妥当 (Cr2O3-Al2O3 と整合)。
+    eps_bed:              float = 0.40
+    # 形状係数 (sphericity) φ [-]
+    #   !仮置き: 成形アルミナペレット/グラニュールは φ≈0.9 (完全球=1.0、円柱押出≈0.87)。
+    sphericity:           float = 0.9
+    # ΔP/P_abs ハード制約閾値 [-]
+    #   設計判断 (2026-05-30, レビュー方針): 反応器圧損が入口絶対圧の 10% を超えたら
+    #   「等圧」前提が崩れ後段圧縮・転化率に悪影響 → infeasible 化 (アドバイス:
+    #   0.05 超注意 / 0.1 超で設計思想見直し に対応する上限)。
+    dP_over_P_max:        float = 0.10
+
     def __post_init__(self) -> None:
         _checks = {
             "t_regen":              self.t_regen,
@@ -204,6 +275,10 @@ class FixedParams:
             "rho_b":                self.rho_b,
             "SV_min_m_per_s":       self.SV_min_m_per_s,
             "SV_max_m_per_s":       self.SV_max_m_per_s,
+            "d_p_m":                self.d_p_m,
+            "eps_bed":              self.eps_bed,
+            "sphericity":           self.sphericity,
+            "dP_over_P_max":        self.dP_over_P_max,
         }
         for name, val in _checks.items():
             if val <= 0:
@@ -213,6 +288,18 @@ class FixedParams:
         if self.SV_min_m_per_s >= self.SV_max_m_per_s:
             raise ValueError(
                 f"FixedParams: SV_min ({self.SV_min_m_per_s}) >= SV_max ({self.SV_max_m_per_s})"
+            )
+        if not (0.0 < self.eps_bed < 1.0):
+            raise ValueError(
+                f"FixedParams: eps_bed ({self.eps_bed}) は (0, 1) でなければなりません。"
+            )
+        if not (0.0 < self.sphericity <= 1.0):
+            raise ValueError(
+                f"FixedParams: sphericity ({self.sphericity}) は (0, 1] でなければなりません。"
+            )
+        if not (0.0 < self.dP_over_P_max < 1.0):
+            raise ValueError(
+                f"FixedParams: dP_over_P_max ({self.dP_over_P_max}) は (0, 1) でなければなりません。"
             )
 
 
@@ -239,8 +326,11 @@ class EquipmentCost:
     # (main_20260521_154027 で SV 違反 trial 多発、D_reactor を上下どちらに動かすか分からない)。
     # PSA と同じパターンで penalty_reason + SV_actual を保持し、run_one_pass で
     # reactor_sv_shortfall を計算して TPE に渡す。正常完走時は penalty_reason='' のまま。
-    penalty_reason:   str   = ''     # '' | 'sv_out_of_range' | 'input_invalid' | 'sim_failure' | 'volume_zero' | 'capex_exception'
+    penalty_reason:   str   = ''     # '' | 'sv_out_of_range' | 'dP_excess' | 'input_invalid' | 'sim_failure' | 'volume_zero' | 'capex_exception'
     SV_actual:        float = 0.0    # SV 違反時の実 SV [m/s] (0 なら未計算)
+    # 圧力損失診断 (2026-05-30 追加)。正常完走時も実 ΔP/P を格納 (レポート/監視用)。
+    # dP_excess penalty 時は閾値超過した ΔP/P 比を入れて run_one_pass で連続シグナル化。
+    dP_over_P_actual: float = 0.0    # 反応器 ΔP / P_in 比 [-] (0 なら未計算)
 
 
 @dataclass
@@ -268,16 +358,19 @@ _PENALTY_CAPEX: float = 1e9  # [億円] 最適化への無効シグナル
 def _penalty_result(
     reason:    str   = '',
     SV_actual: float = 0.0,
+    dP_over_P: float = 0.0,
 ) -> SimulationResult:
     """計算不能条件のときに返すペナルティ SimulationResult。
 
     Parameters
     ----------
     reason : str
-        発火条件のラベル ('sv_out_of_range' 等)。BO 用 TPE constraints_func で
-        連続 shortfall を計算するために run_one_pass が読み取る。
+        発火条件のラベル ('sv_out_of_range' / 'dP_excess' 等)。BO 用 TPE
+        constraints_func で連続 shortfall を計算するために run_one_pass が読み取る。
     SV_actual : float
         実 SV [m/s]。sv_out_of_range 経路でのみ意味を持つ。
+    dP_over_P : float
+        実 ΔP/P_in 比 [-]。dP_excess 経路でのみ意味を持つ。
 
     設計判断 (2026-05-21): PSA と同じパターン。旧版は引数なし silent penalty で
     BO は「D_reactor を上下どちらに動かせば良いか」分からなかった。本版は
@@ -300,6 +393,7 @@ def _penalty_result(
             Reactor_CAPEX=_PENALTY_CAPEX,
             penalty_reason=reason,
             SV_actual=SV_actual,
+            dP_over_P_actual=dP_over_P,
         ),
         performance=PerformanceMetrics(
             Conversion=0.0,
@@ -324,15 +418,26 @@ def _reaction_enthalpies(T: float) -> np.ndarray:
 
 
 def _ode_axial(z: float, y: np.ndarray,
-               a: float, A_cross: float, eps: float, P_in: float
+               a: float, A_cross: float, eps: float,
+               eps_bed: float, d_p: float, sphericity: float, N_parallel: int,
                ) -> np.ndarray:
     """軸方向(z)の常微分方程式。
 
-    State y = [F_A, F_B, F_C, F_D, F_E, F_F, T]  (A=C3H8, B=C3H6, C=H2, D=C2H4, E=CH4, F=C2H6)
-    単位: F [mol/s], T [K]
+    State y = [F_A, F_B, F_C, F_D, F_E, F_F, T, P]
+        (A=C3H8, B=C3H6, C=H2, D=C2H4, E=CH4, F=C2H6)
+    単位: F [mol/s], T [K], P [Pa]
 
     a : 触媒活性度 [-]。コーキングは入口温度で一律決定されるため、
         呼び出し元（_simulate_one_time）で事前計算した値を受け取る。
+
+    圧力 P は状態量として軸方向に Ergun 式 (dP/dz) で減衰させ、分圧計算にも
+    局所 P を用いる (P-T-組成-流量の連成。2026-05-30 反応器設計レビュー反映)。
+
+    eps_bed    : 粒子間空隙率 ε_b [-] (床/容器比 eps とは別物)。
+    d_p        : 触媒粒径 [m]。
+    sphericity : 形状係数 φ [-]。
+    N_parallel : 並列基数 [-]。空塔速度 u = Q_vol / (A_cross × N_parallel) で
+                 1 基あたりの実速度を評価する (SV チェックと同定義)。
     """
     # 負のモル流量をクリップ（数値積分のアンダーシュート対策）
     # 設計判断 (2026-05-18): clip 量が 1e-3 mol/s を超える場合は警告
@@ -354,13 +459,14 @@ def _ode_axial(z: float, y: np.ndarray,
     #                Radau の step が暴走しているサイン。
     # !仮置き 文献値ではなく数値ガード (citation 不要)。
     T_local = float(np.clip(y[6], 300.0, 1500.0))
+    # 局所全圧 [Pa]。Ergun で減衰した値。発散防止に下限ガード (物理値でなく数値ガード)。
+    P_local = max(float(y[7]), _P_FLOOR_PA)
 
     F_total = float(np.sum(F))
     if F_total <= 0:
-        return np.zeros(7)
+        return np.zeros(8)
 
-    # 局所分圧 [Pa]（圧力損失なしのため P_total = P_in）
-    P_local = P_in
+    # 局所分圧 [Pa]（局所全圧 P_local に基づく。圧損で P が下がると分圧も低下）
     P = {comp: max(float(F[i]) / F_total * P_local, 0.0)
          for i, comp in enumerate(_COMPS)}
 
@@ -399,19 +505,48 @@ def _ode_axial(z: float, y: np.ndarray,
         Q_rxn = float((1.0 - eps) * A_cross * np.dot(dH, rates))  # [J/(m·s)]
         dTdz = -Q_rxn / sum_FCp                                     # [K/m]
 
-    return np.concatenate([dFdz, [dTdz]])
+    # ---- 圧力損失 (Ergun 式) ----
+    # 設計判断 (2026-05-30, 反応器設計レビュー): 0.5 bar 低圧・高温・大流量固定床では
+    #   圧損が無視できないため軸方向 ODE に連成。空塔速度 u は 1 基あたり (= 並列分割後)
+    #   の値で評価する (SV チェックと同定義 u = Q_vol / (A_cross × N_parallel))。
+    #   ガス密度 ρ は理想気体 + 組成平均 MW、粘度 μ は _gas_viscosity(T) (!仮置き 近似)。
+    if A_cross > 0 and N_parallel >= 1:
+        Q_vol = F_total * _R_GAS * T_local / P_local          # [m³/s] 全体体積流量
+        u = Q_vol / (A_cross * N_parallel)                    # [m/s] 1 基あたり空塔速度
+        # 質量流量 [kg/s] = Σ F_i[mol/s] × MW_i[g/mol] / 1000
+        mass_flow = sum(float(F[i]) * MW[comp] for i, comp in enumerate(_COMPS)) / 1000.0
+        rho = mass_flow / Q_vol if Q_vol > 0 else 0.0         # [kg/m³]
+        mu = _gas_viscosity(T_local)                          # [Pa·s]
+        phi_dp = sphericity * d_p                             # [m] 有効粒径
+        eb = eps_bed
+        visc_term = 150.0 * (1.0 - eb) ** 2 * mu * u / (eb ** 3 * phi_dp ** 2)
+        inert_term = 1.75 * (1.0 - eb) * rho * u ** 2 / (eb ** 3 * phi_dp)
+        dPdz = -(visc_term + inert_term)                      # [Pa/m] 圧損で負
+        # 数値ガード: P が床下限に達したらそれ以上下げない (P が負へ暴走するのを防ぐ)。
+        # 圧損過大な設計は下流の dP_excess ハード制約で弾かれるため物理結果に影響しない。
+        if float(y[7]) <= _P_FLOOR_PA:
+            dPdz = 0.0
+    else:
+        dPdz = 0.0
+
+    return np.concatenate([dFdz, [dTdz], [dPdz]])
 
 
 def _simulate_one_time(design: DesignVars, feed: FeedStream,
-                       fixed: FixedParams, t_min: float) -> tuple:
-    """時刻 t_min [min] における空間積分を実施し (F_out [mol/s], T_out [K]) を返す。"""
+                       fixed: FixedParams, t_min: float,
+                       N_parallel: int) -> tuple:
+    """時刻 t_min [min] における空間積分を実施。
+
+    Returns (F_out [mol/s], T_out [K], P_out [Pa])。圧力は Ergun 圧損で減衰した
+    出口値。失敗時は (None, None, None)。
+    """
     A_cross = math.pi / 4.0 * design.D ** 2  # [m²]
 
     # 触媒活性：コーキングは入口温度で一律決定。ODE 内では使用しない。
     a = calc_a(t_min, design.T_in, feed.P_in)
 
     F0 = np.array([feed.F_in.get(c, 0.0) * 1000.0 / 3600.0 for c in _COMPS])
-    y0 = np.concatenate([F0, [design.T_in]])
+    y0 = np.concatenate([F0, [design.T_in], [feed.P_in]])
 
     # 設計判断 (2026-05-08, profile 結果反映):
     # 元値 rtol=1e-5, atol=1e-8 は scipy デフォルト (1e-3, 1e-6) の 100倍厳しく、
@@ -420,7 +555,10 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
     # 緩めすぎ (1e-3) は転化率推定がノイズっぽくなるため中庸を選択。
     try:
         sol = solve_ivp(
-            fun=lambda z, y: _ode_axial(z, y, a, A_cross, fixed.eps, feed.P_in),
+            fun=lambda z, y: _ode_axial(
+                z, y, a, A_cross, fixed.eps,
+                fixed.eps_bed, fixed.d_p_m, fixed.sphericity, N_parallel,
+            ),
             t_span=(0.0, design.z_cat),
             y0=y0,
             method='Radau',
@@ -434,7 +572,7 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
             f"D={design.D:.2f}m, t={t_min:.1f}min, P_in={feed.P_in/1e5:.2f}bar)",
             RuntimeWarning, stacklevel=2,
         )
-        return None, None
+        return None, None, None
 
     if not sol.success:
         warnings.warn(
@@ -443,9 +581,9 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
             f"D={design.D:.2f}m, t={t_min:.1f}min, P_in={feed.P_in/1e5:.2f}bar)",
             RuntimeWarning, stacklevel=2,
         )
-        return None, None
+        return None, None, None
 
-    return sol.y[:6, -1], float(sol.y[6, -1])
+    return sol.y[:6, -1], float(sol.y[6, -1]), float(sol.y[7, -1])
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +615,14 @@ def simulate_swing_reactor_system(
     if sum(feed.F_in.values()) <= 0:
         return _penalty_result(reason='input_invalid')
 
+    # ---- ジオメトリ / 並列基数 (Ergun 圧損計算で必要なため時間ループ前に確定) ----
+    # 設計判断 (2026-05-30): N_parallel は触媒体積 (= ジオメトリのみ、流量非依存) で決まるので
+    #   ODE 前に算出できる。空塔速度 u = Q_vol / (A_cross × N_parallel) を ODE 内 Ergun に渡す
+    #   ため、ここで一度だけ計算して後段 (SV チェック・装置計算) でも再利用する。
+    A_cross = math.pi / 4.0 * design.D ** 2
+    V_cat_total = A_cross * design.z_cat * (1.0 - fixed.eps)
+    N_parallel = max(math.ceil(V_cat_total / fixed.V_cat_max_per_vessel), 1)
+
     # ---- 時間方向サンプリングと空間積分 ----
     if n_time_samples < 2:
         warnings.warn(
@@ -484,34 +630,58 @@ def simulate_swing_reactor_system(
             UserWarning,
             stacklevel=2,
         )
-        F_out, T_out = _simulate_one_time(design, feed, fixed, 0.0)
+        F_out, T_out, P_out = _simulate_one_time(design, feed, fixed, 0.0, N_parallel)
         if F_out is None:
             return _penalty_result(reason='sim_failure')
         F_out_avg_kmolh = {comp: float(F_out[i]) * 3600.0 / 1000.0
                            for i, comp in enumerate(_COMPS)}
         T_out_avg = T_out
+        P_out_avg = P_out
     else:
         t_samples = np.linspace(0.0, design.t_cyc, n_time_samples)
-        F_out_list, T_out_list = [], []
+        F_out_list, T_out_list, P_out_list = [], [], []
 
         for t in t_samples:
-            F_out, T_out = _simulate_one_time(design, feed, fixed, float(t))
+            F_out, T_out, P_out = _simulate_one_time(design, feed, fixed, float(t), N_parallel)
             if F_out is None:
                 return _penalty_result(reason='sim_failure')
             F_out_list.append(F_out)
             T_out_list.append(T_out)
+            P_out_list.append(P_out)
 
         F_out_arr = np.array(F_out_list)  # (n_time_samples, 6) [mol/s]
         T_out_arr = np.array(T_out_list)  # (n_time_samples,)   [K]
+        P_out_arr = np.array(P_out_list)  # (n_time_samples,)   [Pa]
 
         # 時間平均（台形則）
         _trapz = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')
         F_out_avg_mol_s = _trapz(F_out_arr, t_samples, axis=0) / design.t_cyc
         T_out_avg = float(_trapz(T_out_arr, t_samples) / design.t_cyc)
+        P_out_avg = float(_trapz(P_out_arr, t_samples) / design.t_cyc)
 
         # mol/s → kmol/h
         F_out_avg_kmolh = {comp: float(F_out_avg_mol_s[i]) * 3600.0 / 1000.0
                            for i, comp in enumerate(_COMPS)}
+
+    # ---- 圧力損失 (Ergun) ハード制約チェック ----
+    # 設計判断 (2026-05-30, 反応器設計レビュー): ΔP/P_in が閾値 (既定 10%) を超えると
+    #   「等圧」前提が崩れ、後段圧縮比悪化・転化率低下を招くため infeasible 化。
+    #   dP_over_P_actual を equipment に積み run_one_pass._compute_reactor_shortfall で
+    #   連続シグナル化 (BO が z_cat↓ / D↑ / 粒径↑ 方向を学習)。
+    dP_over_P = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
+    # [0, 1] にクランプ (1.0 = 全圧損失。床下限ガードで P_out≥下限だが Radau の
+    # わずかな行き過ぎに備える)。
+    dP_over_P = float(np.clip(dP_over_P, 0.0, 1.0))
+    if dP_over_P > fixed.dP_over_P_max:
+        warnings.warn(
+            f"swing reactor: ΔP/P_in={dP_over_P*100:.1f}% が上限 "
+            f"{fixed.dP_over_P_max*100:.0f}% 超 "
+            f"(P_in={feed.P_in/1e5:.3f}bar → P_out={P_out_avg/1e5:.3f}bar, "
+            f"z_cat={design.z_cat:.1f}m, D={design.D:.2f}m, d_p={fixed.d_p_m*1e3:.1f}mm) "
+            f"— infeasible 化",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='dP_excess', dP_over_P=dP_over_P)
 
     # ---- 予熱熱量 Q_preheat [GJ/h] ----
     q_w = 0.0
@@ -521,22 +691,18 @@ def simulate_swing_reactor_system(
     Q_preheat_GJh = q_w * 3600.0 / 1e9
 
     # ---- 装置計算 ----
-    A_cross = math.pi / 4.0 * design.D ** 2
+    # A_cross / V_cat_total / N_parallel は時間ループ前に算出済み (Ergun で必要だったため)。
 
     # 空塔速度 (superficial velocity) チェック
     # 設計判断 (2026-05-17): 触媒設計アドバイス (固定床 PFR、1〜3 m/s) に従い、
     # FixedParams.SV_{min,max}_m_per_s 範囲外なら infeasible 化。
     # SV は反応器入口 (T_in, P_in) での理想気体換算体積流量 / 断面積。
-    # 並列分割される場合 (V_cat > V_cat_max) は 1 基あたりの断面積で評価する必要が
-    # あるが、まず全体断面で評価し、N_parallel ≥ 1 とした上で SV をスケールする。
+    # 並列分割される場合 (V_cat > V_cat_max) は 1 基あたりの断面積で評価する。
     n_inlet_mol_s = sum(feed.F_in.values()) * 1000.0 / 3600.0   # kmol/h → mol/s
     if feed.P_in > 0:
         Q_vol_m3_s = n_inlet_mol_s * 8.314 * design.T_in / feed.P_in
     else:
         Q_vol_m3_s = 0.0
-    # N_parallel をここで仮計算 (後段と同じロジック)
-    V_cat_total = A_cross * design.z_cat * (1.0 - fixed.eps)
-    N_parallel = max(math.ceil(V_cat_total / fixed.V_cat_max_per_vessel), 1)
     # 並列分割される場合、1 基あたりの断面積で SV 評価
     SV_m_per_s = Q_vol_m3_s / (A_cross * N_parallel) if A_cross > 0 else 0.0
     if not (fixed.SV_min_m_per_s <= SV_m_per_s <= fixed.SV_max_m_per_s):
@@ -594,7 +760,10 @@ def simulate_swing_reactor_system(
             F_out_avg=F_out_avg_kmolh,
             T_out_avg=T_out_avg,
             Q_preheat=Q_preheat_GJh,
-            P_out=feed.P_in,
+            # 設計判断 (2026-05-30): Ergun 圧損で減衰した実出口圧を返す (旧版は P_in 固定)。
+            # run_one_pass はこの P_out を下流 cooler/Comp2 に渡すため、圧損→圧縮比悪化→
+            # 動力/CAPEX 増が自動的に TAC に伝播する。
+            P_out=P_out_avg,
         ),
         equipment=EquipmentCost(
             V_vessel_actual=V_vessel_actual,
@@ -603,6 +772,7 @@ def simulate_swing_reactor_system(
             N_reactors_total=N_reactors_total,
             Catalyst_Weight_Total=catalyst_weight_total,
             Reactor_CAPEX=reactor_capex,
+            dP_over_P_actual=dP_over_P,
         ),
         performance=PerformanceMetrics(
             Conversion=conversion,

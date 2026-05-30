@@ -18,6 +18,7 @@ from typing import Dict, Tuple, Any, Optional
 from flowsheet import FlowsheetDesignVars
 from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
+from units.reactors.radial_flow import RadialDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 
@@ -28,13 +29,15 @@ from units.separators.membrane.membrane_system import MemDesignVars
 VarSpec = Tuple[float, float, str, str]
 
 
-# 25 変数の標準キー一覧 (SEARCH_SPACE で許容されるキー)
+# SEARCH_SPACE で許容されるキー一覧 (反応器は軸流/径方向流の両キーを含む)
 # 内訳:
-#   18 (元): 反応器 4 + PSA 3 + 膜 2 + Dist1/2/3 各 3 (P/N/R)
-#    7 (新, 2026-05-14): F_fresh_C3H8 + 各塔の recovery_{LK_top, HK_bot} × 3 塔
+#   反応器: 軸流 (T_in/z_cat/t_cyc/D_reactor) または 径方向流 (T_in/t_cyc/D_inner/bed_thickness/H)
+#   PSA 3 + 膜 2 + F_fresh_C3H8 1 + Dist1/2/3 各 3 (P/N/R) + 各塔 recovery_{LK_top,HK_bot} × 3 塔
 EXPECTED_KEYS = (
-    # 反応器
-    'T_in_K', 'z_cat_m', 't_cyc_min', 'D_reactor_m',
+    # 反応器 (軸流: z_cat/D_reactor、径方向流: D_inner/bed_thickness/H。reactor_kind で切替)
+    'T_in_K', 't_cyc_min',
+    'z_cat_m', 'D_reactor_m',                        # 軸流 (swing)
+    'D_inner_m', 'bed_thickness_m', 'H_m',           # 径方向流 (radial_flow)
     # PSA
     'D_psa_col_m', 'L_psa_bed_m', 'desorption_target',
     # 膜
@@ -109,6 +112,9 @@ def _apply_dependent_lows(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # ---------------------------------------------------------------------------
 # F_fresh × D_reactor SV カップリング (2026-05-22 forensic, 施策 2b)
+# 注 (2026-05-30): これは**軸流反応器 (D_reactor_m) 専用**かつ 2026-05-23 に呼出し廃止済
+#   (下記 suggest_params 参照)。径方向流 (reactor_kind='radial') では D_reactor_m を持たず
+#   呼ばれもしないため無関係。残置のみ (将来 軸流で再有効化する場合の参照用)。
 # ---------------------------------------------------------------------------
 # 設計判断: main_20260522_214750 (n=130 stopped) で Reactor SV>3 violation が 15件
 # (= 全体 12%)、いずれも D=7.0-7.6m + F_fresh=1200-1700 の組合せで発生。
@@ -171,11 +177,15 @@ def _apply_sv_coupling(params: Dict[str, Any]) -> Dict[str, Any]:
 
 # exp1 baseline 値 (suggest 対象外のキーを補完するため)
 DEFAULT_BASELINE: Dict[str, Any] = {
-    # 反応器
+    # 反応器 (軸流)
     'T_in_K':            950.0,
     'z_cat_m':           30.0,
     't_cyc_min':         15.0,
     'D_reactor_m':       7.0,
+    # 反応器 (径方向流) — reactor_kind='radial' のとき使用
+    'D_inner_m':         5.0,
+    'bed_thickness_m':   0.8,
+    'H_m':               20.0,
     # PSA
     'D_psa_col_m':       3.0,
     'L_psa_bed_m':       20.0,
@@ -283,6 +293,7 @@ def build_design(
     params:            Dict[str, Any],
     solver_assignment: Dict[str, str],
     baseline:          Dict[str, Any] | None = None,
+    reactor_kind:      str = 'axial',
 ) -> FlowsheetDesignVars:
     """params 辞書から FlowsheetDesignVars を組み立てる。
 
@@ -296,6 +307,9 @@ def build_design(
         BO ループでは SOLVER_BO、top-k 再評価では SOLVER_TOPK を渡す想定。
     baseline : dict | None
         suggest 対象外の変数のデフォルト値。None なら DEFAULT_BASELINE を使用。
+    reactor_kind : str
+        'axial' (既定, swing 軸流固定床) | 'radial' (径方向流)。2026-05-30 追加。
+        'radial' のとき D_inner_m/bed_thickness_m/H_m から RadialDesignVars を構築する。
     """
     if baseline is None:
         baseline = DEFAULT_BASELINE
@@ -307,13 +321,24 @@ def build_design(
         v = p.get(key)
         return None if v is None else float(v)
 
-    return FlowsheetDesignVars(
-        swing=SwingDesign(
+    if reactor_kind == 'radial':
+        reactor = RadialDesignVars(
+            T_in=float(p['T_in_K']),
+            t_cyc=float(p['t_cyc_min']),
+            D_inner=float(p['D_inner_m']),
+            bed_thickness=float(p['bed_thickness_m']),
+            H=float(p['H_m']),
+        )
+    else:
+        reactor = SwingDesign(
             T_in=float(p['T_in_K']),
             z_cat=float(p['z_cat_m']),
             t_cyc=float(p['t_cyc_min']),
             D=float(p['D_reactor_m']),
-        ),
+        )
+
+    return FlowsheetDesignVars(
+        swing=reactor,
         psa=PSADesignVars(
             D_col=float(p['D_psa_col_m']),
             L_bed=float(p['L_psa_bed_m']),
