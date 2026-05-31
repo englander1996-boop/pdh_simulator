@@ -171,6 +171,10 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     psa_t = trial.user_attrs.get('psa_t_abs_shortfall', 0.0)                   # log10, 既に O(1)
     psa_u = trial.user_attrs.get('psa_u_0_shortfall', 0.0)
     psa_f = trial.user_attrs.get('psa_feed_shortfall', 0.0)                    # binary
+    # 設計判断 (2026-05-31): PSA 床 Ergun 圧損 ΔP が上限(0.3bar)超過した分 [bar]。
+    # ×5 で 0.2bar 超過 = 1.0 に正規化 (反応器 rx_dp と同方針)。D_col↑/L_bed↓ 誘導。
+    psa_dp_raw = trial.user_attrs.get('psa_dp_shortfall', 0.0)
+    psa_dp = psa_dp_raw * 5.0
     rx_sv_raw = trial.user_attrs.get('reactor_sv_shortfall', 0.0)
     # 設計判断 (2026-05-23 forensic, main_20260523_172800): 倍率 5.0 → 20.0 に拡大。
     # 根拠: 172800 run の r_rx fail trial (16件) の reactor_sv_shortfall raw 値は 0.02-0.13、
@@ -212,7 +216,7 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     # raw 値で判定 (normalize 後の値だと小さい raw 値が「silent」誤判定するため)
     raw_total = (
         proxy_raw + d1_N + d2_N + d3_N + d1_dT + d2_dT + d3_dT +
-        psa_t + psa_u + psa_f + rx_sv_raw + rx_dp_raw + rx_ot +
+        psa_t + psa_u + psa_f + psa_dp_raw + rx_sv_raw + rx_dp_raw + rx_ot +
         prod_under_raw + prod_over_raw +
         mem_ph + mem_bp_raw + mem_phase + mem_other +
         tb_psa_raw + tb_mem_raw + d2_cond_raw
@@ -220,10 +224,11 @@ def _default_constraints_func(trial: optuna.trial.FrozenTrial) -> Sequence[float
     unknown_failure = 1.0 if (not is_feasible and raw_total == 0.0) else 0.0
     # [22] dist2_cond_shortfall : HYSYS Dist2 塔頂が凝縮可能下限を下回る量 (2026-05-28 追加)
     # [23] reactor_dp_shortfall : Reactor Ergun 圧損 ΔP/P が閾値超過した量 (2026-05-30 追加)
+    # [24] psa_dp_shortfall : PSA 床 Ergun 圧損が上限超過した量 (2026-05-31 追加)
     return [proxy, feas_violation, d1_N, d2_N, d3_N, d2_dT, d1_dT, d3_dT,
             psa_t, psa_u, psa_f, rx_sv, rx_ot, prod_under, prod_over,
             mem_ph, mem_bp, mem_phase, mem_other, tb_psa, tb_mem,
-            unknown_failure, d2_cond, rx_dp]
+            unknown_failure, d2_cond, rx_dp, psa_dp]
 
 
 def make_sampler(

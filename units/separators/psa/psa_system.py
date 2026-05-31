@@ -126,6 +126,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from src.config import R
+from src.component_data import MW
 from src.eos import z_factor
 from src.thermo import PDHThermo
 from src.cost_calculator import calc_reactor_capex_okuyen
@@ -251,6 +252,13 @@ class PSAFixedParams:
     # !仮置き — 後日検証・調整すること
     use_css_approximation:         bool  = True  # CSS 簡易補正フラグ (保守的過大推算)
     desorption_time_safety_factor: float = 1.2   # 脱着時間安全係数 (KFa 不確実性対策)
+    # ---- 床圧力損失 (Ergun) — 2026-05-31 PSA設計レビュー対応 ----
+    # !仮置き — 確定値は活性炭ベンダーデータで更新。u_0 上限 (_U0_MAX=1.0m/s) は ODE 安定の
+    #   数値ガードに留め、実機の現実的な空塔速度 (~0.3-0.4m/s) は本 ΔP 制約で物理的に縛る。
+    d_p_m:        float = 0.003    # !仮置き 活性炭粒径 [m] (3mm 成形炭)
+    sphericity:   float = 0.9      # !仮置き 形状係数 [-]
+    mu_gas_pa_s:  float = 1.0e-5   # !仮置き H2 リッチガス混合粘度 [Pa·s] (25°C)
+    dP_max_bar:   float = 0.3      # !仮置き 床 ΔP 上限 [bar] (レビュー目安 0.1-0.3)。超過で infeasible 化
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +290,10 @@ class PSAEquipmentData:
     # penalty 発火時に「どの条件で死んだか」「actual 値」を保持し、run_one_pass が
     # log10(MIN/actual) 等の連続 shortfall を計算して TPE に渡せるようにする。
     # 通常完走時は penalty_reason='' のままで識別する (CAPEX_total < threshold で判定)。
-    penalty_reason:    str   = ''     # '' | 't_abs_below_min' | 'u_0_above_max' | 'no_non_C3_feed' | 'no_CH4_feed' | 'breakthrough_no_converge' | 'mask_lt_2'
+    penalty_reason:    str   = ''     # '' | 't_abs_below_min' | 'u_0_above_max' | 'dp_excess' | 'no_non_C3_feed' | 'no_CH4_feed' | 'breakthrough_no_converge' | 'mask_lt_2'
     t_abs_actual_s:    float = 0.0    # penalty 発火時の CSS 補正後 t_abs [s] (0 なら未計算)
     u_0_actual:        float = 0.0    # penalty 発火時の空塔速度 [m/s] (0 なら未計算)
+    dP_bar_actual:     float = 0.0    # 床 Ergun 圧損 [bar] (正常完走時も格納、dp_excess で連続シグナル化)
 
 
 @dataclass
@@ -308,6 +317,7 @@ def _penalty_result(
     reason:         str   = '',
     t_abs_actual:   float = 0.0,
     u_0_actual:     float = 0.0,
+    dP_bar_actual:  float = 0.0,
 ) -> PSASimulationResult:
     """計算不能な条件のときに返すペナルティ結果。
 
@@ -336,6 +346,7 @@ def _penalty_result(
         penalty_reason=reason,
         t_abs_actual_s=t_abs_actual,
         u_0_actual=u_0_actual,
+        dP_bar_actual=dP_bar_actual,
     )
     return PSASimulationResult(
         product=dict(zero), offgas=dict(zero),
@@ -606,6 +617,29 @@ def simulate_psa_system(
         )
         return _penalty_result(reason='u_0_above_max', u_0_actual=u_0)
 
+    # ---- 床圧力損失 (Ergun) チェック (2026-05-31 PSA設計レビュー対応) ----
+    # 設計判断: u_0 上限 (_U0_MAX=1.0m/s) は ODE 安定の数値ガードに留め，実機の現実的な
+    #   空塔速度は床 ΔP の物理制約で縛る (高 u_0 / 長床 / 小粒径 ほど ΔP 増)。閾値超過で
+    #   infeasible 化し，run_one_pass で psa_dp_shortfall を連続シグナル化 (反応器 ΔP と同型)。
+    C_total = feed.P_in / (Z * R * fixed.T_abs)                  # [mol/m³] 全濃度
+    F_eos = {k: feed.F_in.get(k, 0.0) for k in _EOS_KEYS}
+    Ftot_eos = sum(F_eos.values())
+    MW_avg = (sum(F_eos[k] * MW[k] for k in _EOS_KEYS) / Ftot_eos) if Ftot_eos > 0 else 2.0
+    rho_gas = C_total * MW_avg / 1000.0                          # [kg/m³] ガス密度
+    phi_dp = fixed.sphericity * fixed.d_p_m
+    eb = fixed.eps
+    visc_term  = 150.0 * (1.0 - eb) ** 2 * fixed.mu_gas_pa_s * u_0 / (eb ** 3 * phi_dp ** 2)
+    inert_term = 1.75 * (1.0 - eb) * rho_gas * u_0 ** 2 / (eb ** 3 * phi_dp)
+    dP_bar = (visc_term + inert_term) * L_bed / 1.0e5            # [bar] 床全体の圧損
+    if dP_bar > fixed.dP_max_bar:
+        warnings.warn(
+            f"PSA penalty: 床ΔP={dP_bar:.3f}bar が上限 {fixed.dP_max_bar}bar 超 "
+            f"(u_0={u_0:.3f}m/s, L_bed={L_bed:.1f}m, d_p={fixed.d_p_m*1e3:.1f}mm)。"
+            f" D_col を大きく or L_bed を短く or 流量を減らす方向に探索を誘導。",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='dp_excess', u_0_actual=u_0, dP_bar_actual=dP_bar)
+
     # CH4 濃度がゼロの場合は破過検知不能
     if C_feed_ads[0] <= 0.0:
         warnings.warn(
@@ -621,13 +655,21 @@ def simulate_psa_system(
     a_lang = np.array([PSA_LANGMUIR_PARAMS[k]['a']   for k in _ADS_ORDER])  # [m³/mol]
     kfa    = np.array([PSA_KFA[k]                    for k in _ADS_ORDER])  # [1/s]
 
+    # 吸着材データ感度 (2026-05-31 PSA設計レビュー対応): q_s/a/KFa/ρ_b を env で上書き可
+    #   (既定 1.0 = 挙動不変)。Langmuir 定数・KFa・嵩密度はいずれも !仮置き でベンダーデータ未確定の
+    #   ため，exp/exp_psa_sensitivity.py で係数を振って塔数・H2 回収率・TAC の頑健性を評価する。
+    q_s    = q_s    * float(os.environ.get('PDH_PSA_QS_FACTOR',  '1.0'))
+    a_lang = a_lang * float(os.environ.get('PDH_PSA_A_FACTOR',   '1.0'))
+    kfa    = kfa    * float(os.environ.get('PDH_PSA_KFA_FACTOR', '1.0'))
+    rho_b_eff = fixed.rho_b * float(os.environ.get('PDH_PSA_RHOB_FACTOR', '1.0'))
+
     # CSS スケーリング近似の妥当性チェック
     # scaling_ratio = (ρ_b/ε) × (q*(C_feed)/C_feed): シャープフロント指標
     # この値が >> 1 (目安: ≥ 10) のとき t_abs の線形スケーリングが成立する
     if fixed.use_css_approximation and C_feed_ads[0] > 0.0:
         denom_css      = 1.0 + np.sum(a_lang * C_feed_ads)
         q_star_CH4     = q_s[0] * a_lang[0] * C_feed_ads[0] / denom_css
-        scaling_ratio  = (fixed.rho_b / fixed.eps) * (q_star_CH4 / C_feed_ads[0])
+        scaling_ratio  = (rho_b_eff / fixed.eps) * (q_star_CH4 / C_feed_ads[0])
         if scaling_ratio < 10.0:
             # 設計判断 (2026-05-18): CSS 近似の妥当性が低下した状態でも計算は続行する
             # (penalty 化は U-決のため一旦警告強化のみ)。t_abs が線形スケーリングから
@@ -649,7 +691,7 @@ def simulate_psa_system(
         C_feed=C_feed_ads,
         u_0=u_0,
         L_bed=L_bed,
-        rho_b=fixed.rho_b,
+        rho_b=rho_b_eff,
         eps=fixed.eps,
         kfa=kfa,
         q_s=q_s,
@@ -737,7 +779,7 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 6. 吸着材総重量
     # -------------------------------------------------------------------------
-    W_bed_per_col  = fixed.rho_b * V_col              # [kg/塔]
+    W_bed_per_col  = rho_b_eff * V_col                # [kg/塔]
     W_adsorbent_kg = W_bed_per_col * N_total_columns   # [kg]
 
     # -------------------------------------------------------------------------
@@ -844,6 +886,11 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 8. CAPEX
     # -------------------------------------------------------------------------
+    # 設計判断 (2026-05-31 PSA設計レビュー対応): PSA 塔体は calc_reactor_capex_okuyen を流用する
+    #   が，同関数は内部で K_SWING=1.2 を乗じる。PSA は圧力スイング操作で高速切替バルブ・均圧/
+    #   パージライン・マニホールドを要するため，この 1.2 を「PSA パッケージ係数」(バルブ・配管・
+    #   制御系の上乗せ) として再解釈し，そのまま採用する。新たな係数を別途掛けると二重計上になる
+    #   ため掛けない。実機詳細設計ではベンダーのパッケージ見積りで更新すること。
     capex_vessels = calc_reactor_capex_okuyen(
         V_col, feed.P_in, D_col, N_total_columns
     )
@@ -876,6 +923,7 @@ def simulate_psa_system(
         H2_loss_blowdown_kmolh         = H2_loss_blowdown,
         H2_loss_purge_kmolh            = H2_loss_purge,
         OPEX_adsorbent_okuyen_per_year = opex_adsorbent_per_year,
+        dP_bar_actual                  = dP_bar,
     )
 
     return PSASimulationResult(

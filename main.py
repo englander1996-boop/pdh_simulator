@@ -148,7 +148,9 @@ _REACTOR_SPACE = {
         "T_in_K":              (880.0,  940.0,  'linear', 'float'),
         "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
         "D_inner_m":           (4.0,    10.0,   'linear', 'float'),   # 中心捕集管径 (r_i=2-5m)
-        "bed_thickness_m":     (0.3,    1.5,    'linear', 'float'),   # 環状床厚 Δr (薄い=低圧損)
+        "bed_thickness_m":     (0.3,    0.8,    'linear', 'float'),   # 環状床厚 Δr (薄い=低圧損)。
+        #   2026-05-31: 上限 1.5→0.8。径方向流 run で r_rx の ~30% が ΔP/P>10% 超過 (床厚 1.4m で
+        #   ΔP 16%)。ΔP ∝ 床厚なので 0.8 以下に抑え 10% 制約内へ。触媒量は H↑/D_inner↑ で補う。
         "H_m":                 (8.0,    30.0,   'linear', 'float'),   # 床高 (触媒量を稼ぐ)
     },
 }[REACTOR_KIND]
@@ -188,7 +190,11 @@ SEARCH_SPACE = {
     # ----- Dist2 (HYSYS 脱エタン塔)。収束 envelope 狭、縁を含む (N≈45 安/N=75-80 頑健) -----
     # 設計判断 (2026-05-26): 上限 620→700。Dist2(HYSYS) 塔頂を浅冷化(高P→塔頂温度↑)して
     # 深冷コンデンサ費(エチレン-100C 17731円/GJ)を下げるレバー。P_H 下限 750kPa 未満を維持(膜 ph_le_pfeed 回避)。
-    "col2_p_kpa":          (500.0,  700.0,  'linear', 'float'),  # 膜 P_H 未満 (上限 620→700, 浅冷化)
+    # 設計判断 (2026-05-31): 上限 700→950。径方向流 run で feasible 0 の最多要因が Dist2 塔頂
+    #   cold-top (H2 希釈で -104℃ 級、エチレン-100℃ で凝縮不能)。実 300 trial で col2_p↑ が塔頂を
+    #   暖める方向 (corr(col2_p, cold-top深さ)=-0.097、700kPa 帯で最暖 -90.5℃)。HSC は 950kPa まで
+    #   実走確認済。col2_p > 膜 P_H のケースは膜前 JT let-down (run_one_pass) で P_H へ減圧して吸収する。
+    "col2_p_kpa":          (500.0,  950.0,  'linear', 'float'),  # 浅冷化のため上限開放 (let-down で P_H 超も可)
     "col2_n_stages":       (44,     80,     'linear', 'int'  ),
     "col2_feed_ratio":     (0.40,   0.60,   'linear', 'float'),
     # 設計判断 (2026-05-26): 上限 13→10.5。Dist2(HYSYS) 深冷コンデンサ(−83°C, エチレン-100C)
@@ -321,6 +327,69 @@ from optimization.callbacks import _fmt_dur, _fmt_reason_from_trial, _fmt_tally
 
 _BAR_W = 30
 
+# 設計判断 (2026-05-31): main は in-memory study で完走まで trials.csv を書かない。
+# run 中に失敗内訳を確認できないと「想定外エラー (HYSYS 空出力 COM エラー等) が大量に出ていても
+# 気づけない」問題があった (実際 cold-top と思っていた r2 失敗の大半が HysysEmptyOutput だった)。
+# → trial ごとに 1 行 JSONL を増分追記し、run 中に tools/_scan_run_log.py で即座に解析できるようにする。
+# 失敗は failure_unit より細かい「カテゴリ」に正規化して live tally + JSONL に出す (重くならないよう 1 行/trial)。
+_LIVE_JSONL = {'path': None}   # main() で run subdir のパスをセット
+
+
+def _failure_category(failure_unit: str, failure_reason: str) -> str:
+    """失敗を普遍的なカテゴリに正規化 (想定外エラーも必ずどれかに落ちる)。
+
+    failure_unit (r1/r2/.../spec_*/timeout/exception:*) と failure_reason 文字列から、
+    cold-top・HYSYS 空出力(COM)・反応器 ΔP/SV・spec 違反・例外・タイムアウト等に分類。
+    """
+    r = failure_reason or ''
+    if not failure_unit or failure_unit == 'success':
+        return 'success'
+    if 'HysysEmptyOutput' in r or 'COM エラー' in r or 'empty' in r:
+        return 'hysys_empty(COM)'
+    if 'condenser' in r and ('ΔT' in r or '不成立' in r):
+        return 'dist2_coldtop'
+    if 'reboiler' in r and '不成立' in r:
+        return 'reboiler_dT'
+    if 'dP_excess' in r or 'ΔP/P_in' in r:
+        return 'reactor_dP'
+    if 'sv_out_of_range' in r or 'SV=' in r:
+        return 'reactor_SV'
+    if 'タイムアウト' in r or failure_unit == 'timeout':
+        return 'timeout'
+    if str(failure_unit).startswith('exception'):
+        return 'exception'
+    if str(failure_unit).startswith('spec_'):
+        return failure_unit            # spec_production_under / spec_c3h6_purity 等
+    if 'Wang-Henke' in r or 'rigorous' in r:
+        return 'rigorous_fail'
+    return failure_unit                # r1 / r2 / r3 / r_rx / r_psa / r_mem の素失敗
+
+
+def _append_live_jsonl(trial, category: str, is_feas: bool, dur: float) -> None:
+    """trial 1 件を JSONL に増分追記 (run 中の mid-run 解析用、~1 行/trial で軽量)。"""
+    path = _LIVE_JSONL.get('path')
+    if not path:
+        return
+    p = trial.params
+    rec = {
+        'n': trial.number,
+        'v': (round(trial.value, 2) if trial.value is not None else None),
+        'feas': is_feas, 'cat': category,
+        'reason': (trial.user_attrs.get('failure_reason', '') or '')[:100],
+        'sec': round(dur, 1),
+        # 失敗診断に効く主要パラメータのみ (全変数は出さない=軽量)
+        'col2_p': p.get('col2_p_kpa'), 'col2_n': p.get('col2_n_stages'),
+        'col2_R': p.get('col2_reflux_ratio'), 'T_in': p.get('T_in_K'),
+        'bed_dr': p.get('bed_thickness_m'), 'F': p.get('F_C3H8_fresh_kmol_h'),
+        'A_mem': p.get('A_mem_m2'), 'P_H': p.get('P_H_Pa'),
+    }
+    try:
+        import json as _json
+        with open(path, 'a', encoding='utf-8') as f:
+            f.write(_json.dumps(rec, ensure_ascii=False, default=str) + '\n')
+    except Exception:
+        pass   # ログ失敗は本計算を止めない
+
 
 def _make_main_callback(n_total: int):
     state = {'start': None, 'prev_best': float('inf'), 'n_feas': 0,
@@ -337,9 +406,13 @@ def _make_main_callback(n_total: int):
         is_feas = bool(a.get('is_feasible', False))
         if is_feas:
             state['n_feas'] += 1
+        # 設計判断 (2026-05-31): failure_unit より細かい「カテゴリ」で集計 (HYSYS 空出力 COM エラー・
+        # cold-top・反応器 ΔP/SV 等を live tally で区別)。さらに JSONL に増分追記して mid-run 解析可に。
         fu = a.get('failure_unit', '') or ('legacy' if not is_feas else '')
-        if fu:
-            state['tally'][fu] += 1
+        category = _failure_category(fu, a.get('failure_reason', ''))
+        if not is_feas:
+            state['tally'][category] += 1
+        _append_live_jsonl(trial, category, is_feas, dur)
         val = trial.value if trial.value is not None else float('inf')
         new_best = is_feas and val < state['prev_best']
         delta = state['prev_best'] - val if new_best else None
@@ -546,6 +619,9 @@ def main():
     # outputs/main_<ts>/{trials.csv, best.json, top*.txt, optuna.db, README.md}
     out_dir = os.path.join(OUTPUT_DIR, f'main_{ts}')
     os.makedirs(out_dir, exist_ok=True)
+    # 設計判断 (2026-05-31): 増分 JSONL ログのパスをセット。trial ごとに 1 行追記され、
+    # run 中に `tools/_scan_run_log.py outputs/main_<ts>/trials_live.jsonl` で失敗内訳を即解析できる。
+    _LIVE_JSONL['path'] = os.path.join(out_dir, 'trials_live.jsonl')
 
     sampler = make_sampler(SAMPLER, SEED, N_STARTUP, constraints_func=constraints_func)
     # 設計判断 (2026-05-26): 並列(N_WORKERS>1)時は worker 間で study 共有のため SQLite 必須。

@@ -64,7 +64,7 @@ class PipelineConfig:
 
     # § 3. 評価オプション
     apply_hi:              bool  = True
-    apply_stage2_topk:     bool  = True
+    apply_stage2_topk:     bool  = False   # 2026-05-31: HEN(Stage2)不採用、HIのみ
     hi_dT_min_K:           float = 10.0
     strict_recovery_bo:    bool  = False
     strict_recovery_topk:  bool  = True

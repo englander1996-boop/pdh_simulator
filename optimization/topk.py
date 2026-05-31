@@ -56,7 +56,7 @@ def reevaluate_topk(
     config:            OperatingConfig,
     *,
     apply_hi:               bool  = True,
-    apply_stage2:           bool  = True,
+    apply_stage2:           bool  = False,   # 2026-05-31: HEN(Stage2)不採用、HIのみ
     hi_dT_min_K:            float = 10.0,
     strict_recovery_check:  bool  = True,
     recovery_tolerance:     float = 0.10,

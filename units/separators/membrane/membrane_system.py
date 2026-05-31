@@ -185,6 +185,25 @@ class MemFixedParams:
     #       運転して P_H > feed.P_in を確保する必要がある。低圧では C3H8/C3H6 の
     #       泡点が冷却水温度を下回るため液フィードは不可能。ガスフィードに切替える。
     vapor_feed:      bool  = False
+    # ---- 多段圧縮 + 段間冷却 (2026-05-31 追加) ----
+    # !仮置き — 確定値が出たら差し替えること (根拠は要メーカー/教科書確認)。
+    # 1 段あたり最大圧縮比。遠心圧縮機の実機慣行 3〜4 の上端として 4.0 を仮置き。
+    #   r_max ≥ 全圧縮比 に設定すれば段数 n=1 となり従来の単段モデルに戻せる (感度比較用)。
+    max_compression_ratio_per_stage: float = 4.0    # !仮置き [-]
+    # 段間冷却の到達温度。冷却水 (30→40°C) で届く 40°C を仮置き。
+    intercool_T_K:                   float = 313.15 # !仮置き [K] (40°C)
+    # 段間冷却器の総括伝熱係数。ガス顕熱-冷却水。化工便覧のガス-液(~0.2)と凝縮(~1.0)の
+    #   中間として 0.5 を仮置き (面積算出 A = Q/(U·LMTD) に使用)。
+    U_intercool:                     float = 0.5    # !仮置き [kW/(m²·K)]
+    # ---- 膜性能 感度係数 (2026-05-31 追加、レビュー指摘 #1 対応) ----
+    # !仮置き — 既定 1.0 = 挙動不変。膜の可塑化・界面リーク・経時劣化・混合ガス/高圧での
+    #   性能低下を「文献代表値からの低下率」として感度解析するための係数。
+    #     Q_A_eff   = Q_A_GPU × Q_A_factor   (透過度)
+    #     alpha_eff = alpha   × alpha_factor (選択性)
+    #   実測 (混合ガス・高圧・長期) が出るまでは 1.0 固定で文献代表値をそのまま使い、
+    #   exp/exp_membrane_sensitivity.py で f を振って TAC 頑健性を評価する。
+    Q_A_factor:      float = 1.0    # !仮置き [-] 透過度 劣化係数 (0<f≤1 で劣化)
+    alpha_factor:    float = 1.0    # !仮置き [-] 選択性 劣化係数 (0<f≤1 で劣化)
 
     def __post_init__(self) -> None:
         if not 0 < self.eta_comp <= 1.0:
@@ -275,6 +294,15 @@ class MemEquipmentData:
     # !仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
     CAPEX_mem:        float = float('nan')  # 膜モジュール（単価仮置き中）
     CAPEX_total:      float = float('nan')  # 合計 [億円]（CAPEX_mem が仮置きのため暫定値）
+    # ---- 段間冷却 (多段圧縮, 2026-05-31 追加) ----
+    n_stages_feed:    int   = 1             # フィード圧縮機 段数 (圧縮比小 → 通常 1)
+    n_stages_prod:    int   = 1             # 製品圧縮機 段数 (P_L→P_dist 圧縮比大 → 通常 2〜3)
+    Q_intercool_kW:   float = 0.0           # 段間冷却 総熱量 [kW] (冷却水 OPEX 用、n=1 なら 0)
+    A_intercool_m2:   float = 0.0           # 段間冷却器 総伝熱面積 [m²]
+    CAPEX_intercool:  float = 0.0           # 段間冷却器 CAPEX [億円] (n=1 なら 0)
+    # HI (ピンチ解析) 登録用の段間冷却 温度域 [K] (顕熱ガス冷却。段間冷却なしなら nan)
+    T_intercool_in_K:  float = float('nan') # 段間冷却 入口 (各段出口温度の熱量加重平均)
+    T_intercool_out_K: float = float('nan') # 段間冷却 出口 (= intercool_T_K)
     # 設計判断 (2026-05-08): ヒートインテグレーション用ストリーム温度。
     # 気化器: vapor_feed=True のとき in/out は feed.T_in 同値、Q_vap_kW=0。
     T_vap_in_K:   float = float('nan')  # 気化器入口温度 [K] (= feed.T_in)
@@ -413,6 +441,122 @@ def _lmtd(dT1: float, dT2: float) -> float:
     if abs(dT1 - dT2) < 1e-3:
         return (dT1 + dT2) / 2.0
     return (dT1 - dT2) / math.log(dT1 / dT2)
+
+
+# ---------------------------------------------------------------------------
+# 多段等エントロピー圧縮 + 段間冷却 (2026-05-31 追加)
+# ===========================================================================
+# ■ どういうことを検証した上での変更か (レポート記載用)
+#   旧版は膜のフィード/製品圧縮機をそれぞれ compress_isentropic() の "1 回呼び"
+#   = 単段で扱っていた。実フローシートの圧縮比を実値で確認すると:
+#     - フィード圧縮機: Dist2 塔底 (P_col,2 = 5〜7 bar) → P_H (7.5〜9.5 bar)
+#                       ⇒ 圧縮比 ≈ 1.1〜1.9   … 単段で機械的に妥当
+#     - 製品圧縮機:     P_L = 1 atm → P_dist = Dist3 圧 (16〜19 bar)
+#                       ⇒ 圧縮比 ≈ 16〜19      … 単段は吐出温度・機械設計の両面で非現実的
+#   遠心圧縮機の 1 段あたり圧縮比は実機で概ね 3〜4 が上限であり、製品圧縮機は本来
+#   2〜3 段 + 段間冷却が要る。単段モデルは (a) 吐出温度を非現実的に高く出し、
+#   (b) 段間冷却を省くぶん圧縮仕事 (= 電力 OPEX) を過大評価していた。
+#   → 製品圧縮機の多段化が支配的な是正項目と判断した (フィード側は圧縮比小で実害なし)。
+#
+# ■ 変更の流れ (レポート記載用)
+#   1. 全圧縮比 r_total = P_out / P_in を計算する。
+#   2. 1 段あたり最大圧縮比 r_max (!仮置き=4.0) から必要段数
+#        n = ceil( ln(r_total) / ln(r_max) ) を決める。
+#      r_total ≤ r_max なら n=1 = 従来の単段挙動と完全一致 (フィード圧縮機はこの枝)。
+#   3. 各段は等圧縮比 r_stage = r_total^(1/n) で圧縮する (既存 compress_isentropic を流用)。
+#   4. 段と段の間で冷却水により intercool_T_K (!仮置き=40°C) まで顕熱冷却し、次段入口温度を
+#      下げる。これにより総圧縮仕事 W が単段より小さくなる (= 多段+段間冷却の本来の効果)。
+#   5. 段間冷却の熱量 Q_intercool と伝熱面積 A_intercool を積算して返し、呼び出し側で
+#      「段間冷却器」の CAPEX (熱交換器) と冷却水 OPEX を必ず計上する。
+#      ⇒ 圧縮仕事だけ下げて段間冷却コストを無視する "片側だけ得する" 評価を避ける。
+#   6. 段間冷却はガス顕熱の与熱流体なので、温度域 (T_intercool_in→out) も返し、
+#      flowsheet/heat_integration.extract_streams で 'H_mem_intercool' ホットストリーム
+#      として HI (ピンチ解析) に登録する。これにより段間排熱は他流体の予熱に回収対象となり、
+#      economics の OPEX 'Mem段間冷却 冷水' は HI 適用時に tier 別費用へ差し替わる
+#      (Comp2 段間冷却 'H2_intercool' と同じ HI 統合の扱い、二重計上なし)。
+#
+# ■ 値はすべて !仮置き (max_compression_ratio_per_stage / intercool_T_K / U_intercool)。
+#   確定値が出たら MemFixedParams を差し替えること。r_max ≥ r_total にすれば n=1 となり
+#   旧来の単段モデルに戻せる (= 単段 vs 多段の感度比較が可能)。
+# ===========================================================================
+
+def _compress_multistage(
+    T_in:    float, P_in: float, P_out: float,
+    x:       list,  keys: list,
+    F_mols:  float,
+    fixed:   'MemFixedParams',
+):
+    """多段等エントロピー圧縮 + 段間冷却 (冷却水)。
+
+    Parameters
+    ----------
+    T_in, P_in : 入口温度 [K], 圧力 [Pa]
+    P_out      : 最終出口圧力 [Pa]
+    x, keys    : モル分率リストと成分キー (compress_isentropic にそのまま渡す)
+    F_mols     : 圧縮するガスの総モル流量 [mol/s] (段間冷却 Q・面積の絶対量算出用)
+    fixed      : MemFixedParams (eta_comp / max_compression_ratio_per_stage /
+                 intercool_T_K / U_intercool / T_cold_in / T_cold_out を参照)
+
+    Returns
+    -------
+    (T_out, W_total_per_mol, Q_intercool_kW, A_intercool_m2, n_stages, T_intercool_in_K)
+        T_out            : 最終段出口温度 [K]
+        W_total_per_mol  : 全段の合計圧縮仕事 [J/mol]
+        Q_intercool_kW   : 段間冷却の総熱量 [kW] (n=1 なら 0)
+        A_intercool_m2   : 段間冷却器の総伝熱面積 [m²] (n=1 なら 0)
+        n_stages         : 段数 [-]
+        T_intercool_in_K : 段間冷却の代表入口温度 [K] = 各段出口温度の熱量加重平均
+                           (HI のホットストリーム登録用、n=1 なら 0)。出口は fixed.intercool_T_K。
+    """
+    if P_out <= P_in:
+        # 圧縮不要 (理論上ここには来ない想定。安全側に単段へ委譲し段間冷却 0)。
+        T_out, W = compress_isentropic(T_in, P_in, P_out, x, keys, eta=fixed.eta_comp)
+        return T_out, W, 0.0, 0.0, 1, 0.0
+
+    ratio_total = P_out / P_in
+    r_max = max(fixed.max_compression_ratio_per_stage, 1.0 + 1e-6)
+    n = max(1, math.ceil(math.log(ratio_total) / math.log(r_max)))
+    r_stage = ratio_total ** (1.0 / n)
+
+    z_C3H6 = x[0]   # _KEYS[0] = 'B' = C3H6。_h_mol の組成引数 (段間冷却 顕熱) に使う
+    W_total    = 0.0
+    Q_inter_kW = 0.0
+    A_inter_m2 = 0.0
+    T_in_qsum  = 0.0   # Σ(段出口温度 × その段間冷却 Q) … HI 登録用の加重平均入口温度
+    T_cur, P_cur = T_in, P_in
+
+    for k in range(n):
+        # 最終段は丸め誤差を避けて P_out を直接指定する
+        P_next = P_out if k == n - 1 else P_cur * r_stage
+        T_stage_out, W_stage = compress_isentropic(
+            T_cur, P_cur, P_next, x, keys, eta=fixed.eta_comp,
+        )
+        W_total += W_stage
+        if k < n - 1:
+            # ---- 段間冷却 (冷却水): ガス顕熱 T_stage_out → intercool_T_K ----
+            T_cool = min(fixed.intercool_T_K, T_stage_out)   # 既に十分冷たければ冷却なし
+            q_per_mol = (
+                _h_mol(T_stage_out, P_next, z_C3H6, 'vapor')
+                - _h_mol(T_cool,     P_next, z_C3H6, 'vapor')
+            )
+            q_per_mol = max(q_per_mol, 0.0)
+            q_kW = F_mols * q_per_mol / 1e3
+            Q_inter_kW += q_kW
+            T_in_qsum  += T_stage_out * q_kW                 # HI 入口温度 加重平均用
+            # 段間冷却器 伝熱面積 (冷却水 30→40°C, 向流 LMTD)
+            dT1 = T_stage_out - fixed.T_cold_out             # ガス入口端
+            dT2 = T_cool      - fixed.T_cold_in              # ガス出口端
+            lmtd = _lmtd(dT1, dT2)
+            if q_kW > 1e-9 and lmtd > 0 and fixed.U_intercool > 0:
+                A_inter_m2 += q_kW / (fixed.U_intercool * lmtd)
+            T_cur = T_cool
+        else:
+            T_cur = T_stage_out
+        P_cur = P_next
+
+    # HI 登録用の代表入口温度 (= 各段出口温度の熱量加重平均)。段間冷却なしなら 0。
+    T_intercool_in_K = (T_in_qsum / Q_inter_kW) if Q_inter_kW > 1e-9 else 0.0
+    return T_cur, W_total, Q_inter_kW, A_inter_m2, n, T_intercool_in_K
 
 
 # ---------------------------------------------------------------------------
@@ -654,10 +798,13 @@ def simulate_membrane_system(
         )
         return _penalty_result(reason='pdist_le_pl')
     # ID-05: フィード圧縮機が減圧方向になる
-    if design.P_H <= feed.P_in:
+    # 設計判断 (2026-05-31, 案②): 膜前で塔底を P_H まで JT 減圧する運用 (run_one_pass) を導入した
+    # ため，feed.P_in == P_H (減圧済み) は正常。厳密に feed.P_in > P_H のときのみ penalty とする
+    # (1 Pa の許容)。feed.P_in ≈ P_H なら後段の膜供給圧縮機は圧縮比 1 = 仕事ゼロで通過する。
+    if design.P_H < feed.P_in - 1.0:
         warnings.warn(
-            f"P_H={design.P_H/1e5:.2f} bar <= P_in={feed.P_in/1e5:.2f} bar:"
-            " フィード圧縮機が減圧方向になります。",
+            f"P_H={design.P_H/1e5:.2f} bar < P_in={feed.P_in/1e5:.2f} bar:"
+            " フィード圧縮機が減圧方向になります (膜前 let-down が未適用の可能性)。",
             UserWarning, stacklevel=2,
         )
         return _penalty_result(
@@ -700,7 +847,10 @@ def simulate_membrane_system(
 
     # mol/s 換算（内部計算用）
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
-    Q_A_SI = fixed.Q_A_GPU * _GPU_SI                # [mol/(m²·s·Pa)]
+    # 膜性能 感度係数を適用 (既定 1.0 = 挙動不変)。劣化/混合ガス影響の感度解析用。
+    Q_A_eff   = fixed.Q_A_GPU * fixed.Q_A_factor
+    alpha_eff = fixed.alpha   * fixed.alpha_factor
+    Q_A_SI = Q_A_eff * _GPU_SI                       # [mol/(m²·s·Pa)]
 
     # ---- ユニット 1: 気化器（vapor_feed=True ならスキップ）----
     if fixed.vapor_feed:
@@ -721,12 +871,16 @@ def simulate_membrane_system(
         if math.isnan(Q_vap_kW) or math.isnan(A_vap):
             return _penalty_result(reason='vap_nan')
 
-    # ---- ユニット 2: フィード圧縮機 ----
+    # ---- ユニット 2: フィード圧縮機 (多段化対応, 2026-05-31) ----
+    # 圧縮比 P_H/feed.P_in は通常 1.1〜1.9 と小さいため、_compress_multistage は
+    # n=1 (= 従来の単段 compress_isentropic と完全一致、段間冷却 0) を返す。
     try:
-        T_feed_comp_out, W_feed_per_mol = compress_isentropic(
+        (T_feed_comp_out, W_feed_per_mol,
+         Q_inter_feed_kW, A_inter_feed_m2, n_stg_feed,
+         T_inter_in_feed) = _compress_multistage(
             T_vap_out, feed.P_in, design.P_H,
             [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS,
-            eta=fixed.eta_comp,
+            F_feed_mols, fixed,
         )
     except ImportError:
         raise
@@ -741,7 +895,7 @@ def simulate_membrane_system(
     F_ret_C3H6_mols, F_ret_C3H8_mols = _membrane_ode(
         F_C3H6_feed_mols, F_C3H8_feed_mols,
         design.P_H, design.P_L, design.A_mem,
-        Q_A_SI, fixed.alpha,
+        Q_A_SI, alpha_eff,
     )
     if F_ret_C3H6_mols is None:
         return _penalty_result(reason='ode_failure')
@@ -759,13 +913,17 @@ def simulate_membrane_system(
     x_ret_C3H6 = (F_ret_C3H6_mols / max(F_ret_total_mols, 1e-12))
     stage_cut = (F_perm_C3H6_mols + F_perm_C3H8_mols) / F_feed_mols
 
-    # ---- ユニット 4: 製品圧縮機 ----
-    # 膜は等温操作と仮定: 透過ガスは T_feed_comp_out, P_L で出る
+    # ---- ユニット 4: 製品圧縮機 (多段化対応, 2026-05-31) ----
+    # 膜は等温操作と仮定: 透過ガスは T_feed_comp_out, P_L で出る。
+    # 圧縮比 P_dist/P_L は P_L=1atm・P_dist=Dist3圧(16〜19bar) で ≈16〜19 と大きいため、
+    # _compress_multistage が n≈2〜3 段 + 段間冷却に分割する (単段の非現実性を是正)。
     try:
-        T_prod_comp_out, W_prod_per_mol = compress_isentropic(
+        (T_prod_comp_out, W_prod_per_mol,
+         Q_inter_prod_kW, A_inter_prod_m2, n_stg_prod,
+         T_inter_in_prod) = _compress_multistage(
             T_feed_comp_out, design.P_L, design.P_dist,
             [y_C3H6, 1.0 - y_C3H6], _KEYS,
-            eta=fixed.eta_comp,
+            F_perm_total_mols, fixed,
         )
     except ImportError:
         raise
@@ -813,20 +971,40 @@ def simulate_membrane_system(
     n_modules = math.ceil(design.A_mem / fixed.A_per_module)
 
     # ---- CAPEX 推算（Bare Module Cost 法, R08-3.pdf） ----
+    # 段間冷却 (多段圧縮) の総熱量・総面積。単段 (n=1) なら両者 0。
+    Q_intercool_total = Q_inter_feed_kW + Q_inter_prod_kW
+    A_intercool_total = A_inter_feed_m2 + A_inter_prod_m2
+    # HI 登録用の段間冷却 温度域。入口は feed/prod の熱量加重平均、出口は intercool_T_K。
+    # 段間冷却なし (Q=0) なら nan を入れて extract_streams 側でスキップさせる。
+    if Q_intercool_total > 1e-9:
+        T_intercool_in_K  = (T_inter_in_feed * Q_inter_feed_kW
+                             + T_inter_in_prod * Q_inter_prod_kW) / Q_intercool_total
+        T_intercool_out_K = fixed.intercool_T_K
+    else:
+        T_intercool_in_K  = float('nan')
+        T_intercool_out_K = float('nan')
     try:
         capex_vap       = 0.0 if fixed.vapor_feed else calc_he_capex_okuyen(A_vap)
-        capex_comp_feed = calc_comp_capex_okuyen(W_feed_kW)
-        capex_comp_prod = calc_comp_capex_okuyen(W_prod_kW)
+        # 設計判断 (2026-05-31, 案②): 膜前 let-down で塔底が既に P_H のときフィード圧縮機の
+        # 所要動力は ~0 になる。calc_comp_capex は W>0 必須なので，W≲1kW は圧縮機不要として
+        # CAPEX 0 にする (製品圧縮機も対称的にガード)。
+        capex_comp_feed = calc_comp_capex_okuyen(W_feed_kW) if W_feed_kW > 1.0 else 0.0
+        capex_comp_prod = calc_comp_capex_okuyen(W_prod_kW) if W_prod_kW > 1.0 else 0.0
         capex_cond      = calc_he_capex_okuyen(A_cond)
+        # 段間冷却器 CAPEX (多段圧縮の段間 HE)。A=0 (= 単段) なら計上しない。
+        capex_intercool = (calc_he_capex_okuyen(A_intercool_total)
+                           if A_intercool_total > 1e-9 else 0.0)
     except Exception:
         capex_vap = capex_comp_feed = capex_comp_prod = capex_cond = float('nan')
+        capex_intercool = float('nan')
     # !仮置き — MEM_UNIT_PRICE_USD_PER_M2 が根拠文献未確定のため暫定値
     #   calc_mem_capex_okuyen 呼び出し時に UserWarning が発行される
     try:
         capex_mem = calc_mem_capex_okuyen(design.A_mem)
     except Exception:
         capex_mem = float('nan')
-    _capex_sum = capex_vap + capex_comp_feed + capex_comp_prod + capex_cond + capex_mem
+    _capex_sum = (capex_vap + capex_comp_feed + capex_comp_prod + capex_cond
+                  + capex_mem + capex_intercool)
     # ID-07: 個別 CAPEX が nan（計算例外）のとき合計も nan になり最適化器がハングする
     capex_total = _capex_sum if not math.isnan(_capex_sum) else _PENALTY
 
@@ -863,6 +1041,14 @@ def simulate_membrane_system(
             CAPEX_cond     = capex_cond,
             CAPEX_mem      = capex_mem,
             CAPEX_total    = capex_total,
+            # 段間冷却 (多段圧縮, 2026-05-31)
+            n_stages_feed   = n_stg_feed,
+            n_stages_prod   = n_stg_prod,
+            Q_intercool_kW  = Q_intercool_total,
+            A_intercool_m2  = A_intercool_total,
+            CAPEX_intercool = capex_intercool,
+            T_intercool_in_K  = T_intercool_in_K,
+            T_intercool_out_K = T_intercool_out_K,
             T_vap_in_K     = feed.T_in,
             T_vap_out_K    = T_vap_out,
             T_cond_in_K    = T_prod_comp_out,
