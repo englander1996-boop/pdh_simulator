@@ -16,12 +16,14 @@ opex dict は装置別の生 (1.00 倍) 値に加え、Hasebe 集計項 (`[Haseb
 """
 
 import math
+import os
 from dataclasses import dataclass, field
 
 from src.cost_parameters import (
     ELECTRICITY_JPY_PER_KWH, LP_STEAM_JPY_PER_GJ,
     COOLING_WATER_JPY_PER_GJ, FUEL_JPY_PER_GJ, FURNACE_EFFICIENCY,
     CATALYST_JPY_PER_KG, CATALYST_LIFE_YEARS,
+    MEM_LIFETIME_YEARS,
     OPERATING_HOURS_PER_YEAR, DEPRECIATION_YEARS,
     LPG_C3H8_JPY_PER_KG, LPG_C4H10_JPY_PER_KG,
     C3H6_PRODUCT_JPY_PER_KG, H2_PRODUCT_JPY_PER_KG,
@@ -115,7 +117,9 @@ def _classify_opex_term(key: str) -> str:
     """
     if key.startswith(HASEBE_AGGR_PREFIX):
         return 'HASEBE_AGGR'
-    if '触媒' in key or '吸着剤' in key or '活性炭交換' in key:
+    # 設計判断 (2026-05-31): 膜の定期交換費 ('Mem膜交換') も触媒・吸着剤と同じ
+    #   Hasebe 式 (10) 枠外の消耗品交換費として扱う (1.23× は掛けない)。
+    if '触媒' in key or '吸着剤' in key or '活性炭交換' in key or '膜交換' in key:
         return 'CATALYST_OUT'
     if '原料費' in key or 'Fresh LPG' in key:
         return 'RM'
@@ -252,6 +256,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         'Mem F圧縮機': R['r_mem'].equipment.CAPEX_comp_feed,
         'Mem P圧縮機': R['r_mem'].equipment.CAPEX_comp_prod,
         'Mem冷却器':   R['r_mem'].equipment.CAPEX_cond,
+        # 膜圧縮機の多段化に伴う段間冷却器 (2026-05-31)。単段 (n=1) なら 0。
+        'Mem段間冷却器': R['r_mem'].equipment.CAPEX_intercool,
         'Mem膜本体':   R['r_mem'].equipment.CAPEX_mem,
         'Dist3':       R['r3'].equipment.CAPEX,
     }
@@ -322,10 +328,31 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     opex['Mem冷却器冷水']      = _heat(R['r_mem'].equipment.Q_cond_kW,
                                         COOLING_WATER_JPY_PER_GJ)
 
+    # 設計判断 (2026-05-31): 膜圧縮機の多段化に伴う段間冷却 (冷却水) を計上。
+    # 多段化で圧縮仕事 (= 電力 OPEX) が下がる代わりに段間冷却器の CAPEX・冷却水 OPEX が
+    # 生じる。仕事だけ下げて段間冷却コストを無視する片側評価を避けるため両方を計上する。
+    # HI 統合済: 本キーは heat_integration.classify_heat_opex_key で 'cold' 登録され、
+    #   extract_streams の 'H_mem_intercool' ホットストリームと対応する。apply_hi=True 時は
+    #   本フラット値が削除され HI tier 別 OPEX へ差し替わる (= 段間排熱がピンチ回収対象、
+    #   二重計上なし)。apply_hi=False (生 OPEX) 時は本値が冷却水費として 1 回だけ計上される。
+    Q_mem_intercool = R['r_mem'].equipment.Q_intercool_kW
+    if Q_mem_intercool > 0:
+        opex['Mem段間冷却 冷水'] = _heat(Q_mem_intercool, COOLING_WATER_JPY_PER_GJ)
+
     opex['Reactor触媒交換'] = (R['r_rx'].equipment.Catalyst_Weight_Total
                                 * CATALYST_JPY_PER_KG
                                 / CATALYST_LIFE_YEARS / 1.0e8)
     opex['PSA活性炭交換']   = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
+
+    # 設計判断 (2026-05-31): 膜モジュール定期交換費 (レポート §7.6 の C_mem/τ_mem)。
+    # 従来コードに欠落していた費用を追加し、報告書の計上方針とコードを一致させる。
+    # 膜本体 CAPEX を耐用年数 (!仮置き MEM_LIFETIME_YEARS) で割った年均等費。
+    # 触媒・PSA 活性炭交換と同じく Hasebe 式枠外の消耗品交換費 (1.23× なし)。
+    # 膜耐用年数は感度解析用に env で上書き可 (PDH_MEM_LIFETIME_YEARS)。未設定なら !仮置き 既定。
+    _mem_life = float(os.environ.get('PDH_MEM_LIFETIME_YEARS', str(MEM_LIFETIME_YEARS)))
+    _capex_mem = R['r_mem'].equipment.CAPEX_mem
+    if _capex_mem is not None and _capex_mem < PENALTY_CAPEX_THRESHOLD_OKUYEN and _mem_life > 0:
+        opex['Mem膜交換'] = _capex_mem / _mem_life
 
     # 設計判断 (2026-05-09): PSA 予熱を OPEX に計上 (旧版は抜けていた)。
     # T_in (Dist2 塔頂、partial cond で ~-20°C) → T_abs (25°C) へ温度調整。

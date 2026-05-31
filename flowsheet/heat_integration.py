@@ -1157,6 +1157,23 @@ def extract_streams(
             )
             if s: streams.append(s)
 
+    # ---- Mem 圧縮機 段間冷却器 (与熱、ガス顕熱) — 2026-05-31 多段圧縮で追加 ----
+    # 設計判断: 膜圧縮機の多段化で生じる段間冷却 (ガス T_intercool_in→out のガス顕熱) を
+    # ピンチ解析の hot ストリームとして登録し、HI で他流体の予熱に回収可能にする
+    # (Comp2 段間冷却 'H2_intercool' と同じ扱い)。これに対応して economics 側の OPEX
+    # 'Mem段間冷却 冷水' は classify_heat_opex_key で 'cold' 登録済 → HI 適用時に
+    # tier 別 OPEX へ差し替えられる (二重計上なし)。段間冷却なし (n=1) なら nan でスキップ。
+    if (meq.Q_intercool_kW > 1e-6
+            and not _is_nan(meq.T_intercool_in_K)
+            and not _is_nan(meq.T_intercool_out_K)):
+        s = _make_sensible_stream(
+            'H_mem_intercool',
+            T_in_K=meq.T_intercool_in_K, T_out_K=meq.T_intercool_out_K,
+            Q_kW=meq.Q_intercool_kW, h_W_m2K=H_HIGH_TEMP_GAS_W_M2K,
+            phase=StreamPhase.GAS,
+        )
+        if s: streams.append(s)
+
     # ---- PSA preheat (符号で判定) ----
     peq = R['r_psa'].equipment
     Q_psa = peq.Q_preheat_kW
@@ -1230,6 +1247,9 @@ _OPEX_FIXED_HEAT_KEY_KIND: Dict[str, str] = {
     'Mem気化器蒸気':       'hot',
     'Reactor予熱燃料':     'hot',
     'Mem冷却器冷水':       'cold',
+    # 膜圧縮機 段間冷却 (2026-05-31 多段圧縮で追加)。HI 統合: extract_streams の
+    # 'H_mem_intercool' ホットストリームと対応し、HI 適用時に tier 別 OPEX へ差し替わる。
+    'Mem段間冷却 冷水':    'cold',
 }
 
 

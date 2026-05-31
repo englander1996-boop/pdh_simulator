@@ -127,7 +127,7 @@ _SHORTFALL_TAC_COEF_OKUYEN = 200.0  # raw_total 1 単位あたりの TAC 加算
 _SHORTFALL_KEYS_FOR_TAC = (
     'dist1_N_shortfall', 'dist2_N_shortfall', 'dist3_N_shortfall',
     'dist1_dT_shortfall', 'dist2_dT_shortfall', 'dist3_dT_shortfall',
-    'psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall',
+    'psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall', 'psa_dp_shortfall',
     'reactor_sv_shortfall', 'reactor_dp_shortfall', 'reactor_other_shortfall',
     'mem_ph_shortfall', 'mem_bp_shortfall',
     'mem_phase_shortfall', 'mem_other_shortfall',
@@ -460,37 +460,13 @@ def evaluate(
             depreciation_years=DEPRECIATION_YEARS,
         )
 
-    # ---- Stage 2: HEN Synthesis (apply_stage2=True、top-k 用) ----
-    # 設計判断 (2026-05-09): apply_hi=True のときのみ意味を持つ (Stage 1 結果を流用)。
-    # greedy + tick-off で実 HEN 構成を合成、追加 HE CAPEX を加える。
-    # 通常 Stage 2 後の TAC は Stage 1 後より大きい (CAPEX 増 + OPEX 微増)。
+    # ---- Stage 2 (HEN Synthesis) は不採用 (2026-05-31 ユーザー決定: HI のみ) ----
+    # 設計判断: ヒートインテグレーションは Stage 1 (pinch targeting) のみで評価し，
+    # 実 HEN ネットワーク合成 (Stage 2) は行わない。HEN 合成モジュール
+    # (旧 optimization/hen_synthesis.py) は削除した。apply_stage2 引数は後方互換のため
+    # 残すが無効で，economics_synth は常に None (effective_TAC は HI のみの economics_hi を採用)。
     economics_synth = None
     hen_result      = None
-    if apply_stage2 and economics_hi is not None:
-        from optimization.hen_synthesis import (
-            synthesize_hen, apply_synthesis_to_economics,
-        )
-        # streams は Stage 1 で抽出済みのものを再利用 (apply_hi=True 時に取得)
-        from flowsheet.heat_integration import (
-            extract_streams as _extract_streams,
-            get_default_utility_tiers as _get_tiers,
-        )
-        from src.cost_parameters import (
-            OPERATING_HOURS_PER_YEAR as _OP_HRS,
-            DEPRECIATION_YEARS as _DEPR,
-        )
-        _streams = _extract_streams(solver_result.one_pass, design.swing.T_in)
-        _heat_t, _cool_t = _get_tiers()
-        hen_result = synthesize_hen(
-            _streams, hi_result, dT_min_K=hi_dT_min_K,
-            heating_tiers=_heat_t, cooling_tiers=_cool_t,
-            operating_hours=_OP_HRS,
-        )
-        economics_synth = apply_synthesis_to_economics(
-            economics, hen_result,
-            operating_hours=_OP_HRS,
-            depreciation_years=_DEPR,
-        )
 
     # ---- effective_TAC の選択 ----
     # 優先度: economics_synth (Stage 2) > economics_hi (Stage 1) > economics (raw)

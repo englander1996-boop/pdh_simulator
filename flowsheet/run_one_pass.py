@@ -279,6 +279,8 @@ _RIG_TOL_K = 0.05   # Wang-Henke 収束 tol (src/distillation_rigorous.py と同
 # PSA penalty 連続シグナルの基準 (psa_system.py の _T_ABS_MIN, _U0_MAX と同期)
 _PSA_T_ABS_MIN_S = 60.0
 _PSA_U0_MAX_MS   = 1.0
+# PSA 床圧損 penalty の基準 (psa_system.py の PSAFixedParams.dP_max_bar と同期、2026-05-31)
+_PSA_DP_MAX_BAR  = 0.3
 # Reactor SV penalty 連続シグナルの基準 (swing.py の FixedParams.SV_{min,max}_m_per_s と同期)
 _REACTOR_SV_MIN_MS = 0.5
 _REACTOR_SV_MAX_MS = 3.0
@@ -358,6 +360,7 @@ def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
         'psa_t_abs_shortfall': 0.0,
         'psa_u_0_shortfall':   0.0,
         'psa_feed_shortfall':  0.0,
+        'psa_dp_shortfall':    0.0,
     }
     eq = getattr(r_psa, 'equipment', None)
     if eq is None:
@@ -373,6 +376,11 @@ def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
         out['psa_t_abs_shortfall'] = math.log10(max(_PSA_T_ABS_MIN_S / t_abs, 1.0))
     elif reason == 'u_0_above_max' and u_0 > 0:
         out['psa_u_0_shortfall'] = math.log10(max(u_0 / _PSA_U0_MAX_MS, 1.0))
+    elif reason == 'dp_excess':
+        # 設計判断 (2026-05-31): 床 ΔP が上限超過した分 [bar] を連続シグナル化。
+        # BO に D_col↑ / L_bed↓ / 流量↓ 方向を学習させる (反応器 ΔP と同パターン)。
+        dp = getattr(eq, 'dP_bar_actual', 0.0) or 0.0
+        out['psa_dp_shortfall'] = max(dp - _PSA_DP_MAX_BAR, 0.0)
     elif reason in ('no_non_C3_feed', 'no_CH4_feed'):
         out['psa_feed_shortfall'] = 1.0
     elif reason == 'breakthrough_no_converge':
@@ -947,8 +955,18 @@ def run_one_pass(
     # 塔底液を mem_feed_K まで気化・過熱してガスフィードで膜へ送る。
     # 設計判断 (2026-05-08): 旧版は感熱のみで潜熱無視 → Mem 気化器 OPEX が 0
     # になっていた既知バグ。phase_change=True で潜熱を加算する。
+    # 設計判断 (2026-05-31, 案②): Dist2 を高圧運転して塔頂 cold-top (極低温で冷媒到達不能) を
+    # 回避する場合，塔底圧 (= col2_p) が膜 P_H (≤9.5bar, Hua 膜検証範囲) を超えうる。膜は P_H 入口
+    # 前提なので，超過分は膜前で JT 膨張弁により P_H まで減圧する (配管中の絞り弁、コストフリー。
+    # リサイクル流の減圧と同扱い)。これにより「Dist2 圧 < 膜 P_H」の連成制約が外れ，脱エタン塔を
+    # 実機並み (20-30bar) の高圧で運転して塔頂を暖められる (プロピレン冷媒/冷却水域)。
+    # col2_p ≤ P_H の従来ケースでは膨張不要 (= 後段の膜供給圧縮機が P_H まで昇圧、挙動不変)。
+    if r2.bottom.P_in > design.mem.P_H:
+        r2_bottom_for_mem = simulate_jt_expansion(r2.bottom, P_out=design.mem.P_H)
+    else:
+        r2_bottom_for_mem = r2.bottom
     mem_precool = simulate_cooler(
-        r2.bottom,
+        r2_bottom_for_mem,
         T_out_target=config.temperature.mem_feed_K,
         phase_change=True,
         process_phase=StreamPhase.LIQUID,    # 顕熱区間: 液相加熱、潜熱区間は EVAPORATING に自動切替
@@ -966,8 +984,17 @@ def run_one_pass(
         T_in=mem_precool.outlet.T_in,
         P_in=mem_precool.outlet.P_in,
     )
+    # 設計判断 (2026-05-31): 膜性能の感度解析用に Q_A/alpha 劣化係数を env で上書き可能にする
+    #   (PDH_RECYCLE_ACCEL と同じ方式)。env 未設定なら 1.0 = 文献代表値そのまま (挙動不変)。
+    #   exp/exp_membrane_sensitivity.py が 1 プロセス内で env を切替えて TAC 頑健性を評価する。
+    _mem_qa_factor    = float(os.environ.get('PDH_MEM_QA_FACTOR', '1.0'))
+    _mem_alpha_factor = float(os.environ.get('PDH_MEM_ALPHA_FACTOR', '1.0'))
     with _capture_warnings("Mem", warnings_captured):
-        r_mem = simulate_membrane_system(design.mem, mem_feed, MemFixedParams(vapor_feed=True))
+        r_mem = simulate_membrane_system(
+            design.mem, mem_feed,
+            MemFixedParams(vapor_feed=True,
+                           Q_A_factor=_mem_qa_factor, alpha_factor=_mem_alpha_factor),
+        )
     # Mem penalty を log (PDH_PER_UNIT_LOG=1 時のみ stderr)
     if getattr(r_mem.equipment, 'CAPEX_total', 0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
         _log_unit_failure('Mem (r_mem)', r_mem.equipment)

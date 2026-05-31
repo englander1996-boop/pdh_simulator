@@ -2,13 +2,14 @@
 optimization モジュール — 多変数最適化 + top-k 候補の re-evaluation。
 
 構成:
-  - hen_synthesis.py: HEN (Heat Exchanger Network) の Pinch Design Method 合成
-                      Stage 2 (= Stage 1 ピンチ targeting に対する詳細設計)
   - search_space.py:  SEARCH_SPACE スキーマと params → FlowsheetDesignVars 変換
   - objective.py:     Optuna objective 関数ファクトリ
   - study.py:         Optuna Study 生成と最適化ループ  (optuna 必須)
-  - topk.py:          BO 上位候補の rigorous + Stage 2 再評価  (optuna 必須)
+  - topk.py:          BO 上位候補の rigorous 再評価  (optuna 必須)
   - reporting.py:     CSV / JSON / txt 比較レポート出力       (optuna 必須)
+
+注 (2026-05-31): HEN 合成 (旧 hen_synthesis.py, Stage 2) は不採用 (ヒートインテグレーションは
+  HI = Stage 1 ピンチ targeting のみ) のため削除した。
 
 main.py は本モジュールを薄くオーケストレーションする。
 
@@ -40,13 +41,7 @@ except ImportError:
     )
 
 # ---- optuna 不要なシンボル (常に load) ----
-from optimization.hen_synthesis import (
-    HEMatch,
-    HENResult,
-    synthesize_hen,
-    apply_synthesis_to_economics,
-)
-
+# 注 (2026-05-31): HEN 合成 (旧 hen_synthesis) は不採用 (HI のみ) のため削除済。
 from optimization.search_space import (
     VarSpec,
     EXPECTED_KEYS,
@@ -62,8 +57,6 @@ from optimization.pipeline import PipelineConfig, run_pipeline
 
 
 __all__ = [
-    # hen_synthesis
-    'HEMatch', 'HENResult', 'synthesize_hen', 'apply_synthesis_to_economics',
     # search_space
     'VarSpec', 'EXPECTED_KEYS', 'DEFAULT_BASELINE', 'P_L_FIXED_PA',
     'validate_search_space', 'suggest_params', 'build_design',

@@ -167,7 +167,7 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         # 設計判断 (2026-05-21): PSA silent penalty 経路の連続シグナル。
         # psa_system.py で _T_ABS_MIN/_U0_MAX 等を理由ラベル付きで返す改修と対応。
         # run_one_pass._compute_psa_shortfall が以下 3 キーを一括計算済み。
-        for psa_key in ('psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall'):
+        for psa_key in ('psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall', 'psa_dp_shortfall'):
             v = op.get(psa_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(psa_key, float(v))
