@@ -35,6 +35,7 @@ from units.reactors.swing import (
 )
 from units.reactors.radial_flow import (
     RadialDesignVars, simulate_radial_flow_reactor_system,
+    simulate_radial_multibed_reactor_system,
 )
 from units.separators.psa.psa_system import (
     PSAFeedStream, PSAFixedParams, simulate_psa_system,
@@ -847,7 +848,21 @@ def run_one_pass(
     # するため既存の軸流コンストラクタは無改修で動く。両者とも (DesignVars, FeedStream,
     # FixedParams) → SimulationResult の同一インターフェースで、出力 dataclass も共有。
     if isinstance(design.swing, RadialDesignVars):
-        r_rx = simulate_radial_flow_reactor_system(design.swing, swing_feed, SwingFixed())
+        # 2026-05-31: Oleflex 型 多段 (径方向流断熱床 N 段直列 + 段間再加熱)。
+        #   既定 3 段 (実機 UOP Oleflex の 3〜4 基直列に対応、ユーザー決定 2026-05-31)。
+        #   単段では PDH 吸熱で床が降温し per-pass 転化率 ~30% で頭打ち → プロパン巨大 recycle →
+        #   膜フィード希釈 (propylene 18%) → 膜回収 30% → Dist3 SM 分類器の学習域 (In_Flow≥0.36)
+        #   割れで main BO feasible 0 になっていた。3段+段間再加熱で per-pass ~59%(純feed)/~39%
+        #   (recycle 込み full flowsheet)、膜フィード ~52% に濃縮、Dist3 通過 (In_Flow 0.535)、収率 46→70%。
+        #   3段 vs 4段: 収率≈選択率で頭打ち (3段sel74%≈4段sel73%) のため収率はほぼ同等だが、4段は
+        #   加熱炉燃料/反応器CAPEX/ΔP が増えるだけ → TAC 上 3段が有利。段数決定の経緯は report 反応器章。
+        #   env PDH_RADIAL_N_BEDS で上書き可 (感度解析用)。
+        _n_beds = int(os.environ.get('PDH_RADIAL_N_BEDS', '3'))
+        if _n_beds >= 2:
+            r_rx = simulate_radial_multibed_reactor_system(
+                design.swing, swing_feed, SwingFixed(), n_beds=_n_beds)
+        else:
+            r_rx = simulate_radial_flow_reactor_system(design.swing, swing_feed, SwingFixed())
     else:
         r_rx = simulate_swing_reactor_system(design.swing, swing_feed, SwingFixed())
 

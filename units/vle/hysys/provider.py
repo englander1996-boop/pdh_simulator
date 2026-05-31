@@ -588,12 +588,25 @@ def _compute_he_area(T_proc: float, Q_kW: float, utility_name: str,
     """
     T_util_in = _supply_T_for_utility(utility_name)
     if utility_first:
-        T_util_out = T_util_in + 10.0
-        dT1 = T_proc - T_util_in
-        dT2 = T_proc - T_util_out
-        if dT1 <= 0 or dT2 <= 0:
+        # 設計判断 (2026-05-31, 実験で確定): 冷却ユーティリティの「戻り温度」は相で決まる。
+        #   - 顕熱クーラント (冷却水・空冷・+5/+15℃ 冷媒の液相域 = LIQUID/GAS): 吸熱で +10K 昇温。
+        #   - 蒸発冷媒 (エチレン/プロピレン -25℃ 以下 = EVAPORATING): 潜熱吸熱で **沸点一定 (≒等温)**。
+        #     戻り≈供給なので dT は T_top - T_supply。従来は蒸発冷媒にも +10K を当てており、
+        #     -96℃級の塔頂が -100℃エチレンで凝縮可能なのに cold-top 誤判定していた (HYSYS Dist2 で多発)。
+        #     ※これは新規冷媒の追加ではなく，既存 -100℃ エチレン冷媒の蒸発を正しくモデル化する物理修正。
+        _util_ph = utility_phase(utility_name)
+        if _util_ph == StreamPhase.EVAPORATING:
+            dT1 = dT2 = T_proc - T_util_in        # 等温冷媒: 全域 dT = T_top - T_supply
+        else:
+            T_util_out = T_util_in + 10.0
+            dT1 = T_proc - T_util_in
+            dT2 = T_proc - T_util_out
+        # 冷凍凝縮器の現実的最小接近温度 (蒸発冷媒で 3K、顕熱で実質 dT2>0)。
+        _min_app = 3.0 if _util_ph == StreamPhase.EVAPORATING else 0.0
+        if dT1 <= _min_app or dT2 <= _min_app:
             raise _HEAreaError(
-                f"condenser ΔT 不成立 (T_top={T_proc-273.15:.1f}°C, T_util={T_util_in-273.15:.1f}°C)"
+                f"condenser ΔT 不成立 (T_top={T_proc-273.15:.1f}°C, T_util={T_util_in-273.15:.1f}°C, "
+                f"phase={_util_ph}, dT={dT1:.1f}K)"
             )
         if abs(dT1 - dT2) < 1e-3:
             dT_lm = 0.5 * (dT1 + dT2)

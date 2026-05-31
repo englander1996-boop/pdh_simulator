@@ -375,3 +375,125 @@ def simulate_radial_flow_reactor_system(
             Selectivity=selectivity,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# 多段 (Oleflex 型: 径方向流断熱床 N 段直列 + 段間再加熱)
+# ---------------------------------------------------------------------------
+#
+# ■ なぜこの実装に至ったか (2026-05-31, レポート記載用)
+#   単段断熱の径方向流は、PDH の強い吸熱で床が降温し、出口温度での平衡に張り付いて
+#   per-pass 転化率が ~30% で頭打ちになる (実測: T_in=939K でも 30%、触媒量を増やしても
+#   30% で飽和)。この低転化が巨大なプロパン recycle を生み、膜フィードを 18% propylene まで
+#   希釈 → 膜回収率 30% → 未回収 propylene が反応器で副生に化け収率 46% + Dist3 SM 分類器の
+#   学習域 (In_Flow≥0.36) を割り込んで main BO が feasible 0 になっていた。
+#
+#   実機 PDH はこれを「単段で解かない」: UOP Oleflex は径方向流断熱反応器を 3〜4 基直列に
+#   並べ、各反応器の間に加熱炉 (interstage heater) を置き、吸熱で冷えたガスを反応温度まで
+#   戻してから次段へ送る。各段で平衡がリセットされ累積転化が上がる (実測: 3 段で ~59%)。
+#   本関数はこの Oleflex 型を、既存の単段ソルバを N 回直列に呼ぶだけで表現する。
+#
+# ■ 段間再加熱の燃料費が自動で乗る仕組み
+#   単段ソルバ simulate_radial_flow_reactor_system は feed.T_feed の値に依らず積分を
+#   design.T_in から開始し、Q_preheat に「feed.T_feed → T_in の昇温熱量」を計上する。
+#   よって前段流出 (T_out_avg < T_in) を次段の FeedStream(T_feed=T_out_avg) として渡せば、
+#   次段の Q_preheat が自動的に「段間再加熱の熱量」になる。全段の Q_preheat を合算すれば
+#   供給予熱 + 全段間再加熱の総燃料が economics の「Reactor予熱炉燃料」経路でそのまま課金される。
+#
+# ■ モデルの簡略化 (!仮置き的な割り切り、確定時に精緻化)
+#   - 各段は同一ジオメトリ (RadialDesignVars の D_inner/bed_thickness/H) とする (Oleflex の
+#     ほぼ同型反応器列に対応)。触媒量・CAPEX は N 段ぶん積算する。
+#   - 段間加熱炉の CAPEX は単段同様「反応器バンドルに内包」の現行規約を踏襲し、独立 CAPEX 行は
+#     立てない (燃料 OPEX は Q_preheat 合算で正しく乗る)。加熱炉 CAPEX の独立計上は今後の精緻化候補。
+
+def simulate_radial_multibed_reactor_system(
+    design: RadialDesignVars,
+    feed: FeedStream,
+    fixed: FixedParams,
+    n_beds: int = 3,
+    n_time_samples: int = 20,
+) -> SimulationResult:
+    """Oleflex 型: 同一ジオメトリの径方向流断熱床を n_beds 段直列 + 段間再加熱 (T_in へ)。
+
+    各段は simulate_radial_flow_reactor_system を呼ぶ。前段流出を次段 feed (T_feed=前段
+    T_out) として渡すことで、段間再加熱の燃料は次段の Q_preheat に自動計上される (上記解説)。
+    どれか 1 段でも penalty (ΔP 超過 / SV 超過 / sim_failure) を返したら、その penalty を
+    そのまま伝播して全体を infeasible 化する。n_beds=1 なら単段と完全一致。
+    """
+    if n_beds < 1:
+        n_beds = 1
+    if n_beds == 1:
+        return simulate_radial_flow_reactor_system(design, feed, fixed, n_time_samples)
+
+    cur_feed = feed
+    beds = []
+    for _ in range(n_beds):
+        res = simulate_radial_flow_reactor_system(design, cur_feed, fixed, n_time_samples)
+        eff = res.effluent
+        # penalty 検出: _penalty_result は effluent を F=0 / P=0 で返す。1 段でも落ちたら伝播。
+        if eff.P_out <= 0.0 or sum(eff.F_out_avg.values()) <= 0.0:
+            return res
+        beds.append(res)
+        # 次段 feed = 前段流出 (T_feed=前段 T_out → 次段ソルバが T_in へ再加熱)。
+        cur_feed = FeedStream(
+            F_in=dict(eff.F_out_avg),
+            T_feed=eff.T_out_avg,
+            P_in=eff.P_out,
+        )
+
+    last = beds[-1]
+
+    # ---- 累積 ΔP (初段入口 → 最終段出口) のハード制約 ----
+    P_in0 = feed.P_in
+    P_out_final = last.effluent.P_out
+    dP_over_P_cum = (P_in0 - P_out_final) / P_in0 if P_in0 > 0 else 0.0
+    dP_over_P_cum = float(np.clip(dP_over_P_cum, 0.0, 1.0))
+    if dP_over_P_cum > fixed.dP_over_P_max:
+        warnings.warn(
+            f"radial multibed: 累積ΔP/P_in={dP_over_P_cum*100:.1f}% が上限 "
+            f"{fixed.dP_over_P_max*100:.0f}% 超 (n_beds={n_beds}) — infeasible 化",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='dP_excess', dP_over_P=dP_over_P_cum)
+
+    # ---- 統合: 流量 (最終段流出)、熱量・CAPEX・触媒は全段積算 ----
+    F_out_final = dict(last.effluent.F_out_avg)
+    Q_preheat_total = sum(b.effluent.Q_preheat for b in beds)        # 供給予熱 + 全段間再加熱
+    reactor_capex_total = sum(b.equipment.Reactor_CAPEX for b in beds)
+    catalyst_weight_total = sum(b.equipment.Catalyst_Weight_Total for b in beds)
+    N_reactors_total = sum(b.equipment.N_reactors_total for b in beds)
+    N_parallel_each = beds[0].equipment.N_parallel
+    N_swing_sets_each = beds[0].equipment.N_swing_sets
+
+    # ---- 累積転化/選択率 (新規 feed → 最終段流出) ----
+    F_A_in = feed.F_in.get('A', 0.0)
+    F_A_out = F_out_final.get('A', 0.0)
+    F_B_in = feed.F_in.get('B', 0.0)
+    F_B_out = F_out_final.get('B', 0.0)
+    conversion = (F_A_in - F_A_out) / F_A_in * 100.0 if F_A_in > 0 else 0.0
+    delta_A = F_A_in - F_A_out
+    selectivity = (F_B_out - F_B_in) / delta_A * 100.0 if delta_A > 0 else 0.0
+    conversion = float(np.clip(conversion, 0.0, 100.0))
+    selectivity = float(np.clip(selectivity, 0.0, 100.0))
+
+    return SimulationResult(
+        effluent=EffluentStream(
+            F_out_avg=F_out_final,
+            T_out_avg=last.effluent.T_out_avg,
+            Q_preheat=Q_preheat_total,        # 全段ぶん → economics の加熱炉燃料に総量が乗る
+            P_out=P_out_final,
+        ),
+        equipment=EquipmentCost(
+            V_vessel_actual=beds[0].equipment.V_vessel_actual,  # 1 基あたり (代表)
+            N_parallel=N_parallel_each,
+            N_swing_sets=N_swing_sets_each,
+            N_reactors_total=N_reactors_total,                  # 全段合計基数
+            Catalyst_Weight_Total=catalyst_weight_total,        # 全段合計
+            Reactor_CAPEX=reactor_capex_total,                  # 全段合計
+            dP_over_P_actual=dP_over_P_cum,
+        ),
+        performance=PerformanceMetrics(
+            Conversion=conversion,
+            Selectivity=selectivity,
+        ),
+    )
