@@ -77,8 +77,8 @@ from simulation import display_full_results, show_input_snapshot
 # ===========================================================================
 # § 1. BO 設定
 # ===========================================================================
-N_TRIALS    = 300            # sub1(旧main.py) 準拠。全変数(径方向流で22)なので 300 推奨 (~1-1.5h 目安)
-N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (以降 TPE)
+N_TRIALS    = int(os.environ.get('PDH_N_TRIALS', '300'))   # env で短縮可 (検証用)。既定 300
+N_STARTUP   = int(os.environ.get('PDH_N_STARTUP', '50'))   # QMC Sobol 広域カバレッジ (以降 TPE)
 # 設計判断 (2026-05-29): SEED/SAMPLER を env で上書き可能にする(既定は従来どおり tpe/42)。
 #   単体起動 (`python main.py`) は env 未設定なので挙動完全不変。
 #   seed散らし/対照群バッチ (verification/run_seed_robustness.py) だけが run ごとに
@@ -147,11 +147,16 @@ _REACTOR_SPACE = {
     'radial': {
         "T_in_K":              (880.0,  940.0,  'linear', 'float'),
         "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
-        "D_inner_m":           (4.0,    10.0,   'linear', 'float'),   # 中心捕集管径 (r_i=2-5m)
+        "D_inner_m":           (6.0,    10.0,   'linear', 'float'),   # 中心捕集管径 (r_i=3-5m)
+        #   2026-05-31: 下限 4→6。多段(3段)化で累積ΔPが ~3倍になり、Di=4(小流路=高流速)は
+        #   3段ΔPマップ(/tmp dp3map)で H/dr によらずほぼ ΔP>10% 棄却。Di≥6 で可行域に入る。
         "bed_thickness_m":     (0.3,    0.8,    'linear', 'float'),   # 環状床厚 Δr (薄い=低圧損)。
         #   2026-05-31: 上限 1.5→0.8。径方向流 run で r_rx の ~30% が ΔP/P>10% 超過 (床厚 1.4m で
         #   ΔP 16%)。ΔP ∝ 床厚なので 0.8 以下に抑え 10% 制約内へ。触媒量は H↑/D_inner↑ で補う。
-        "H_m":                 (8.0,    30.0,   'linear', 'float'),   # 床高 (触媒量を稼ぐ)
+        "H_m":                 (22.0,   30.0,   'linear', 'float'),   # 床高 (触媒量を稼ぐ)
+        #   2026-05-31: 下限 8→16→22。多段(3段)Oleflex化で累積ΔP≈3倍。3段ΔPマップ(/tmp dp3map)で
+        #   H≥22・Di≥6 なら床厚0.8でも累積ΔP<0.10 に収まる(低H+厚dr+小Diの隅のみ棄却→dP shortfall
+        #   が回避を学習)。単段時の H≥16 は3段では不足だったため引き上げ (Rx.dP_excess 削減)。
     },
 }[REACTOR_KIND]
 
@@ -195,12 +200,19 @@ SEARCH_SPACE = {
     #   暖める方向 (corr(col2_p, cold-top深さ)=-0.097、700kPa 帯で最暖 -90.5℃)。HSC は 950kPa まで
     #   実走確認済。col2_p > 膜 P_H のケースは膜前 JT let-down (run_one_pass) で P_H へ減圧して吸収する。
     "col2_p_kpa":          (500.0,  950.0,  'linear', 'float'),  # 浅冷化のため上限開放 (let-down で P_H 超も可)
-    "col2_n_stages":       (44,     80,     'linear', 'int'  ),
+    # 設計判断 (2026-05-31, 実験): 下限 44→60。Dist2 塔頂温度は N で強く決まり (実験: N44→-125℃,
+    #   N60→-101℃, N80→-98℃)、低 N は塔頂が冷えすぎて -100℃ エチレン冷媒でも凝縮不能 (cold-top)。
+    #   feasible 帯は高 N 側 (N≥~70 で -98℃ 級)。HSC は 80 段まで (hysys_cases/column2)。
+    "col2_n_stages":       (60,     80,     'linear', 'int'  ),
     "col2_feed_ratio":     (0.40,   0.60,   'linear', 'float'),
     # 設計判断 (2026-05-26): 上限 13→10.5。Dist2(HYSYS) 深冷コンデンサ(−83°C, エチレン-100C)
     # が 本 main TAC の ~25%(427億)の最大コスト。還流比↓ = 凝縮 duty↓ = 直接削減。
     # 高還流(13)を切って低還流帯へ誘導。下限 8 は維持(HYSYS 収束 envelope + C3 封じ込め)。
-    "col2_reflux_ratio":   (8.0,    10.5,   'linear', 'float'),
+    # 設計判断 (2026-05-31, 実験): 8-10.5 → 10-15。実験で Dist2 が feasible になる還流比は
+    #   R≥11 (N=80 で R9.5→塔頂-98.1℃/dT1.9K=不可, R11→-96.1℃/dT3.9K=凝縮可, R13→-96.0℃=可)。
+    #   旧上限 10.5 では feasible 帯 (R≥11) に届かず Dist2 が永遠に cold-top/不成立だった。
+    #   低 R (≤9) は HYSYS 非収束 (空出力) も多発。reboiler OPEX 増は BO が最小 R を探って均衡させる。
+    "col2_reflux_ratio":   (10.0,   15.0,   'linear', 'float'),
 
     # ----- Dist3 (SM model3: N69-200/P1600-2200, spec なし)。feas: N≥115, P≤1900 -----
     "col3_p_kpa":          (1600.0, 1900.0, 'linear', 'float'),
