@@ -49,6 +49,7 @@ from config.load import load_operating_config
 from flowsheet import FlowsheetDesignVars, evaluate
 from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
+from units.reactors.radial_flow import RadialDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 from simulation import display_full_results, hdr, show_input_snapshot, run_exp
@@ -58,53 +59,58 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 #  実験で振る設計変数 (ここを書き換えて再実行)
 # ===========================================================================
 
-# 設計判断 (2026-05-26): special.py の BO best = trial #294 の最適化済み 21 変数を
-# そのまま投入。出典 outputs/special_20260526_172608_best.json
-#   (BO 記録 effective_TAC=1305.59 億円/年、feasible=True)。
-# ユーザーが exp3 でフル詳細出力を見て手動検証するため。旧テンプレ値 (exp1 best #115
-# 系) は git 履歴で復元可能。
-# 注意: special では col2/col3 の feed を「比率」で suggest し _feed_stage_from_ratio で
+# 設計判断 (2026-06-01): main.py (HYSYS+SM 全22変数 BO, 反応器=radial) の BO best =
+#   trial #194 の最適化済み 22 変数をそのまま投入。
+#   出典 outputs/main_20260601_150117/best.json
+#   (BO 記録 effective_TAC=1056.26 億円/年、feasible=True、
+#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈78.4%)。
+#   ユーザーが exp3 でフル詳細出力を見て手動検証するため。旧テンプレ値 (special #294
+#   系、軸流 SwingDesign) は git 履歴で復元可能。
+# 注意1: main は反応器=径方向流 (radial)。exp3 も SwingDesign → RadialDesignVars に
+#   変更し、反応器変数を (T_in, t_cyc, D_inner, bed_thickness, H) に差し替えた。
+# 注意2: main では col2/col3 の feed を「比率」で suggest し _feed_stage_from_ratio で
 #   絶対段に変換している。exp3 は絶対段を直接指定するため、変換後の値を記載:
-#     Dist2: feed_ratio 0.553435 × N67 → FEED_STAGE_dist2 = 37  (レポート kirkbride 37 と一致)
-#     Dist3: feed_ratio 0.715715 × N156 → FEED_STAGE_dist3 = 112 (同 112 と一致)
+#     Dist2: feed_ratio 0.404858 × N76 → FEED_STAGE_dist2 = 31  (clamp[2,74])
+#     Dist3: feed_ratio 0.715645 × N126 → FEED_STAGE_dist3 = 90 (clamp[70,124])
 
-# === 反応器 (Swing) ============================================================
-T_in_K        = 936.9962277
-z_cat_m       = 29.1345707
-t_cyc_min     = 19.0206554
-D_reactor_m   = 9.4751160
+# === 反応器 (径方向流 Radial) ===================================================
+T_in_K          = 918.7135314
+t_cyc_min       = 21.0812451
+D_inner_m       = 8.9404554
+bed_thickness_m = 0.4570994
+H_m             = 22.8659946
 
 # === PSA =====================================================================
-D_psa_col_m       = 4.4154197
-L_psa_bed_m       = 27.8226005
-desorption_target = 0.2974322
+D_psa_col_m       = 3.4359719
+L_psa_bed_m       = 24.4278809
+desorption_target = 0.3367946
 
 # === 膜分離 ===================================================================
-P_H_Pa     = 8.0711387e5
+P_H_Pa     = 8.7267459e5
 P_L_Pa     = 1.0e5
-A_mem_m2   = 1.1854758e5
+A_mem_m2   = 1.5240239e5
 
 # === Dist1 (脱ブタン塔) SM ===================================================
-P_dist1_kPa            = 1996.1098
-N_dist1                = 31
-FEED_STAGE_dist1       = 28
-COMP_FRAC_2_dist1      = 0.9083715
+P_dist1_kPa            = 1875.3567
+N_dist1                = 35
+FEED_STAGE_dist1       = 24
+COMP_FRAC_2_dist1      = 0.9969400
 
 # === Dist2 (脱エタン塔) HYSYS ===============================================
-# P_dist2=645.4 kPa < P_H=807.1 kPa (Mem の ph_le_pfeed 回避を満たす)。
-P_dist2_kPa            = 645.4137
-N_dist2                = 67
-FEED_STAGE_dist2       = 37       # special: feed_ratio 0.553435 × N67 → 37
-REFLUX_RATIO_dist2     = 8.9916122
+# P_dist2=855.6 kPa < P_H=872.7 kPa (Mem の ph_le_pfeed 回避を満たす)。
+P_dist2_kPa            = 855.6306
+N_dist2                = 76
+FEED_STAGE_dist2       = 31       # main: feed_ratio 0.404858 × N76 → 31 (clamp[2,74])
+REFLUX_RATIO_dist2     = 11.0659612
 
 # === Dist3 (C3 スプリッタ) SM ===============================================
-P_dist3_kPa            = 1677.1573
-N_dist3                = 156
-FEED_STAGE_dist3       = 112      # special: feed_ratio 0.715715 × N156 → 112
+P_dist3_kPa            = 1700.6152
+N_dist3                = 126
+FEED_STAGE_dist3       = 90       # main: feed_ratio 0.715645 × N126 → 90 (clamp[70,124])
 DRAW_RATE_dist3_kmolh  = 0.99     # SM では未使用 (Dist3 は spec なし)
 
 # === Fresh LPG ==============================================================
-F_C3H8_fresh_kmol_h = 1523.3995
+F_C3H8_fresh_kmol_h = 1523.2706
 
 
 # ===========================================================================
@@ -132,8 +138,9 @@ SAVE_OUTPUT = True
 #  参照されないので dummy 値で OK。HYSYS の主スペックは hysys_spec_value で渡す。
 #  draw_rate は HYSYS では kgmol/s 単位で書込むため kmolh → kgmol/s に変換。
 design = FlowsheetDesignVars(
-    swing=SwingDesign(
-        T_in=T_in_K, z_cat=z_cat_m, t_cyc=t_cyc_min, D=D_reactor_m,
+    swing=RadialDesignVars(
+        T_in=T_in_K, t_cyc=t_cyc_min, D_inner=D_inner_m,
+        bed_thickness=bed_thickness_m, H=H_m,
     ),
     psa=PSADesignVars(
         D_col=D_psa_col_m, L_bed=L_psa_bed_m,
@@ -186,7 +193,12 @@ design = FlowsheetDesignVars(
 #  反復は 10→9 に減るものの収束経路が変わり 1% 許容球内の別点に着地して結果が
 #  わずかに動く (生産量 1248→1258) 割に効果が限定的だった。結果中立な高速化
 #  (Dist1 メモ化 + swap_case 待ち時間削減) を優先し、減衰は不採用とした。
+import dataclasses as _dc
 config = load_operating_config()
+# 決定A (2026-05-25): SM Dist3 は 99.5 mol%=99.497 wt% 固定。mol↔wt 差 0.003pp を吸収するため
+# purity 閾値を 99.45 wt% に緩和 (main.py:253 と同一。BO と exp3 の feasible 判定を揃える)。
+# これがないと exp3 だけ 0.995 で判定し、99.497 wt% が ✗ になって BO 結果と食い違う。
+config = _dc.replace(config, spec=_dc.replace(config.spec, c3h6_min_wtfrac=0.9945))
 
 
 def _run_simulation():

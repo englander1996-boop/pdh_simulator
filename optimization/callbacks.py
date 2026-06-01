@@ -173,7 +173,9 @@ def _fmt_reason_from_trial(trial: optuna.trial.FrozenTrial) -> str:
     if fu == 'spec_c3h6_purity':
         c3 = a.get('c3h6_purity_wtfrac', 0.0) or 0.0
         if c3 > 0:
-            return f"spec.c3h6_purity ({c3*100:.2f}wt%<99.5)"
+            # 閾値は config 依存 (決定A で 99.45 wt% に緩和)。ここは user_attrs しか持たず
+            # threshold を知らないので、ハードコード比較を書かず実測値だけ示す (h2 行と同様)。
+            return f"spec.c3h6_purity ({c3*100:.2f}wt%)"
         return "spec.c3h6_purity"
     if fu == 'spec_h2_purity':
         h2 = a.get('h2_purity_molfrac', 0.0) or 0.0
