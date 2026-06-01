@@ -122,7 +122,8 @@ _thermo = PDHThermo()
 class MemDesignVars:
     """最適化アルゴリズムが操作する設計変数"""
     P_H:    float  # 膜供給側（高圧）圧力 [Pa]
-    P_L:    float  # 膜透過側（低圧）圧力 [Pa]
+    P_L:    float  # 膜透過側（低圧）圧力 [Pa]。**大気圧 1 atm 固定が設計思想**（真空ポンプなし）。
+                   #   全体最適化側は常に 1 atm を渡す。逸脱は simulate 内で一度だけ警告 (膜レビュー#2)。
     A_mem:  float  # 総膜面積 [m²]
     # 後段蒸留塔操作圧力 [Pa]（製品圧縮機の出口圧力）
     # 冷媒不使用（Case A）のため T_bp(P_dist, y_perm) > T_cold_out(40°C) が
@@ -210,6 +211,15 @@ class MemFixedParams:
             raise ValueError("eta_comp は (0, 1] でなければなりません。")
         if self.T_hot <= 273.15:
             raise ValueError("T_hot は 273K 超でなければなりません。")
+        # 膜レビュー B (2026-06-01): 感度解析/BO で不正値が流れたときに早期に弾く。
+        if self.Q_A_GPU <= 0 or self.alpha <= 0:
+            raise ValueError("Q_A_GPU と alpha は正値でなければなりません。")
+        if self.Q_A_factor <= 0 or self.alpha_factor <= 0:
+            raise ValueError("膜性能係数 Q_A_factor と alpha_factor は正値でなければなりません。")
+        if self.max_compression_ratio_per_stage <= 1.0:
+            raise ValueError("max_compression_ratio_per_stage は 1 より大きい必要があります。")
+        if self.U_intercool <= 0:
+            raise ValueError("U_intercool は正値でなければなりません。")
         # 仮置き値の警告はモジュール初回のみ発火 (BO 数千 trial で log noise になるため)。
         _warn_once_A_per_module(self.A_per_module)
 
@@ -226,6 +236,29 @@ def _warn_once_A_per_module(value: float) -> None:
     warnings.warn(
         f"MemFixedParams: A_per_module = {value} m² は仮置き値です。"
         " Evonik SEPURAN 等のデータシートから中空糸寸法を取得して算出後に更新してください。"
+        " (この警告は同一値に対し初回のみ発火します)",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+# 膜レビュー #2 (2026-06-01): 透過側圧力 P_L は大気圧固定の設計思想 (レポート §膜分離)。
+# 全体最適化側は常に 1 atm を渡すが、将来 P_L を探索変数化する事故を防ぐため、
+# 1 atm から大きく外れた P_L が渡されたら一度だけ警告する (P_L 自体は固定運用が前提)。
+_P_L_FIXED_PA: float = _ATM_BAR * 1e5     # 1 atm [Pa]
+_P_L_WARNED_VALUES: set = set()
+
+
+def _warn_once_P_L_fixed(value: float) -> None:
+    if value in _P_L_WARNED_VALUES:
+        return
+    # 1 atm から 1% 以上ずれていたら警告 (固定運用の逸脱検出)
+    if abs(value - _P_L_FIXED_PA) <= 0.01 * _P_L_FIXED_PA:
+        return
+    _P_L_WARNED_VALUES.add(value)
+    warnings.warn(
+        f"MemDesignVars: P_L = {value/1e5:.3f} bar が大気圧 (1 atm) 固定の設計思想から外れています。"
+        " 本モデルは P_L=1atm 固定 (真空ポンプなし) を前提としています。"
         " (この警告は同一値に対し初回のみ発火します)",
         UserWarning,
         stacklevel=3,
@@ -508,10 +541,10 @@ def _compress_multistage(
         T_intercool_in_K : 段間冷却の代表入口温度 [K] = 各段出口温度の熱量加重平均
                            (HI のホットストリーム登録用、n=1 なら 0)。出口は fixed.intercool_T_K。
     """
-    if P_out <= P_in:
-        # 圧縮不要 (理論上ここには来ない想定。安全側に単段へ委譲し段間冷却 0)。
-        T_out, W = compress_isentropic(T_in, P_in, P_out, x, keys, eta=fixed.eta_comp)
-        return T_out, W, 0.0, 0.0, 1, 0.0
+    if P_out <= P_in * (1.0 + 1e-8):
+        # 圧縮不要 (理論上ここには来ない想定)。ほぼ等圧なら compress_isentropic に委譲せず
+        # 仕事ゼロ・温度据置で安全に返す (微小逆圧で負仕事が出るのを防ぐ)。
+        return T_in, 0.0, 0.0, 0.0, 1, 0.0
 
     ratio_total = P_out / P_in
     r_max = max(fixed.max_compression_ratio_per_stage, 1.0 + 1e-6)
@@ -789,6 +822,8 @@ def simulate_membrane_system(
         )
     if design.A_mem <= 0 or design.P_H <= 0 or design.P_L <= 0:
         return _penalty_result(reason='invalid_design')
+    # 膜レビュー #2: P_L は大気圧固定の設計思想。固定運用からの逸脱を一度だけ警告 (防御的)。
+    _warn_once_P_L_fixed(design.P_L)
     # ID-04: 製品圧縮機が減圧方向になる
     if design.P_dist <= design.P_L:
         warnings.warn(
@@ -819,31 +854,41 @@ def simulate_membrane_system(
 
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
 
-    # ID-03: 液/ガス相整合性チェック
-    # dew_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except は不要
-    T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
-    if math.isnan(T_dew_feed):
-        return _penalty_result(reason='dew_nan')
-    if not fixed.vapor_feed and feed.T_in >= T_dew_feed:
-        warnings.warn(
-            f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 以上です。"
-            " 液相フィードを前提とするモデル(vapor_feed=False)と矛盾します。",
-            UserWarning, stacklevel=2,
-        )
-        return _penalty_result(
-            reason='liquid_vaporized',
-            T_dew_actual=T_dew_feed, T_feed_actual=feed.T_in,
-        )
-    if fixed.vapor_feed and feed.T_in < T_dew_feed:
-        warnings.warn(
-            f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 未満です。"
-            " ガス相フィードを前提とするモデル(vapor_feed=True)と矛盾します。",
-            UserWarning, stacklevel=2,
-        )
-        return _penalty_result(
-            reason='vapor_condensed',
-            T_dew_actual=T_dew_feed, T_feed_actual=feed.T_in,
-        )
+    # ID-03 + 膜レビュー #1 (2026-06-01): 液/ガス相整合性チェック。
+    # 二成分系では T_bubble < T < T_dew が二相域。液フィードは T ≤ T_bubble、ガスフィードは
+    # T ≥ T_dew を要求する。旧実装は液フィードを T_dew 基準で判定しており、二相域を液相と
+    # 誤認する余地があった（本 run は vapor_feed=True なので発火しないが正確性のため是正）。
+    # dew_point_T / bubble_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except 不要。
+    if fixed.vapor_feed:
+        # ガスフィード: 露点以上でなければガス単相でない（凝縮している）
+        T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
+        if math.isnan(T_dew_feed):
+            return _penalty_result(reason='dew_nan')
+        if feed.T_in < T_dew_feed:
+            warnings.warn(
+                f"feed.T_in={feed.T_in:.1f}K が露点 {T_dew_feed:.1f}K 未満です。"
+                " ガス相フィードを前提とするモデル(vapor_feed=True)と矛盾します。",
+                UserWarning, stacklevel=2,
+            )
+            return _penalty_result(
+                reason='vapor_condensed',
+                T_dew_actual=T_dew_feed, T_feed_actual=feed.T_in,
+            )
+    else:
+        # 液フィード: 泡点以下でなければ液単相でない（二相域 or ガス域）
+        T_bub_feed = bubble_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
+        if math.isnan(T_bub_feed):
+            return _penalty_result(reason='bubble_nan')
+        if feed.T_in > T_bub_feed:
+            warnings.warn(
+                f"feed.T_in={feed.T_in:.1f}K が泡点 {T_bub_feed:.1f}K 超です。"
+                " 液相フィードを前提とするモデル(vapor_feed=False)と矛盾します（二相/ガス域）。",
+                UserWarning, stacklevel=2,
+            )
+            return _penalty_result(
+                reason='liquid_vaporized',
+                T_dew_actual=T_bub_feed, T_feed_actual=feed.T_in,
+            )
 
     # mol/s 換算（内部計算用）
     F_feed_mols = F_total_feed * 1000.0 / 3600.0   # [mol/s]
