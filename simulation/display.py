@@ -223,12 +223,21 @@ def show_unit_details(R: dict) -> None:
     #   V_vessel=πr_o²H が中心捕集管 void を含むため V_cat/V_vessel≠(1-eps)。
     #   どちらの幾何でも正しい W_cat から逆算する (W_cat=V_cat_total×N_swing×ρ_b)。
     rho_b = 900.0  # FixedParams.rho_b と整合
-    if eq.N_swing_sets > 0 and eq.N_parallel > 0:
-        v_cat_total = eq.Catalyst_Weight_Total / (eq.N_swing_sets * rho_b)
-        v_cat_per_vessel = v_cat_total / eq.N_parallel
+    # V_cat/基 (= 1 缶あたり触媒体積、200 m³ 制約対象): Catalyst_Weight_Total は
+    #   全段(全 n_beds)合計なので、総基数 N_reactors_total で割る。
+    #   N_reactors_total = N_parallel × N_swing_sets × n_beds (軸流/単段は n_beds=1)。
+    #   Oleflex 多段は各段同一ジオメトリ ([[radial_flow]] 434) なので per-vessel は厳密に等価。
+    #   旧実装は N_swing×N_parallel でしか割らず、多段で n_beds 倍 (3 段なら 3 倍) に
+    #   膨らんで「V_cat/基 > V_vessel/基」という非物理表示になっていた (計算は正常、表示のみのバグ)。
+    if eq.N_reactors_total > 0:
+        v_cat_per_vessel = eq.Catalyst_Weight_Total / (rho_b * eq.N_reactors_total)
     else:
         v_cat_per_vessel = 0.0
-    print(f"  [Reactor]    {eq.N_parallel}並列 × {eq.N_swing_sets} swing = "
+    _denom = eq.N_parallel * eq.N_swing_sets
+    n_beds = max(eq.N_reactors_total // _denom, 1) if _denom > 0 else 1
+    config_str = (f"{eq.N_parallel}並列 × {n_beds}段 × {eq.N_swing_sets}swing"
+                  if n_beds > 1 else f"{eq.N_parallel}並列 × {eq.N_swing_sets} swing")
+    print(f"  [Reactor]    {config_str} = "
           f"{eq.N_reactors_total} 基  "
           f"V_cat/基={v_cat_per_vessel:.0f} m³ (≤200制約)  "
           f"V_vessel/基={eq.V_vessel_actual:.0f} m³  "
@@ -418,14 +427,19 @@ def show_revenue(econ) -> None:
     print(f"  {'Revenue 合計':<24} {econ.total_revenue:>17.4f}  100.0%")
 
 
-def show_specs(specs, failure_reason: str) -> None:
+def show_specs(specs, failure_reason: str, config=None) -> None:
     hdr("製品仕様 compliance")
+    # spec 閾値は判定に使った config から取る (main/exp3 は SM Dist3 の mol↔wt 差吸収で
+    # 99.45 wt% に緩和)。ハードコードだと c3h6_pass=✓ なのに「spec ≥ 99.5」と矛盾表示になる。
+    # config 未指定時は contest 名目値にフォールバック。
+    c3h6_thr = config.spec.c3h6_min_wtfrac * 100.0 if config is not None else 99.5
+    h2_thr   = config.spec.h2_min_molfrac  * 100.0 if config is not None else 99.9
     print(f"  C3H6 純度 (Dist3 塔頂) : {specs.c3h6_purity_wtfrac*100:6.3f} wt%"
           f"   {'✓' if specs.c3h6_pass else '✗'}"
-          f" (spec ≥ {99.5:.1f} wt%)")
+          f" (spec ≥ {c3h6_thr:.2f} wt%)")
     print(f"  H2 純度 (PSA 製品)     : {specs.h2_purity_molfrac*100:6.3f} mol%"
           f"   {'✓' if specs.h2_pass else '✗'}"
-          f" (spec ≥ {99.9:.1f} mol%)")
+          f" (spec ≥ {h2_thr:.1f} mol%)")
     if specs.threshold_high_kmol_h == float('inf'):
         _spec_range = f"≥ {specs.threshold_low_kmol_h:.2f}"
     else:
@@ -637,7 +651,7 @@ def display_full_results(result, design, config) -> None:
     show_capex(result.economics)
     show_opex(result.economics)
     show_revenue(result.economics)
-    show_specs(result.specs, result.failure_reason)
+    show_specs(result.specs, result.failure_reason, config)
     # HI と Stage 2 の物理メタデータ (pinch / HEN 構成) を先に表示
     show_hi_summary(result)
     show_stage2_synthesis(result)

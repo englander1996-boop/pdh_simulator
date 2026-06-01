@@ -147,7 +147,11 @@ _REACTOR_SPACE = {
     'radial': {
         "T_in_K":              (880.0,  940.0,  'linear', 'float'),
         "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
-        "D_inner_m":           (6.0,    10.0,   'linear', 'float'),   # 中心捕集管径 (r_i=3-5m)
+        "D_inner_m":           (6.0,    12.0,   'linear', 'float'),   # 中心捕集管径 (r_i=3-6m)
+        #   2026-06-01: 上限 10→12。main_20260601_150117 のBO分析で feasible の D_inner の
+        #   45%が上限10近傍に張り付き、最多の失敗カテゴリが r_rx(反応器ΔP)=infeas の37%。
+        #   太い径=低空塔速度=低ΔP で可行域が広がるため上限を開放する(r_rx 削減 + QMC 可行率改善)。
+        #   容器CAPEX増は原料費比で軽微。実装後の3段ΔP健全性は次回BOの r_rx 率で確認する。
         #   2026-05-31: 下限 4→6。多段(3段)化で累積ΔPが ~3倍になり、Di=4(小流路=高流速)は
         #   3段ΔPマップ(/tmp dp3map)で H/dr によらずほぼ ΔP>10% 棄却。Di≥6 で可行域に入る。
         "bed_thickness_m":     (0.3,    0.8,    'linear', 'float'),   # 環状床厚 Δr (薄い=低圧損)。
@@ -181,7 +185,12 @@ SEARCH_SPACE = {
     #   prod_under、feasible は 1/154 に留まった。中央収率で target 1188 を満たすには
     #   F ≈ 1188/0.72 ≈ 1645 が必要。sub1(旧main) の縮小前 (1200,1700) 寄りに戻す方向で、
     #   feasible 生産量帯 [1128.6, 1247.4] を F×yield の範囲で到達可能にする。
-    "F_C3H8_fresh_kmol_h": (1500.0, 1750.0, 'linear', 'float'),
+    # 設計判断 (2026-06-01): 下限 1500→1450。main_20260601_150117 のBO分析で F_fresh が
+    #   TAC 第1ドライバ(feasible 内 Pearson corr=+0.44)かつ feasible の66%が下限1500に張り付き、
+    #   さらに feasible の80%が生産量 target 超過(過剰生産=原料浪費)。生産量下限 target×0.95
+    #   =1128.6 kmol/h は best 収率78.4%なら F≈1440 でも充足可能。下限を1450まで開けてより安い
+    #   解を探索可能にする(下げ過ぎ=production_under 増を避けるため1440でなく1450で留める)。
+    "F_C3H8_fresh_kmol_h": (1450.0, 1750.0, 'linear', 'float'),
 
     # ----- Dist1 (SM model1: N30-60/P1600-2200/feed_stage10-39/CF0.9-0.999) -----
     # feed_stage は SM feas ≥22 (プローブ: <21 で 0%)。範囲は (22,28) 固定: N 下限 30 でも
