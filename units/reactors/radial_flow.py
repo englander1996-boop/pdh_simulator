@@ -34,11 +34,18 @@ monitor/reactor_pressure_drop_and_geometry.ipynb)。
   dF_i/dr = -(1-eps)·2π r H · Σ_j ν_ij r_j
   dT/dr   = +(1-eps)·2π r H · Σ_j ΔH_j r_j / Σ_i F_i Cp_i      (断熱)
   dP/dr   = +[ Ergun(u, ρ, μ) ]                                (流れ方向に圧損)
-ここで u = Q_vol / (2π r H · N_parallel) は局所空塔速度 (r 内側ほど面積↓→速度↑)。
+ここで u = Q_vol / (2π r H) は局所空塔速度 (r 内側ほど面積↓→速度↑)。
 符号は「r 減少方向 = 流れ方向」で反応物消費・降温・降圧が起こるよう取ってある。
 
-⚠️ モデル限界 (swing.py と共通、レポート記載): 段間 reheat 未計上、再生動特性なし、
-   粒内拡散 (Weisz-Prater) 未考慮、触媒活性は入口温度で代表し空間一定。
+【並列分割の規約 (案B, 2026-05-31 確定)】 設計変数 (D_inner, Δr, H) は「作る反応器全体」を
+表す。触媒体積 V_cat が V_cat_max(200m³)を超える場合、総断面 2πrH を N_parallel 本のサブ
+カラムに機械分割する。総流量 ÷ 総断面 = 各サブカラムの空塔速度は分割で不変なので、u・ΔP・SV
+は N_parallel に依存しない (旧実装は u を /N_parallel しており ΔP・SV を過小評価するバグだった)。
+N_parallel は容器分割・コスト計上 (V_vessel=V_design/N_parallel, 基数=N_parallel·N_swing) のみに使う。
+
+⚠️ モデル限界 (swing.py と共通、レポート記載): 再生動特性なし、粒内拡散 (Weisz-Prater) 未考慮、
+   触媒活性は入口温度で代表し空間一定、床 Ergun 以外の ΔP (分配器/中心管/弁/段間配管) 未計上。
+   なお段間 reheat は simulate_radial_multibed_reactor_system で計上済 (本ファイル後半)。
 """
 
 import math
@@ -150,11 +157,15 @@ def _ode_radial(r: float, y: np.ndarray,
         Q_rxn = float(cat_factor * np.dot(dH, rates))   # [J/(m·s)]
         dTdr = Q_rxn / sum_FCp                           # [K/m] (吸熱で r 減少方向に降温)
 
-    # 圧力損失 (Ergun)。u = Q_vol / (A_r × N_parallel) は 1 基あたり局所空塔速度。
+    # 圧力損失 (Ergun)。u = Q_vol / A_r は局所空塔速度 (案B: N_parallel で割らない)。
+    #   案B (設計環状床 = 反応器全体、200m³超は分割) では、総断面 2πrH を N_parallel 本の
+    #   サブカラムに分割しても「総流量 ÷ 総断面」= 各カラムの空塔速度は不変 (Q/N ÷ A/N = Q/A)。
+    #   よって ΔP・SV は N_parallel に依存しない (旧実装の /N_parallel は過小評価のバグだった)。
+    #   N_parallel は容器分割・コスト計上のみに使う量で、ここ (物理) では使わない。
     # r_o→r_i 積分で P が下がるよう dP/dr は正 (流れ方向 = r 減少方向で圧損)。
-    if A_r > 0 and N_parallel >= 1:
+    if A_r > 0:
         Q_vol = F_total * _R_GAS * T_local / P_local
-        u = Q_vol / (A_r * N_parallel)
+        u = Q_vol / A_r
         mass_flow = sum(float(F[i]) * MW[comp] for i, comp in enumerate(_COMPS)) / 1000.0
         rho = mass_flow / Q_vol if Q_vol > 0 else 0.0
         mu = _gas_viscosity(T_local)
@@ -287,12 +298,14 @@ def simulate_radial_flow_reactor_system(
         F_out_avg_kmolh = {comp: float(F_out_avg_mol_s[i]) * 3600.0 / 1000.0
                            for i, comp in enumerate(_COMPS)}
 
-    # ---- 圧力損失 (Ergun) ハード制約 ----
-    dP_over_P = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
-    dP_over_P = float(np.clip(dP_over_P, 0.0, 1.0))
+    # ---- 圧力損失 (床 Ergun × 内部品マージン) ハード制約 ----
+    # 床ΔP に dP_margin_factor を掛けて総反応器ΔP とし、出口圧・feasibility に適用 (化学は真の床P)。
+    dP_over_P_bed = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
+    dP_over_P = float(np.clip(dP_over_P_bed * fixed.dP_margin_factor, 0.0, 1.0))
+    P_out_avg = feed.P_in * (1.0 - dP_over_P)   # マージン込み出口圧 (→ 下流圧縮機へ伝播)
     if dP_over_P > fixed.dP_over_P_max:
         warnings.warn(
-            f"radial reactor: ΔP/P_in={dP_over_P*100:.1f}% が上限 "
+            f"radial reactor: ΔP/P_in={dP_over_P*100:.1f}% (床×{fixed.dP_margin_factor}) が上限 "
             f"{fixed.dP_over_P_max*100:.0f}% 超 (r_i={r_i:.2f}m, r_o={r_o:.2f}m, "
             f"H={H:.1f}m, d_p={fixed.d_p_m*1e3:.1f}mm) — infeasible 化",
             UserWarning, stacklevel=2,
@@ -307,15 +320,16 @@ def simulate_radial_flow_reactor_system(
     Q_preheat_GJh = q_w * 3600.0 / 1e9
 
     # ---- 空塔速度チェック (内側面 r_i = 最大速度面に SV_max のみ) ----
+    # 案B: SV も N_parallel で割らない (総流量 ÷ 総内側断面 = 各サブカラムの空塔速度に等しい)。
     n_inlet_mol_s = sum(feed.F_in.values()) * 1000.0 / 3600.0
     Q_vol_in = n_inlet_mol_s * _R_GAS * design.T_in / feed.P_in if feed.P_in > 0 else 0.0
     A_inner = 2.0 * math.pi * r_i * H        # 最小断面 (最大速度)
-    SV_inner = Q_vol_in / (A_inner * N_parallel) if A_inner > 0 else 0.0
+    SV_inner = Q_vol_in / A_inner if A_inner > 0 else 0.0
     if SV_inner > fixed.SV_max_m_per_s:
         warnings.warn(
             f"radial reactor: 内側面 SV={SV_inner:.2f} m/s が上限 "
-            f"{fixed.SV_max_m_per_s} m/s 超 (r_i={r_i:.2f}m, H={H:.1f}m, "
-            f"N_parallel={N_parallel}) — infeasible 化 (フルイダイゼーション/同伴懸念)",
+            f"{fixed.SV_max_m_per_s} m/s 超 (r_i={r_i:.2f}m, H={H:.1f}m) "
+            f"— infeasible 化 (フルイダイゼーション/同伴懸念。SV は H↑/r_i↑ で下げる)",
             UserWarning, stacklevel=2,
         )
         return _penalty_result(reason='sv_out_of_range', SV_actual=SV_inner)
@@ -393,12 +407,16 @@ def simulate_radial_flow_reactor_system(
 #   戻してから次段へ送る。各段で平衡がリセットされ累積転化が上がる (実測: 3 段で ~59%)。
 #   本関数はこの Oleflex 型を、既存の単段ソルバを N 回直列に呼ぶだけで表現する。
 #
-# ■ 段間再加熱の燃料費が自動で乗る仕組み
-#   単段ソルバ simulate_radial_flow_reactor_system は feed.T_feed の値に依らず積分を
-#   design.T_in から開始し、Q_preheat に「feed.T_feed → T_in の昇温熱量」を計上する。
-#   よって前段流出 (T_out_avg < T_in) を次段の FeedStream(T_feed=T_out_avg) として渡せば、
-#   次段の Q_preheat が自動的に「段間再加熱の熱量」になる。全段の Q_preheat を合算すれば
-#   供給予熱 + 全段間再加熱の総燃料が economics の「Reactor予熱炉燃料」経路でそのまま課金される。
+# ■ 時刻同期で直列計算する (2026-05-31, 反応器設計プロ指摘 #5 で改修)
+#   スイング列は時刻 t ごとに Bed1(t)→reheat→Bed2(t)→reheat→Bed3(t) と流れる。各段の活性
+#   a(t) は同一 t (同時に新鮮再生) で決まる。反応は非線形なので「各段で時間平均してから次段へ
+#   渡す」と f(平均)≠平均(f) のズレ (特に選択率) が出る。よって本実装は **時刻サンプル t ごとに
+#   全段を直列積分し、最終段出口を最後に時間平均する**。段間再加熱の熱量も t ごとに評価して平均
+#   する (前段の per-t 出口温度 → T_in への昇温)。旧実装 (各段平均出口を次段へ) からの改修。
+#
+# ■ 段間再加熱の燃料費が乗る仕組み
+#   各段の積分は design.T_in から開始する (= reheat 済)。各段 t の昇温熱量「前段 per-t 出口温度
+#   → T_in」を合算・時間平均して Q_preheat に計上 → economics の「Reactor予熱炉燃料」に総量が乗る。
 #
 # ■ モデルの簡略化 (!仮置き的な割り切り、確定時に精緻化)
 #   - 各段は同一ジオメトリ (RadialDesignVars の D_inner/bed_thickness/H) とする (Oleflex の
@@ -415,55 +433,132 @@ def simulate_radial_multibed_reactor_system(
 ) -> SimulationResult:
     """Oleflex 型: 同一ジオメトリの径方向流断熱床を n_beds 段直列 + 段間再加熱 (T_in へ)。
 
-    各段は simulate_radial_flow_reactor_system を呼ぶ。前段流出を次段 feed (T_feed=前段
-    T_out) として渡すことで、段間再加熱の燃料は次段の Q_preheat に自動計上される (上記解説)。
-    どれか 1 段でも penalty (ΔP 超過 / SV 超過 / sim_failure) を返したら、その penalty を
-    そのまま伝播して全体を infeasible 化する。n_beds=1 なら単段と完全一致。
+    **時刻同期 (2026-05-31)**: 時刻サンプル t ごとに全段を直列積分 (Bed1(t)→reheat→Bed2(t)→…)
+    し、最終段出口を最後に時間平均する。反応の非線形性による f(平均)≠平均(f) のズレを避けるため、
+    旧実装 (各段を時間平均してから次段へ渡す) から改修。どこか 1 段・1 時刻でも積分が失敗したら
+    sim_failure を伝播。n_beds=1 なら単段ソルバに委譲し完全一致。
     """
     if n_beds < 1:
         n_beds = 1
     if n_beds == 1:
         return simulate_radial_flow_reactor_system(design, feed, fixed, n_time_samples)
 
-    cur_feed = feed
-    beds = []
-    for _ in range(n_beds):
-        res = simulate_radial_flow_reactor_system(design, cur_feed, fixed, n_time_samples)
-        eff = res.effluent
-        # penalty 検出: _penalty_result は effluent を F=0 / P=0 で返す。1 段でも落ちたら伝播。
-        if eff.P_out <= 0.0 or sum(eff.F_out_avg.values()) <= 0.0:
-            return res
-        beds.append(res)
-        # 次段 feed = 前段流出 (T_feed=前段 T_out → 次段ソルバが T_in へ再加熱)。
-        cur_feed = FeedStream(
-            F_in=dict(eff.F_out_avg),
-            T_feed=eff.T_out_avg,
-            P_in=eff.P_out,
-        )
+    # ---- 入力バリデーション (単段ソルバと同条件) ----
+    if (design.t_cyc <= 0 or design.D_inner <= 0 or design.bed_thickness <= 0
+            or design.H <= 0):
+        return _penalty_result(reason='input_invalid')
+    if design.T_in <= 0 or feed.T_feed <= 0 or feed.P_in <= 0:
+        return _penalty_result(reason='input_invalid')
+    if any(v < 0 for v in feed.F_in.values()) or sum(feed.F_in.values()) <= 0:
+        return _penalty_result(reason='input_invalid')
 
-    last = beds[-1]
+    r_i, r_o, H = design.r_i, design.r_o, design.H
 
-    # ---- 累積 ΔP (初段入口 → 最終段出口) のハード制約 ----
-    P_in0 = feed.P_in
-    P_out_final = last.effluent.P_out
-    dP_over_P_cum = (P_in0 - P_out_final) / P_in0 if P_in0 > 0 else 0.0
-    dP_over_P_cum = float(np.clip(dP_over_P_cum, 0.0, 1.0))
+    # ---- ジオメトリ / 並列基数 (1 段あたり。全段同一ジオメトリ。時間ループ前に確定) ----
+    V_cat_total = math.pi * (r_o ** 2 - r_i ** 2) * H * (1.0 - fixed.eps)   # 1 段あたり
+    N_parallel = max(math.ceil(V_cat_total / fixed.V_cat_max_per_vessel), 1)
+
+    # ---- 時間サンプリング × 段直列 (時刻同期) ----
+    if n_time_samples < 2:
+        t_samples = np.array([0.0])
+    else:
+        t_samples = np.linspace(0.0, design.t_cyc, n_time_samples)
+
+    F_final_list, T_final_list, P_final_list, Qpre_list = [], [], [], []
+    # 各段の入口条件 (時刻ごと) を SV チェック用に保持
+    bed_in_n_mol_s = [[] for _ in range(n_beds)]
+    bed_in_P = [[] for _ in range(n_beds)]
+
+    for t in t_samples:
+        F_cur = dict(feed.F_in)          # [kmol/h]
+        T_from = feed.T_feed             # 当段入口 (予熱前) 温度
+        P_cur = feed.P_in
+        q_w_t = 0.0                      # 当時刻の全段再加熱熱量 [J/s]
+        F_out = None
+        for k in range(n_beds):
+            n_in_mol_s = sum(F_cur.values()) * 1000.0 / 3600.0
+            bed_in_n_mol_s[k].append(n_in_mol_s)
+            bed_in_P[k].append(P_cur)
+            # 当段の予熱/再加熱熱量 (T_from → design.T_in)
+            for comp in _COMPS:
+                F_mol_s = F_cur.get(comp, 0.0) * 1000.0 / 3600.0
+                q_w_t += F_mol_s * _thermo.calc_enthalpy_change(comp, T_from, design.T_in)
+            feed_k = FeedStream(F_in=F_cur, T_feed=T_from, P_in=P_cur)
+            F_out, T_out, P_out = _simulate_one_time_radial(
+                design, feed_k, fixed, float(t), N_parallel)
+            if F_out is None:
+                return _penalty_result(reason='sim_failure')
+            F_cur = {comp: float(F_out[i]) * 3600.0 / 1000.0 for i, comp in enumerate(_COMPS)}
+            T_from = T_out               # 次段入口 = 当段 per-t 出口温度 → 次段で T_in へ再加熱
+            P_cur = P_out
+        F_final_list.append(np.array([F_cur[c] * 1000.0 / 3600.0 for c in _COMPS]))  # [mol/s]
+        T_final_list.append(T_out)
+        P_final_list.append(P_out)
+        Qpre_list.append(q_w_t)
+
+    # ---- 時間平均 (最終段出口・予熱熱量) ----
+    if len(t_samples) >= 2:
+        _trapz = getattr(np, 'trapezoid', None) or getattr(np, 'trapz')
+        F_avg_mol_s = _trapz(np.array(F_final_list), t_samples, axis=0) / design.t_cyc
+        T_out_avg = float(_trapz(np.array(T_final_list), t_samples) / design.t_cyc)
+        P_out_avg = float(_trapz(np.array(P_final_list), t_samples) / design.t_cyc)
+        q_w_avg = float(_trapz(np.array(Qpre_list), t_samples) / design.t_cyc)
+    else:
+        F_avg_mol_s = F_final_list[0]
+        T_out_avg, P_out_avg, q_w_avg = T_final_list[0], P_final_list[0], Qpre_list[0]
+    F_out_final = {comp: float(F_avg_mol_s[i]) * 3600.0 / 1000.0 for i, comp in enumerate(_COMPS)}
+    Q_preheat_total = q_w_avg * 3600.0 / 1e9   # [GJ/h] 供給予熱 + 全段間再加熱
+
+    # ---- 累積 ΔP (床 Ergun × 内部品マージン) のハード制約 ----
+    # 全段の真の床ΔP 合計 (時間平均) に dP_margin_factor を掛けて総ΔP とする (化学は真の床P)。
+    dP_bed_cum = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
+    dP_over_P_cum = float(np.clip(dP_bed_cum * fixed.dP_margin_factor, 0.0, 1.0))
+    P_out_avg = feed.P_in * (1.0 - dP_over_P_cum)   # マージン込み最終出口圧 (→ 下流圧縮機)
     if dP_over_P_cum > fixed.dP_over_P_max:
         warnings.warn(
-            f"radial multibed: 累積ΔP/P_in={dP_over_P_cum*100:.1f}% が上限 "
+            f"radial multibed: 累積ΔP/P_in={dP_over_P_cum*100:.1f}% (床×{fixed.dP_margin_factor}) が上限 "
             f"{fixed.dP_over_P_max*100:.0f}% 超 (n_beds={n_beds}) — infeasible 化",
             UserWarning, stacklevel=2,
         )
         return _penalty_result(reason='dP_excess', dP_over_P=dP_over_P_cum)
 
-    # ---- 統合: 流量 (最終段流出)、熱量・CAPEX・触媒は全段積算 ----
-    F_out_final = dict(last.effluent.F_out_avg)
-    Q_preheat_total = sum(b.effluent.Q_preheat for b in beds)        # 供給予熱 + 全段間再加熱
-    reactor_capex_total = sum(b.equipment.Reactor_CAPEX for b in beds)
-    catalyst_weight_total = sum(b.equipment.Catalyst_Weight_Total for b in beds)
-    N_reactors_total = sum(b.equipment.N_reactors_total for b in beds)
-    N_parallel_each = beds[0].equipment.N_parallel
-    N_swing_sets_each = beds[0].equipment.N_swing_sets
+    # ---- 空塔速度チェック (各段の内側面、案B: N_parallel で割らない)。下流段ほど ----
+    #   モル数増 + 圧力減で SV が上がりうるので全段の最大を見て SV_max のみ課す。
+    A_inner = 2.0 * math.pi * r_i * H
+    SV_inner_max = 0.0
+    for k in range(n_beds):
+        n_avg = float(np.mean(bed_in_n_mol_s[k]))
+        P_avg = float(np.mean(bed_in_P[k]))
+        Q_vol_in = n_avg * _R_GAS * design.T_in / P_avg if P_avg > 0 else 0.0
+        SV_k = Q_vol_in / A_inner if A_inner > 0 else 0.0
+        SV_inner_max = max(SV_inner_max, SV_k)
+    if SV_inner_max > fixed.SV_max_m_per_s:
+        warnings.warn(
+            f"radial multibed: 内側面 SV={SV_inner_max:.2f} m/s が上限 "
+            f"{fixed.SV_max_m_per_s} m/s 超 (r_i={r_i:.2f}m, H={H:.1f}m, n_beds={n_beds}) "
+            f"— infeasible 化 (フルイダイゼーション/同伴懸念)",
+            UserWarning, stacklevel=2,
+        )
+        return _penalty_result(reason='sv_out_of_range', SV_actual=SV_inner_max)
+
+    # ---- 装置 (1 段あたりを算出し全段積算。全段同一ジオメトリ) ----
+    N_swing_sets = math.ceil(fixed.t_regen / design.t_cyc) + 1
+    N_reactors_per_bed = N_parallel * N_swing_sets
+    V_vessel_actual = (math.pi * (r_o ** 2 - r_i ** 2) * H) / N_parallel   # 1 基あたり (環状部)
+    if V_vessel_actual <= 0:
+        return _penalty_result(reason='volume_zero')
+    catalyst_weight_per_bed = V_cat_total * N_swing_sets * fixed.rho_b
+    try:
+        reactor_capex_per_bed = calc_reactor_capex_okuyen(
+            V_vessel_m3=V_vessel_actual, P_abs_pa=feed.P_in,
+            D_m=2.0 * r_o, N_reactors_total=N_reactors_per_bed,
+        )
+    except Exception:
+        reactor_capex_per_bed = _PENALTY_CAPEX
+
+    N_reactors_total = N_reactors_per_bed * n_beds
+    catalyst_weight_total = catalyst_weight_per_bed * n_beds
+    reactor_capex_total = reactor_capex_per_bed * n_beds
 
     # ---- 累積転化/選択率 (新規 feed → 最終段流出) ----
     F_A_in = feed.F_in.get('A', 0.0)
@@ -479,14 +574,14 @@ def simulate_radial_multibed_reactor_system(
     return SimulationResult(
         effluent=EffluentStream(
             F_out_avg=F_out_final,
-            T_out_avg=last.effluent.T_out_avg,
+            T_out_avg=T_out_avg,
             Q_preheat=Q_preheat_total,        # 全段ぶん → economics の加熱炉燃料に総量が乗る
-            P_out=P_out_final,
+            P_out=P_out_avg,
         ),
         equipment=EquipmentCost(
-            V_vessel_actual=beds[0].equipment.V_vessel_actual,  # 1 基あたり (代表)
-            N_parallel=N_parallel_each,
-            N_swing_sets=N_swing_sets_each,
+            V_vessel_actual=V_vessel_actual,  # 1 基あたり (代表)
+            N_parallel=N_parallel,
+            N_swing_sets=N_swing_sets,
             N_reactors_total=N_reactors_total,                  # 全段合計基数
             Catalyst_Weight_Total=catalyst_weight_total,        # 全段合計
             Reactor_CAPEX=reactor_capex_total,                  # 全段合計

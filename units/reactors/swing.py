@@ -266,6 +266,13 @@ class FixedParams:
     #   「等圧」前提が崩れ後段圧縮・転化率に悪影響 → infeasible 化 (アドバイス:
     #   0.05 超注意 / 0.1 超で設計思想見直し に対応する上限)。
     dP_over_P_max:        float = 0.10
+    # 総ΔP マージン係数 [-] (!仮置き, 2026-05-31, 反応器設計プロ指摘 #4 の簡易対応)
+    #   床 Ergun 圧損以外 (分配器/中心捕集管/スクリーン/ノズル/段間配管/弁) の圧損を
+    #   一括で見込む粗い係数: 総反応器ΔP = 床ΔP × dP_margin_factor。床内の化学計算には
+    #   混入させず、最終出口の dP_over_P・P_out (→下流圧縮機へ自動伝播)・feasibility 制約に
+    #   のみ適用する。段間加熱炉ΔP(~0.1-0.3bar/基)は圧縮機ループで回復する別項として本係数に
+    #   含めない。値 1.4 (=床ΔPに+40%) は一般的な内部品許容の目安で確定値はプロ/文献領分【確認中】。
+    dP_margin_factor:     float = 1.4
 
     def __post_init__(self) -> None:
         _checks = {
@@ -300,6 +307,11 @@ class FixedParams:
         if not (0.0 < self.dP_over_P_max < 1.0):
             raise ValueError(
                 f"FixedParams: dP_over_P_max ({self.dP_over_P_max}) は (0, 1) でなければなりません。"
+            )
+        if self.dP_margin_factor < 1.0:
+            raise ValueError(
+                f"FixedParams: dP_margin_factor ({self.dP_margin_factor}) は 1.0 以上でなければなりません"
+                "（床以外の圧損を加算するマージン係数のため）。"
             )
 
 
@@ -507,12 +519,15 @@ def _ode_axial(z: float, y: np.ndarray,
 
     # ---- 圧力損失 (Ergun 式) ----
     # 設計判断 (2026-05-30, 反応器設計レビュー): 0.5 bar 低圧・高温・大流量固定床では
-    #   圧損が無視できないため軸方向 ODE に連成。空塔速度 u は 1 基あたり (= 並列分割後)
-    #   の値で評価する (SV チェックと同定義 u = Q_vol / (A_cross × N_parallel))。
+    #   圧損が無視できないため軸方向 ODE に連成。
+    # 案B (2026-05-31 確定): 設計幾何 (D, z_cat) は反応器全体を表す。V_cat>200m³ で並列分割
+    #   する場合、総断面 A_cross を N_parallel 本に分けても「総流量 ÷ 総断面」= 各カラムの空塔
+    #   速度は不変なので u = Q_vol / A_cross (N_parallel で割らない)。旧実装の /N_parallel は
+    #   ΔP・SV を過小評価するバグだった。N_parallel は容器分割・コスト計上のみに使う。
     #   ガス密度 ρ は理想気体 + 組成平均 MW、粘度 μ は _gas_viscosity(T) (!仮置き 近似)。
-    if A_cross > 0 and N_parallel >= 1:
+    if A_cross > 0:
         Q_vol = F_total * _R_GAS * T_local / P_local          # [m³/s] 全体体積流量
-        u = Q_vol / (A_cross * N_parallel)                    # [m/s] 1 基あたり空塔速度
+        u = Q_vol / A_cross                                   # [m/s] 空塔速度 (総流量÷総断面)
         # 質量流量 [kg/s] = Σ F_i[mol/s] × MW_i[g/mol] / 1000
         mass_flow = sum(float(F[i]) * MW[comp] for i, comp in enumerate(_COMPS)) / 1000.0
         rho = mass_flow / Q_vol if Q_vol > 0 else 0.0         # [kg/m³]
@@ -668,13 +683,16 @@ def simulate_swing_reactor_system(
     #   「等圧」前提が崩れ、後段圧縮比悪化・転化率低下を招くため infeasible 化。
     #   dP_over_P_actual を equipment に積み run_one_pass._compute_reactor_shortfall で
     #   連続シグナル化 (BO が z_cat↓ / D↑ / 粒径↑ 方向を学習)。
-    dP_over_P = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
+    # 床ΔP に内部品マージン (dP_margin_factor) を掛けて総反応器ΔP とし、出口圧・feasibility
+    # に適用 (床内の化学計算には混入させない。詳細は FixedParams.dP_margin_factor)。
+    dP_over_P_bed = (feed.P_in - P_out_avg) / feed.P_in if feed.P_in > 0 else 0.0
     # [0, 1] にクランプ (1.0 = 全圧損失。床下限ガードで P_out≥下限だが Radau の
     # わずかな行き過ぎに備える)。
-    dP_over_P = float(np.clip(dP_over_P, 0.0, 1.0))
+    dP_over_P = float(np.clip(dP_over_P_bed * fixed.dP_margin_factor, 0.0, 1.0))
+    P_out_avg = feed.P_in * (1.0 - dP_over_P)   # マージン込み出口圧 (→ 下流圧縮機へ伝播)
     if dP_over_P > fixed.dP_over_P_max:
         warnings.warn(
-            f"swing reactor: ΔP/P_in={dP_over_P*100:.1f}% が上限 "
+            f"swing reactor: ΔP/P_in={dP_over_P*100:.1f}% (床×{fixed.dP_margin_factor}) が上限 "
             f"{fixed.dP_over_P_max*100:.0f}% 超 "
             f"(P_in={feed.P_in/1e5:.3f}bar → P_out={P_out_avg/1e5:.3f}bar, "
             f"z_cat={design.z_cat:.1f}m, D={design.D:.2f}m, d_p={fixed.d_p_m*1e3:.1f}mm) "
@@ -697,19 +715,19 @@ def simulate_swing_reactor_system(
     # 設計判断 (2026-05-17): 触媒設計アドバイス (固定床 PFR、1〜3 m/s) に従い、
     # FixedParams.SV_{min,max}_m_per_s 範囲外なら infeasible 化。
     # SV は反応器入口 (T_in, P_in) での理想気体換算体積流量 / 断面積。
-    # 並列分割される場合 (V_cat > V_cat_max) は 1 基あたりの断面積で評価する。
+    # 案B (2026-05-31): 総流量 ÷ 総断面 = 分割しても各カラムの空塔速度は不変なので
+    #   SV = Q_vol / A_cross (N_parallel で割らない)。SV は D (と T_in,P_in,流量) のみで決まる。
     n_inlet_mol_s = sum(feed.F_in.values()) * 1000.0 / 3600.0   # kmol/h → mol/s
     if feed.P_in > 0:
         Q_vol_m3_s = n_inlet_mol_s * 8.314 * design.T_in / feed.P_in
     else:
         Q_vol_m3_s = 0.0
-    # 並列分割される場合、1 基あたりの断面積で SV 評価
-    SV_m_per_s = Q_vol_m3_s / (A_cross * N_parallel) if A_cross > 0 else 0.0
+    SV_m_per_s = Q_vol_m3_s / A_cross if A_cross > 0 else 0.0
     if not (fixed.SV_min_m_per_s <= SV_m_per_s <= fixed.SV_max_m_per_s):
         # 範囲外: infeasible として返す
         # 設計判断 (2026-05-21): SV_actual を equipment に積んで run_one_pass の
-        # _compute_reactor_shortfall で連続シグナル化。SV < min なら「D 小か N_parallel↑」、
-        # SV > max なら「D 大か N_parallel↓」を TPE に伝える。
+        # _compute_reactor_shortfall で連続シグナル化。案B では SV は D のみで決まるので
+        # SV < min なら「D を小さく」、SV > max なら「D を大きく」を TPE に伝える。
         warnings.warn(
             f"swing reactor: SV={SV_m_per_s:.2f} m/s が範囲 "
             f"[{fixed.SV_min_m_per_s}, {fixed.SV_max_m_per_s}] m/s 外 "
