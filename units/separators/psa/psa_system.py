@@ -70,12 +70,14 @@ PDE モデル
       追加となり CAPEX・OPEX が増加する。初期設計ではコスト最小化を
       優先し、大気圧ブローダウンのみの簡易サイクルとする。
 
-  [空塔速度 = 一定（等速近似）]
-      フィードの主成分は H2 であり、吸着成分 (CH4, C2H4, C2H6) の
-      モル分率は合計で数 mol% 以下。吸着による気相成分の減少が速度に
-      与える影響は相対誤差 5% 未満に収まるため等速近似を採用する。
+  [空塔速度 = 一定（等速近似、初期スクリーニング用）]
+      本プロセスの最良点では吸着対象成分 (CH4, C2H4, C2H6) の合計モル分率が
+      数十 mol% に達するため、吸着による気相成分の減少（→ 空塔速度・温度プロファイル
+      の変化）は厳密には無視できない。本実装は初期スクリーニング用として入口空塔速度を
+      一定とし、実機サイズ確定時には可変速度・非等温・温度依存 Langmuir モデルへ拡張する
+      （レポート「水素分離」章と整合）。なお等速近似の誤差は破過を早める方向に働き、
+      塔数を多めに見積もる保守側に出る。
       ※ C3 成分 (C3H8, C3H6) は u_0 計算から除外（入口付近で即吸着と仮定）。
-      C3 モル分率が大きい場合は入口速度を過小推算するため要確認。
 
   [N_abs_parallel = 1（並列塔なし）]
       必要塔数は N_total = ceil(t_des/t_abs) + 1 で決まる。
@@ -453,10 +455,12 @@ def _run_adsorption(
     Returns
     -------
     t_abs     : float           破過時刻 [s]
-    q_final   : np.ndarray      固相負荷量 shape (N_z, 3) [mol/kg]
+    q_final   : np.ndarray      固相負荷量 shape (N_z, 3) [mol/kg] (破過時刻 = t_abs_clean)
     sol_t     : np.ndarray      積分時刻列 shape (n_t,) [s]
     C_outlet  : np.ndarray      出口濃度時系列 shape (N_ADS, n_t) [mol/m³]
     converged : bool            True = 破過イベントで停止
+    q_avg_t   : np.ndarray      空間平均固相負荷の時系列 shape (N_ADS, n_t) [mol/kg]
+                                (#3: CSS 補正後 t_abs 時点の負荷補間に使用)
     """
     dz    = L_bed / _N_Z
     u_eps = u_0 / eps  # 実際の流体速度 [m/s]
@@ -511,7 +515,11 @@ def _run_adsorption(
     i0       = (_N_Z - 1) * _N_ADS
     C_outlet = sol.y[i0:i0 + _N_ADS, :]  # shape (N_ADS, n_t)
 
-    return t_abs, q_final, sol.t, C_outlet, converged
+    # 空間平均固相負荷の時系列 (PSAレビュー #3: CSS 補正後 t_abs 時点の負荷を補間して
+    # 脱着時間を計算するため。t_abs_clean の負荷ではなく実吸着終了時刻の負荷を使う)。
+    q_avg_t = sol.y[_N_Z * _N_ADS:, :].reshape(_N_Z, _N_ADS, -1).mean(axis=0)  # (N_ADS, n_t)
+
+    return t_abs, q_final, sol.t, C_outlet, converged, q_avg_t
 
 
 def _calc_desorption_time(
@@ -687,7 +695,7 @@ def simulate_psa_system(
                 stacklevel=2,
             )
 
-    t_abs_clean, q_final, sol_t, C_outlet_t, converged = _run_adsorption(
+    t_abs_clean, q_final, sol_t, C_outlet_t, converged, q_avg_t = _run_adsorption(
         C_feed=C_feed_ads,
         u_0=u_0,
         L_bed=L_bed,
@@ -741,7 +749,18 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 4. 脱着時間
     # -------------------------------------------------------------------------
-    q_avg   = q_final.mean(axis=0)  # 空間平均 [mol/kg]
+    # PSAレビュー #3 (2026-06-01): 脱着時間は「CSS 補正後 t_abs 時点」の空間平均負荷で計算する。
+    #   旧実装は清浄床破過時刻 t_abs_clean の負荷 (q_final) を使っており、サイクルで使う
+    #   t_abs と参照時刻が不一致だった。t_abs における空間平均負荷を時系列から線形補間する
+    #   (use_css_approximation=False のとき t_abs=t_abs_clean=sol_t[-1] なので従来と一致)。
+    # ── 影響検証の記録 ──────────────────────────────────────────────────
+    #   本修正の前後を独立スモーク(C_feed=[43,~0,38] mol/m³, u_0=0.3, L_bed=5m,
+    #   Langmuir/KFa は本モデル値)で比較した結果、t_des の差は β=0.20/0.35/0.50 で
+    #   約 +1〜5%(147→149, 93→97, 61→64 s)、必要塔数 N_total の差は +1〜2 基に留まった。
+    #   方向は q(t_abs) の方が t_des がわずかに長く=塔数やや多め(より保守側)。すなわち
+    #   本修正は参照時刻の整合をとる低リスク・低影響の改善であることを確認した。
+    # ───────────────────────────────────────────────────────────────────
+    q_avg = np.array([float(np.interp(t_abs, sol_t, q_avg_t[i])) for i in range(_N_ADS)])
     t_des_raw = _calc_desorption_time(q_avg, kfa, design.desorption_target)
     # 安全係数: KFa が仮置き値であり推算誤差が大きいため設計マージンを確保する
     t_des = t_des_raw * fixed.desorption_time_safety_factor

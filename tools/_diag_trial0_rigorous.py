@@ -205,7 +205,7 @@ def main() -> None:
             q_s    = np.array([PSA_LANGMUIR_PARAMS[k]['q_s'] for k in _ADS_ORDER])
             a_lang = np.array([PSA_LANGMUIR_PARAMS[k]['a']   for k in _ADS_ORDER])
             kfa    = np.array([PSA_KFA[k]                    for k in _ADS_ORDER])
-            t_abs_clean, q_final, sol_t, C_outlet_t, converged = _run_adsorption(
+            t_abs_clean, q_final, sol_t, C_outlet_t, converged, _q_avg_t = _run_adsorption(
                 C_feed=C_feed_ads,
                 u_0=u_0,
                 L_bed=design.psa.L_bed,
