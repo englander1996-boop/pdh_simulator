@@ -39,6 +39,11 @@ except Exception:
 
 _RESULTS_DIR = os.path.join(_HERE, 'results')
 
+# レポート確定の BO ベスト (trial #194, outputs/main_20260601_150117)。outputs/ は
+# git-ignore でラボ PC に無いため、レポートと同一基準で比較できるようリポジトリに同梱する。
+# これを既定の baseline とし、--baseline で上書き可。同梱が無ければ最新 outputs/main_* に fallback。
+_REPORT_BASELINE = os.path.join(_HERE, 'baseline_best.json')
+
 # ---------------------------------------------------------------------------
 # ケースのメタ情報 (匿名: テーマ/年・成熟度・手法。著者名は出さない)
 #   成熟度 = 12 − 検出された欠陥(P)数。低いほど欠陥が多く BO との ΔTAC が大きい想定。
@@ -96,12 +101,15 @@ def _docstring_head(mod) -> str:
 def load_baseline_tac(baseline_path: str | None) -> tuple[float, str]:
     """BO ベストの effective_TAC を返す。baseline 未指定なら最新の outputs/main_*/best.json。"""
     if baseline_path is None:
-        cands = sorted(glob.glob(os.path.join(_REPO_ROOT, 'outputs', 'main_*', 'best.json')))
-        if not cands:
-            raise FileNotFoundError(
-                'BO ベースラインが見つかりません。--baseline で best.json を指定してください '
-                '(例 outputs/main_20260601_150117/best.json)')
-        baseline_path = cands[-1]
+        if os.path.exists(_REPORT_BASELINE):
+            baseline_path = _REPORT_BASELINE          # レポートと同一基準 (trial #194)
+        else:
+            cands = sorted(glob.glob(os.path.join(_REPO_ROOT, 'outputs', 'main_*', 'best.json')))
+            if not cands:
+                raise FileNotFoundError(
+                    'BO ベースラインが見つかりません。--baseline で best.json を指定してください '
+                    '(例 outputs/main_20260601_150117/best.json)')
+            baseline_path = cands[-1]
     with open(baseline_path, encoding='utf-8') as f:
         data = json.load(f)
     tac = float(data.get('effective_TAC') or data.get('value'))
