@@ -112,7 +112,9 @@ desorption_target」で初期化 → 床全体が飽和の保守的設定 (実 C
 ### 設計判断 (根拠あり)
 - `T_abs = 25°C` (冷却水到達下限 + Langmuir 仮置き条件と整合)
 - `P_des = 1 atm` (真空ポンプ不要、コスト最小化優先)
-- 等速近似 (吸着成分が数 mol% 以下、誤差 < 5%)
+- 等速近似 (初期スクリーニング用)。最良点では吸着対象 (CH4/C2H4/C2H6) 合計が数十 mol% に達し
+  厳密には無視できないが、等速近似の誤差は破過を早める方向 = 塔数を多めに見積もる保守側に出る。
+  実機サイズ確定時に可変速度・非等温・温度依存 Langmuir へ拡張 (レポート「水素分離」章と整合)
 - `breakthrough_ratio = 0.001` (CH4 捕捉率 > 99.9% 保証)
 - `N_z = 20` (10/20 で t_abs 差 < 5% を確認済み)
 - `_U0_MAX = 1.0 m/s` (化工便覧第 13 章 図 13・31)
@@ -145,3 +147,5 @@ desorption_target」で初期化 → 床全体が飽和の保守的設定 (実 C
 ## 10. 関連ドキュメント
 
 - `units/separators/psa/error_handling_fixes_20260505.md` (旧バグ修正履歴)
+- `KNOWN_PLACEHOLDERS.md` (★仮置き項目の全体一覧。Langmuir/KFa/rho_b/活性炭単価・寿命/
+  use_css_approximation/desorption_time_safety_factor の確認方法)

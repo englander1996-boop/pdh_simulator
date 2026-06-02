@@ -1,8 +1,8 @@
 # SPEC: membrane_system.py — PDH 膜分離システム シミュレーター
 
-**ファイルパス**: `units/separators/membrane_system.py`  
+**ファイルパス**: `units/separators/membrane/membrane_system.py`  
 **依存 EOS モジュール**: `src/eos.py`  
-**最終更新**: 2026-05-02（CAPEX_mem・CAPEX_total 実装、仮置き値の明示）
+**最終更新**: 現行コードへ整合 (多段圧縮+段間冷却・vapor_feed・膜性能感度係数・P_L 1atm 固定方針を反映)
 
 ---
 
@@ -53,8 +53,8 @@ PDH プロセスにおける **C₃H₆/C₃H₈ 膜分離システム** を 5 �
   └──────────┘
        │ ガス @ P_in
        ▼
-  ┌──────────────┐  等エントロピー圧縮 (PR 補正)
-  │フィード圧縮機 │──▶ T_feed_comp_out, W_feed_kW
+  ┌──────────────┐  多段等エントロピー圧縮 + 段間冷却 (PR 補正)
+  │フィード圧縮機 │──▶ T_feed_comp_out, W_feed_kW, Q/A_intercool
   └──────────────┘
        │ ガス @ P_H
        ▼
@@ -63,8 +63,8 @@ PDH プロセスにおける **C₃H₆/C₃H₈ 膜分離システム** を 5 �
   └────────────────┘
        │ Permeate @ P_L
        ▼
-  ┌────────────────┐  等エントロピー圧縮 (PR 補正)
-  │ 製品圧縮機     │──▶ T_prod_comp_out, W_prod_kW
+  ┌────────────────┐  多段等エントロピー圧縮 + 段間冷却 (PR 補正)
+  │ 製品圧縮機     │──▶ T_prod_comp_out, W_prod_kW, Q/A_intercool
   └────────────────┘
        │ ガス @ P_dist
        ▼
@@ -304,9 +304,26 @@ $$A_{vap} = \frac{Q_{vap}\,[\mathrm{kW}]}{U_{vap}\,[\mathrm{kW/(m^2 K)}] \times 
 
 ---
 
-## 6. 圧縮機モデル
+## 6. 圧縮機モデル（多段 + 段間冷却）
 
-フィード圧縮機・製品圧縮機の両方で `compress_isentropic`（[4-9節](#4-9-断熱圧縮-compress_isentropic)）を共通使用。
+フィード圧縮機・製品圧縮機の両方で内部ヘルパ `_compress_multistage`（`compress_isentropic`
+を段数分ループ + 段間冷却）を共通使用する。
+
+### 6-0. 多段化ロジック `_compress_multistage`
+
+圧縮比が大きいと 1 段では出口温度が過大になるため、`max_compression_ratio_per_stage`
+(!仮置き 4.0) を超えないよう段数 $n$ を決め、各段で等比圧縮比 $(P_{out}/P_{in})^{1/n}$ で
+昇圧する。各段の間で冷却水によりガスを `intercool_T_K`(!仮置き 40°C) まで顕熱冷却し、
+次段入口温度とする。
+
+- 返り値: `(T_out, W_total_per_mol, Q_intercool_kW, A_intercool_m2, n_stages, T_intercool_in_K)`
+- `n=1`(圧縮比 ≤ r_max) のときは段間冷却なし → 従来の単段モデルと一致 (感度比較用)。
+- 段間冷却はガス顕熱の与熱流体なので、温度域 ($T_{intercool,in}\to$ `intercool_T_K`) も返し、
+  `flowsheet/heat_integration.extract_streams` で `'H_mem_intercool'` ホットストリームとして
+  熱統合 (HI) に乗せる (二重計上なし)。段間冷却器面積 $A=Q/(U_{intercool}\cdot \mathrm{LMTD})$。
+
+> 段間冷却の値はすべて !仮置き (`max_compression_ratio_per_stage` / `intercool_T_K` /
+> `U_intercool`)。詳細は `KNOWN_PLACEHOLDERS.md`。
 
 ### フィード圧縮機
 
@@ -350,9 +367,9 @@ $$Q_B = Q_A / \alpha$$
 
 | 記号 | 意味 | 単位 |
 |---|---|---|
-| $Q_A$ | C₃H₆ 透過度（デフォルト 40 GPU → $1.340 \times 10^{-8}$ mol/(m²·s·Pa)） | mol m⁻² s⁻¹ Pa⁻¹ |
+| $Q_A$ | C₃H₆ 実効透過度 $= Q_{A,GPU}\times Q_{A,factor}$（既定 40 GPU × 1.0 → $1.340 \times 10^{-8}$ mol/(m²·s·Pa)） | mol m⁻² s⁻¹ Pa⁻¹ |
 | $Q_B$ | C₃H₈ 透過度（$= Q_A / \alpha$） | mol m⁻² s⁻¹ Pa⁻¹ |
-| $\alpha$ | C₃H₆/C₃H₈ 膜選択性（デフォルト 90） | — |
+| $\alpha$ | C₃H₆/C₃H₈ 実効膜選択性 $= \alpha\times \alpha_{factor}$（既定 90 × 1.0） | — |
 | $x$ | 非透過側局所 C₃H₆ モル分率 | — |
 | $y_{local}$ | 透過側局所 C₃H₆ モル分率 | — |
 | $\gamma$ | 圧力比 $= P_L / P_H$ | — |
@@ -485,7 +502,14 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | 8 | **気化器 LMTD: 熱媒温度一定** | 蒸気凝縮を熱媒と仮定し $T_{hot}$ = const（LP Steam 160°C, コンテスト仕様） |
 | 9 | **冷却器 LMTD: 向流** | ガス入口端 = $T_{in} - T_{cold,out}$、液出口端 = $T_{bp} - T_{cold,in}$（冷却水 30→40°C, コンテスト仕様） |
 | 10 | **冷媒不使用（Case A）** | 製品冷却器は冷却水のみ。泡点が $T_{cold,out}$(40°C) を下回る場合は温度クロスが発生しペナルティ返却。冷媒モデルは目的関数の不連続性を生むため採用しない |
-| 11 | **CAPEX: 全 5 機器実装済み** | Turton Bare Module Cost 法（プロセス設計R08-3.pdf）。膜モジュール単価（50 USD/m²）と A_per_module（500 m²）は仮置き値。確定次第 `cost_parameters.MEM_UNIT_PRICE_USD_PER_M2` と `MemFixedParams.A_per_module` を更新すること |
+| 11 | **CAPEX: 全機器実装済み** | Turton Bare Module Cost 法（プロセス設計R08-3.pdf）。膜モジュール単価（50 USD/m²）と A_per_module（500 m²）は仮置き値。確定次第 `cost_parameters.MEM_UNIT_PRICE_USD_PER_M2` と `MemFixedParams.A_per_module` を更新すること |
+| 12 | **圧縮機は多段 + 段間冷却** | 圧縮比 > `max_compression_ratio_per_stage`(!仮置き 4.0) で段数分割、段間で `intercool_T_K`(!仮置き 40°C) まで冷却。段間冷却は HI ホットストリーム `'H_mem_intercool'` に登録。値は全て !仮置き |
+| 13 | **vapor_feed フラグ** | 低圧 Dist2 で液フィード不可のとき True にして気化器をスキップ |
+| 14 | **膜性能感度係数** | `Q_A_factor`/`alpha_factor`(既定 1.0 = 挙動不変) で混合ガス/高圧/経時劣化を感度解析。実測が出るまで 1.0 固定で文献代表値を使用 |
+| 15 | **P_L は 1 atm 固定が設計思想** | 真空ポンプなし。逸脱時は simulate 内で初回のみ警告 |
+
+> `!仮置き`（A_per_module / 膜単価 / 多段冷却 3 値 / 膜性能感度係数）の詳細は
+> `KNOWN_PLACEHOLDERS.md`、レビュー課題は `ISSUES_membrane_system.md` を参照。
 
 ---
 
@@ -498,7 +522,7 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | フィールド | 型 | 単位 | 説明 |
 |---|---|---|---|
 | `P_H` | float | Pa | 膜供給側（高圧）圧力 |
-| `P_L` | float | Pa | 膜透過側（低圧）圧力 |
+| `P_L` | float | Pa | 膜透過側（低圧）圧力。**大気圧 1 atm 固定が設計思想**（真空ポンプなし）。全体最適化側は常に 1 atm を渡す。逸脱は simulate 内で一度だけ警告 |
 | `A_mem` | float | m² | 総膜面積 |
 | `P_dist` | float | Pa | 後段蒸留塔操作圧力（製品圧縮機出口圧力）。C3H6 97%組成では PR EOS 試算で ≳ 17 bar が冷却水使用の目安。P_L より大きくなければならない（`__post_init__` で検証） |
 
@@ -525,8 +549,17 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | `T_cold_in` | 303.15 | K | 冷却水入口温度 = 30°C。コンテスト仕様 |
 | `T_cold_out` | 313.15 | K | 冷却水出口温度 = 40°C。コンテスト仕様 |
 | `eta_comp` | 0.75 | — | 圧縮機断熱効率。化工便覧 改訂六版 p.333（ポリトロープ効率 0.7〜0.8 の中央値） |
+| `vapor_feed` | False | — | False: 液フィード（気化器で気化）/ True: ガスフィード（気化器スキップ、圧縮機が直接受け取る）。Hua 検証範囲 P_H≤9.5bar 確保のため Dist2 低圧運転 → 液フィード不可のとき True |
+| `max_compression_ratio_per_stage` | 4.0 | — | **!仮置き** 1 段あたり最大圧縮比。遠心圧縮機慣行 3〜4 の上端。全圧縮比 ≤ これなら n=1（単段） |
+| `intercool_T_K` | 313.15 | K | **!仮置き** 段間冷却の到達温度 = 40°C（冷却水で届く） |
+| `U_intercool` | 0.5 | kW/(m²·K) | **!仮置き** 段間冷却器の総括伝熱係数（ガス顕熱-冷却水、ガス-液 0.2 と凝縮 1.0 の中間） |
+| `Q_A_factor` | 1.0 | — | **!仮置き** 透過度劣化係数。$Q_{A,eff}=Q_{A,GPU}\times Q_{A,factor}$。可塑化/界面リーク/経時劣化の感度解析用（0<f≤1 で劣化） |
+| `alpha_factor` | 1.0 | — | **!仮置き** 選択性劣化係数。$\alpha_{eff}=\alpha\times \alpha_{factor}$（0<f≤1 で劣化） |
 
-> `MemFixedParams` の `__post_init__` は `0 < eta_comp ≤ 1.0`、`T_hot > 273 K` を検証する。  
+> `MemFixedParams` の `__post_init__` は `0 < eta_comp ≤ 1.0`、`T_hot > 273 K`、
+> `Q_A_GPU>0`・`alpha>0`、`Q_A_factor>0`・`alpha_factor>0`、
+> `max_compression_ratio_per_stage > 1.0`、`U_intercool > 0` を検証する。
+> `A_per_module` が仮置き値のとき初回のみ UserWarning。  
 > `P_dist` は MemDesignVars に移動済み（最適化変数）。
 
 ### 出力
@@ -582,7 +615,11 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | `CAPEX_comp_prod` | 億円 | 製品圧縮機 CAPEX（実装済み） |
 | `CAPEX_cond` | 億円 | 製品冷却器 CAPEX（実装済み） |
 | `CAPEX_mem` | 億円 | 膜モジュール CAPEX（**★ 仮置き**: 単価 50 USD/m²） |
-| `CAPEX_total` | 億円 | 合計資本費 = 5 機器の合算（**★ CAPEX_mem が仮置きのため暫定値**） |
+| `CAPEX_total` | 億円 | 合計資本費の合算（**★ CAPEX_mem が仮置きのため暫定値**） |
+| `Q_intercool_kW` | kW | 段間冷却 総熱量（フィード+製品圧縮機、冷却水 OPEX 用、n=1 なら 0） |
+| `A_intercool_m2` | m² | 段間冷却器 総伝熱面積 |
+| `CAPEX_intercool` | 億円 | 段間冷却器 CAPEX（n=1 なら 0） |
+| `T_intercool_in_K` / `T_intercool_out_K` | K | 段間冷却 入口（各段出口温度の熱量加重平均）/ 出口（= `intercool_T_K`）。HI 登録用 |
 
 ---
 
@@ -624,7 +661,8 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 | `src.eos.residual_enthalpy` | `_h_mol` | 残差エンタルピー計算 |
 | `src.eos.bubble_point_T` | `_condenser` | 製品飽和液温度計算 |
 | `src.eos.dew_point_T` | `_vaporizer` | 気化器出口温度計算 |
-| `src.eos.compress_isentropic` | フィード/製品圧縮機 | 圧縮機出口温度・仕事計算 |
+| `src.eos.compress_isentropic` | `_compress_multistage`（フィード/製品圧縮機） | 各段の出口温度・仕事計算 |
+| `src.cost_calculator.calc_he/comp/mem_capex_okuyen` | CAPEX 計算 | 気化器/冷却器/段間冷却器・圧縮機・膜の Bare Module Cost |
 | `src.thermo.PDHThermo` | `_h_mol` の理想気体項 | $C_p$ 積分（`calc_enthalpy_change`） |
 | `src.config.THERMO_DATA` | `src/eos.py` 全体 | 臨界定数・$C_p$ 係数 |
 | `scipy.integrate.solve_ivp` | `_membrane_ode` | クロスフロー ODE ソルバー（Radau） |
@@ -638,7 +676,7 @@ CEPCI: 397.0 (2001基準) → 544.0 (2016年8月)、為替: 110 JPY/USD
 ### 基本的な呼び出し
 
 ```python
-from units.separators.membrane_system import (
+from units.separators.membrane.membrane_system import (
     MemDesignVars, MemFeedStream, MemFixedParams,
     simulate_membrane_system,
 )

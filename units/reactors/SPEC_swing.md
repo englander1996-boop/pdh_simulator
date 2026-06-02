@@ -105,17 +105,27 @@
 
 ### 3-2. 空間方向 ODE
 
-状態ベクトル: `y = [F_A, F_B, F_C, F_D, F_E, F_F, T]`（単位: mol/s, K）
+状態ベクトル: `y = [F_A, F_B, F_C, F_D, F_E, F_F, T, P]`（単位: mol/s, K, Pa）
+全圧 $P$ は Ergun 圧損で軸方向に減衰させ、分圧計算にも局所 $P$ を用いる（P-T-組成-流量の連成）。
 
 **物質収支**
 
-$$\frac{dF_i}{dz} = \varepsilon \cdot A_{cross} \cdot \sum_j \nu_{ij} \cdot r_j
+$$\frac{dF_i}{dz} = (1-\varepsilon) \cdot A_{cross} \cdot \sum_j \nu_{ij} \cdot r_j
 \quad \left[\mathrm{mol\,s^{-1}\,m^{-1}}\right]$$
 
 **エネルギー収支（断熱）**
 
 $$\frac{dT}{dz} = -\frac{(1-\varepsilon) \cdot A_{cross} \cdot \sum_j \Delta H_{rxn,j}(T) \cdot r_j}{\sum_i F_i \cdot C_{p,i}(T)}
 \quad \left[\mathrm{K\,m^{-1}}\right]$$
+
+**圧力損失（Ergun）**
+
+$$\frac{dP}{dz} = -\left(150\frac{(1-\varepsilon_b)^2\,\mu\, u}{\varepsilon_b^3\,(\phi d_p)^2}
++ 1.75\frac{(1-\varepsilon_b)\,\rho\, u^2}{\varepsilon_b^3\,\phi d_p}\right)\quad[\mathrm{Pa\,m^{-1}}]$$
+
+ここで $u = Q_{vol}/A_{cross}$（総流量÷総断面、$N_{parallel}$ で割らない）、$\varepsilon_b$ は
+粒子間空隙率（床/容器比 $\varepsilon$ とは別物）、$\rho$ は理想気体+組成平均 MW のガス密度、
+$\mu$ は `_gas_viscosity(T)`（!仮置き 近似）。
 
 **記号定義**
 
@@ -136,8 +146,11 @@ $$\frac{dT}{dz} = -\frac{(1-\varepsilon) \cdot A_{cross} \cdot \sum_j \Delta H_{
 | 項目 | 値 |
 |---|---|
 | メソッド | Radau（陰的 Runge-Kutta、剛性問題向け） |
-| 相対許容誤差 `rtol` | 1×10⁻⁵ |
-| 絶対許容誤差 `atol` | 1×10⁻⁸ |
+| 相対許容誤差 `rtol` | 1×10⁻⁴ |
+| 絶対許容誤差 `atol` | 1×10⁻⁷ |
+
+> 製品純度スペック 99.5wt% に対し rtol=1e-4 で十分余裕。緩めすぎ (1e-3) は転化率推定が
+> ノイズっぽくなるため中庸を選択。径方向流 `radial_flow.py` も同値。
 
 ### 3-3. 時間方向積分（台形則）
 
@@ -318,7 +331,11 @@ a = calculate_activity_a(T_in - 273.15, t_min)  # z方向に一定
 
 ### 6-1. 触媒体積と並列基数
 
-$$V_{cat,total} = A_{cross} \cdot z_{cat} \cdot \varepsilon$$
+$$V_{cat,total} = A_{cross} \cdot z_{cat} \cdot (1-\varepsilon)$$
+
+> 注: `eps` は「床/容器比」の意味で、$(1-\varepsilon)$ が床（触媒）体積分率。
+> コンテスト仕様「反応器容量 = 触媒量 × 2」⇒ $(1-\varepsilon)=0.5$ ⇒ $\varepsilon=0.5$。
+> 粒子間空隙率 $\varepsilon_b$ とは別物（[§9 FixedParams](#9-データクラス定義) 参照）。
 
 $$N_{parallel} = \max\!\left(\left\lceil \frac{V_{cat,total}}{V_{cat,max}}\right\rceil,\, 1\right)$$
 
@@ -335,7 +352,7 @@ $$N_{reactors,total} = N_{parallel} \times N_{swing,sets}$$
 
 ### 6-3. 容器体積
 
-$$V_{vessel,actual} = \frac{V_{cat,total} / N_{parallel}}{\varepsilon} \quad [\mathrm{m^3}]$$
+$$V_{vessel,actual} = \frac{V_{cat,total} / N_{parallel}}{1-\varepsilon} \quad [\mathrm{m^3}]$$
 
 ### 6-4. 触媒総量
 
@@ -442,6 +459,12 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | 7 | **時間サンプリング間の内挿は台形則** | 20 点（デフォルト）で精度十分と仮定 |
 | 8 | **CAPEX は縦型プロセス容器として推算** | 出典: 授業資料 プロセス設計R08-3.pdf 付録A Table A.1 |
 | 9 | **OPEX は計算対象外**（CAPEX のみ出力） | 反応器単体では後段分離コスト等を確定できないため。TAC は上位スクリプトで全ユニット CAPEX を合算してから計算する |
+| 10 | **多段化・段間 reheat は未実装**（単段等価長さ） | 商用 PDH は 3〜4 段直列 + 段間ヒーター。本モデルは z_cat を「多段を 1 段にまとめた等価長さ」とみなし段間ヒーター CAPEX/OPEX を計上しない → **CAPEX/OPEX を過小評価**する可能性。多段は径方向流 `radial_flow.py` で実装 |
+| 11 | **粒内拡散 (Weisz-Prater) 未考慮** | 反応速度は粒外バルク濃度ベース |
+
+> 軸流深床は 0.5 bar でほぼ全域 infeasible のため、径方向流モデル
+> [`radial_flow.py`](SPEC_radial_flow.md) を別途用意している。`!仮置き` / `【確認中】`
+> の詳細は `KNOWN_PLACEHOLDERS.md` を参照。
 
 ---
 
@@ -472,15 +495,16 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 |---|---|---|---|
 | `t_regen` | 30.0 | min | 触媒再生時間 |
 | `V_cat_max_per_vessel` | 200.0 | m³ | 1基最大触媒量 |
-| `eps` | 0.5 | — | 空隙率 |
+| `eps` | 0.5 | — | 床/容器比 ($(1-\varepsilon)$ が床体積分率)。コンテスト「容器=触媒×2」⇒ $\varepsilon=0.5$。粒子間空隙率 $\varepsilon_b$ とは別物 |
 | `rho_b` | 900.0 | kg/m³ | 触媒 bulk density (Cr2O3-Al2O3 / Catofin 相当)。出典: Chauruka 2021 博士論文 (University of Leeds) γ-Al2O3 担体物性表 Packed Bulk Density 800-1000 g/L の中央値 |
 | `SV_min_m_per_s` / `SV_max_m_per_s` | 0.5 / 3.0 | m/s | 空塔速度の許容範囲 (範囲外で infeasible) |
 | `d_p_m` | 0.003 | m | 触媒粒径 (!仮置き Catofin Cr2O3-Al2O3 ペレット 3mm)。Ergun 圧損に効く |
 | `eps_bed` | 0.40 | — | 粒子間空隙率 ε_b (!仮置き)。**`eps`〔床/容器比〕とは別物**。ρ_b=900 と整合(粒子真密度≈1500) |
 | `sphericity` | 0.9 | — | 形状係数 φ (!仮置き 成形ペレット。球=1.0) |
 | `dP_over_P_max` | 0.10 | — | ΔP/P_in ハード制約閾値 (超過で infeasible) |
+| `dP_margin_factor` | 1.4 | — | 総ΔP マージン係数 (!仮置き)。床 Ergun 以外 (分配器/中心管/スクリーン/ノズル/段間配管/弁) の圧損を一括で見込む: 総反応器ΔP = 床ΔP × dP_margin_factor。床内の化学計算には混入させず、出口圧・feasibility にのみ適用。確定値は【確認中】 |
 
-> `FixedParams` は `__post_init__` で全フィールドが正値であること、および `eps_bed`∈(0,1)・`sphericity`∈(0,1]・`dP_over_P_max`∈(0,1) を検証する。
+> `FixedParams` は `__post_init__` で全フィールドが正値であること、および `eps_bed`∈(0,1)・`sphericity`∈(0,1]・`dP_over_P_max`∈(0,1)・`SV_min<SV_max`・`dP_margin_factor`≥1.0 を検証する。
 
 ### 出力
 
@@ -499,7 +523,7 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | `F_out_avg` | kmol/h | 各成分出口モル流量の時間平均 |
 | `T_out_avg` | K | 出口温度の時間平均 |
 | `Q_preheat` | GJ/h | T_feed → T_in 予熱熱量 |
-| `P_out` | Pa | 出口圧力（= P_in） |
+| `P_out` | Pa | 出口圧力（Ergun 圧損で減衰した実出口圧。マージン込み $= P_{in}(1-\Delta P/P_{in})$。下流圧縮機へ伝播） |
 
 #### `EquipmentCost` — 装置・経済性
 
@@ -511,6 +535,9 @@ $$\mathrm{Reactor\_CAPEX} = C_{TM}\,[\mathrm{USD}] \times 110\,[\mathrm{JPY/USD}
 | `N_reactors_total` | — | 総反応器基数 |
 | `Catalyst_Weight_Total` | kg | システム全体触媒総量 |
 | `Reactor_CAPEX` | 億円 | 全基分建設コスト（C_TM） |
+| `penalty_reason` | — | penalty 診断ラベル（''/'sv_out_of_range'/'dP_excess'/'input_invalid'/'sim_failure'/'volume_zero'/'capex_exception'）。BO の constraints_func 用 |
+| `SV_actual` | m/s | SV 違反時の実 SV（0 なら未計算） |
+| `dP_over_P_actual` | — | 反応器 ΔP/P_in 比（正常完走時も格納、レポート/監視用） |
 
 #### `PerformanceMetrics` — プロセス指標
 
@@ -653,15 +680,16 @@ def objective(x):
 | 対象 | 処理 |
 |---|---|
 | モル流量 `F` | `np.maximum(y[:6], 0.0)` — 負値を 0 にクリップ |
-| 温度 `T_local` | `np.clip(y[6], 300.0, 1500.0)` — 物理範囲外への発散を防止 |
-| 平衡定数 `K_eq` | `max(K_eq, 1.0)` — 低温でのゼロ除算防止 |
-| 吸着定数 `K_B` | `max(K_B, 1.0)` — 低温でのゼロ除算防止 |
+| 温度 `T_local` | `np.clip(y[6], 300.0, 1500.0)` — 物理範囲外への発散を防止（数値ガード、citation 不要） |
+| 全圧 `P_local` | `max(y[7], _P_FLOOR_PA=1e3)` — 床下限ガード。P が下限到達で `dP/dz=0`（負へ暴走防止） |
+| 平衡定数 `K_eq` | `max(K_eq, 1.0)` — 低温での駆動力発散防止 |
+| 吸着定数 `K_B` | `max(K_B, 1.0)` — 低温での吸着項ゼロ除算防止 |
 
 ### その他の保護
 
 | 箇所 | 処理 |
 |---|---|
-| `solve_ivp` | `try/except Exception` で囲み、失敗時は `(None, None)` を返す |
+| `solve_ivp` | `try/except Exception` + `sol.success` チェック。失敗時は `(None, None, None)` を返し警告。呼び出し元で `sim_failure` ペナルティ化 |
 | `calc_fp` | 分母 ≤ 0（非現実的超高圧）の場合、Fp = 10.0 を返す |
 | `calc_cp0` | A ≤ 0 の場合、`ValueError` を raise |
 | コスト計算全体 | `try/except` で囲み、失敗時は `_PENALTY_CAPEX` を使用 |
@@ -669,8 +697,17 @@ def objective(x):
 
 ### ペナルティ値
 
+`_penalty_result(reason, SV_actual, dP_over_P)` が返す `SimulationResult`:
+
 ```
-Reactor_CAPEX = 1×10⁹  [億円]
-Conversion    = 0.0  [%]
-Selectivity   = 0.0  [%]
+Reactor_CAPEX    = 1×10⁹  [億円]
+Conversion       = 0.0  [%]
+Selectivity      = 0.0  [%]
+F_out_avg        = 全成分 0  [kmol/h]
+T_out_avg / P_out = 0
+penalty_reason   = 発火条件ラベル (run_one_pass が shortfall 連続シグナル化に使用)
+SV_actual / dP_over_P_actual = 該当 penalty 経路でのみ意味を持つ実値
 ```
+
+`reason` は `'input_invalid'` / `'sim_failure'` / `'dP_excess'` / `'sv_out_of_range'` /
+`'volume_zero'` / `'capex_exception'`。
