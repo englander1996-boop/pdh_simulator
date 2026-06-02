@@ -226,3 +226,6 @@ H(T,P) = H_ig(T) + H_residual(T,P)              (PR EOS、src/eos.py)
 - `src/utility_selector.py`: `select_utility` (cooler のみ)
 - `src/eos.py`: `z_factor`, `residual_enthalpy`, `_dh_ig` (expansion_valve のみ)
 - `src/cost_parameters.py`: 単価系定数 (経由は `cost_calculator.py`)
+- `flowsheet/heat_integration.py`: `StreamPhase`, `lookup_U`, `utility_phase` (cooler のみ)
+
+> `!仮置き` (各効率・γ テーブル・dT_lm 等) の詳細は `KNOWN_PLACEHOLDERS.md` を参照。
