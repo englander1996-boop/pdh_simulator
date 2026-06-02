@@ -3,9 +3,10 @@
 
 ポリトロピック圧縮式で出口温度と軸動力を推算する。
 
-  W_s  = n/(n-1) × R × T_in × [(P_out/P_in)^((n-1)/n) - 1]  [J/mol]
-  T_out = T_in × (P_out/P_in)^((n-1)/n)
-  n     = γ / (γ - (γ-1)/η_p)  (ポリトロピック指数)
+  W_poly = n/(n-1) × R × T_in × [(P_out/P_in)^((n-1)/n) - 1]  [J/mol]（可逆ヘッド）
+  W_s    = W_poly / η_p  [J/mol]（実軸動力。η_p = w_poly/w_actual より）
+  T_out  = T_in × (P_out/P_in)^((n-1)/n)  （η_p を含む実出口温度）
+  n      = γ / (γ - (γ-1)/η_p)  (ポリトロピック指数)
 
 混合ガスの γ は流量加重平均で近似する。
 
@@ -87,8 +88,12 @@ def simulate_compressor(
     n     = gamma / (gamma - (gamma - 1.0) / eta_poly)
     ratio = P_out_target / stream.P_in
     exp   = (n - 1.0) / n
-    W_mol = n / (n - 1.0) * _R_GAS * stream.T_in * (ratio ** exp - 1.0)  # [J/mol]
-    T_out = stream.T_in * ratio ** exp                                      # [K]
+    # ポリトロピックヘッド（可逆仕事）[J/mol]。η_p は指数 n に織り込まれている。
+    W_poly = n / (n - 1.0) * _R_GAS * stream.T_in * (ratio ** exp - 1.0)
+    # 実軸動力 = ポリトロピックヘッド / ポリトロピック効率。
+    # η_p = w_poly / w_actual より w_actual = w_poly / η_p（= c_p ΔT に一致）。
+    W_mol = W_poly / eta_poly                                            # [J/mol]
+    T_out = stream.T_in * ratio ** exp                                   # [K]（非効率を含む実出口温度）
 
     F_mol_s = F_total * 1000.0 / 3600.0   # kmol/h → mol/s
     W_kW    = W_mol * F_mol_s / 1000.0    # W → kW
