@@ -1,8 +1,0 @@
-Z:\pdh_simulator\units\reactors\swing.py:111: UserWarning: calculate_activity_a: T_celsius=720.00 °C は有効範囲 [400.0, 700.0] °C 外です。端値にクリップして計算を続行します。
-  return calculate_activity_a(T - 273.15, t)
-Z:\pdh_simulator\units\reactors\swing.py:111: UserWarning: calculate_activity_a: T_celsius=750.00 °C は有効範囲 [400.0, 700.0] °C 外です。端値にクリップして計算を続行します。
-  return calculate_activity_a(T - 273.15, t)
-Z:\pdh_simulator\units\reactors\swing.py:111: UserWarning: calculate_activity_a: T_celsius=780.00 °C は有効範囲 [400.0, 700.0] °C 外です。端値にクリップして計算を続行します。
-  return calculate_activity_a(T - 273.15, t)
-Z:\pdh_simulator\units\reactors\swing.py:111: UserWarning: calculate_activity_a: T_celsius=800.00 °C は有効範囲 [400.0, 700.0] °C 外です。端値にクリップして計算を続行します。
-  return calculate_activity_a(T - 273.15, t)
