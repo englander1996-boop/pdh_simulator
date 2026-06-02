@@ -18,14 +18,15 @@
 .\.venv\Scripts\python.exe comparing\run_all.py --dry-run
 # 全 22 ケース実行 (HYSYS 直列、~33h 目安。1 ケース完了ごとに results へ逐次保存)
 .\.venv\Scripts\python.exe comparing\run_all.py
-# レポートと同じ BO 基準に固定する場合
-.\.venv\Scripts\python.exe comparing\run_all.py --baseline outputs\main_20260601_150117\best.json
 # 一部だけ
 .\.venv\Scripts\python.exe comparing\run_all.py --only case_rep_styrene2025,case_rep_eo2025
+# BO 基準を差し替えたい場合のみ
+.\.venv\Scripts\python.exe comparing\run_all.py --baseline outputs\main_20260601_150117\best.json
 ```
 
 成果物は `comparing/results/comparison_<ts>.{csv,md,png}`。HYSYS は単一 COM インスタンスのため
-**直列実行のみ (並列不可)**。BO 基準は未指定なら最新の `outputs/main_*/best.json` を自動採用する。
+**直列実行のみ (並列不可)**。BO 基準は既定で**レポートと同一の同梱 `baseline_best.json`**
+(trial #194 / TAC 1056.3 億円/年) を使う (ラボ PC でもレポートと揃う)。`--baseline` で上書き可。
 
 ## case フォルダ構成
 
