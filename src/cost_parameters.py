@@ -382,27 +382,21 @@ ELECTRICITY_JPY_PER_KWH: float = 17.0
 #                          一般インフレ (CEPCI)       為替                  US 安価 NG ⇒ 日本高 LNG 差
 #
 # 日本補正定数 (JAPAN_STEAM_FUEL_CORRECTION)
-#   旧根拠: Turton 2018 は US LNG $3/MMBtu 前提、日本 LNG は約 $12/MMBtu (4倍)。
-#          steam の燃料寄与は ~50-70%。fuel ratio 4 × 0.5 + capital ratio 1 × 0.5 ≒ 2.5
-#          実勢が出るのを待つ間の保守的下限として 2.0 を採用していた (要見直し)。
-#   変更 (2026-05-27, ユーザー決定): 日本補正 2.0 → 1.0 (補正なし) に変更。
-#     理由: 2.0 は実勢未確認の保守的仮置きで TAC を過大評価していた。日本/US 燃料差の
-#     確たる実勢値が無い段階では Turton US 基準値そのまま (補正なし) を採用する。
-#     ※ Turton 基準値自体が書籍未入手の推定なので !仮置き マーカーは継続。
+#   日本/US 燃料差の確たる実勢値が無い段階では Turton US 基準値そのまま (補正なし、1.0)
+#   を採用する。Turton 基準値自体が書籍未入手の推定なので !仮置き マーカーは継続。
 #
 # 計算 (補正 1.0):
 #   LP: 4.5 × 1.471 × 158.8595 × 1.0 ≈ 1051 → 1050
 #   MP: 4.8 × 1.471 × 158.8595 × 1.0 ≈ 1122 → 1120
 #   HP: 5.7 × 1.471 × 158.8595 × 1.0 ≈ 1332 → 1330
 # 温度の出典: PDH 学生コンテスト要綱 Ver.2.0 (ア)(イ)(ウ)
-JAPAN_STEAM_FUEL_CORRECTION: float = 1.0   # !仮置き 2026-05-27 に 2.0→1.0 (補正撤廃、ユーザー決定)
+JAPAN_STEAM_FUEL_CORRECTION: float = 1.0   # !仮置き 日本補正なし (Turton US 基準値そのまま)
 LP_STEAM_JPY_PER_GJ: float = 1050.0   # 160°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
 MP_STEAM_JPY_PER_GJ: float = 1120.0   # 186°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
 HP_STEAM_JPY_PER_GJ: float = 1330.0   # 230°C 飽和 (!仮置き Turton×CEPCI、日本補正なし)
 
 # ---------------------------------------------------------------------------
 # 冷媒階層 (contest.md §2-3 のユーティリティ仕様)
-# 設計判断 (2026-05-08):
 #   - 冷却水・空冷を超えて低温が必要な箇所では冷凍冷媒を使う必要がある。
 #   - 温度が低いほど製造動力が大きく、単価が指数的に増加。
 #   - エチレン冷媒の製造にプロピレン冷媒を使うため、同一温度なら
@@ -421,15 +415,10 @@ AIR_COOLING_JPY_PER_GJ:           float =    95.0   # 空冷 (!仮置き Turton 
 COOLING_WATER_JPY_PER_GJ:         float =    85.0   # 30→40°C (!仮置き Turton 推定値、書籍未入手)
 
 # 冷凍冷媒単価 [円/GJ] — contest §2-3 準拠「製造所要動力」ベース
-# 変更 (2026-05-27, ユーザー決定): 旧 Vasudevan 2017 推定の $/GJ「購入単価」を撤回し、
-#   contest §2-3 の規定に従い「製造するための所要動力 (= 冷凍機 圧縮機電力)」ベースに置換。
 #   contest §2-3 原文要旨: 冷凍冷媒は隣接エチレンプラントから供給を受けられる (= 購入費ゼロ、
 #     飽和液で受けプロセス冷却後に飽和蒸気で返す)。コストは「製造するための所要動力」で、温度が
 #     低いほど大きく、エチレン冷媒はプロピレン冷媒を用いたカスケードのためプロピレンより大きい。
 #     冷媒の評価方法は設計者が考察して決める旨も明記。→ 動力(電力)ベースが要綱に忠実。
-#   旧仮置き (撤回・記録保持): Vasudevan(2017) DOI 10.1016/j.compchemeng.2017.02.041 (論文未入手)
-#     の $/GJ 推定 → +15:700 / +5:1030 / -25:2200 / -40:3040 / -60:8200 / -75:11700 / -100:19900。
-#     ($/GJ「購入」前提が contest と不整合のため不採用。文献入手時の比較用に値を残す)
 #
 # モデル: 冷媒製造 = 冷凍サイクルの圧縮機電力。COP = η × Carnot = η × T_c / (T_h - T_c)。
 #   単価[円/GJ_cold] = 電力[円/GJ] / COP。 電力 = ELECTRICITY_JPY_PER_KWH / 3.6e-3 (=4722円/GJ)。
@@ -479,11 +468,11 @@ FUEL_JPY_PER_GJ: float = 1830.0
 
 # 加熱炉熱効率 [-] (LHV ベース、燃焼計算 熱勘定の損失率より)
 # Ref: 化工便覧 改訂六版 18·4·3 項 表 18·11 (れき青炭燃焼計算で全熱損失 15% = 効率 85%)
-# 設計判断 (2026-05-09): 反応器プリヒーター燃料消費は Q_preheat / η_furnace で計算する。
+# 反応器プリヒーター燃料消費は Q_preheat / η_furnace で計算する。
 FURNACE_EFFICIENCY: float = 0.85
 
 # 触媒モデル: Cr2O3-Al2O3 (Catofin プロセス相当) をモデルとする。
-# 設計判断 (2026-05-19): コンテスト要項 §3-3 で提供される a (失活係数) データは
+# コンテスト要項 §3-3 で提供される a (失活係数) データは
 #   架空触媒のものだが、その挙動 (700°C で 30 min で a≈0.04 と分単位で急速失活、
 #   400°C で a≈0.81) は工業 Cr2O3-Al2O3 触媒 (Catofin プロセス) の物理と整合する。
 #   Pt-Sn/Al2O3 (UOP Oleflex) は本来 CCR (連続再生) 方式で日〜週オーダーの緩慢
@@ -512,7 +501,6 @@ CATALYST_JPY_PER_KG: float = CATALYST_USD_PER_KG * USD_TO_JPY
 #   accepted 2022-02-24; mediaTUM repository, doc id 1638095).
 #   PDF p.20 (Chapter 1, 工業 PDH プロセス解説節) で Catofin について
 #   "stable dehydrogenation performance (2-3 years lifetime)" と明記。
-#   pypdf による全 124 ページ検索で文言一致を検証済 (2026-05-19)。
 # 参照 PDF: report_for_processdesign/references/Ni_2022_TUM_PDH_thesis.pdf
 # 採用値: レンジ 2-3 年の中央値 2.5 年。
 CATALYST_LIFE_YEARS: float = 2.5
@@ -525,16 +513,14 @@ OPERATING_HOURS_PER_YEAR: float = 8000.0
 # ==============================================================================
 # ペナルティ sentinel — solver 失敗装置の CAPEX 値判定閾値
 #
-# 設計判断 (2026-05-18): 装置 CAPEX が物理計算で求まらないとき、各 unit は
+# 装置 CAPEX が物理計算で求まらないとき、各 unit は
 # _PENALTY_CAPEX = 1e9 億円 (= 1 京円) を sentinel として返す (units/reactors/
 # swing.py, units/separators/psa/psa_system.py, units/separators/membrane/
 # membrane_system.py)。下流側 (flowsheet/economics.py の集計、flowsheet/
 # solver.py のペナルティ判定) はこの sentinel を識別するため閾値で篩い分ける。
 #
 # 正常 CAPEX の最大は数十億円程度のため、1e8 億円を境界に置けば誤判定なし。
-# 旧版は economics.py で 1e6、solver.py で 1e8 と閾値が二重定義されていた
-# (両方とも sentinel 1e9 をフィルタする目的では機能していたが、コメントと実装
-# で食い違い、メンテナンスリスク)。本定数で一元化する。
+# 本定数で閾値を一元化する。
 # ==============================================================================
 PENALTY_CAPEX_THRESHOLD_OKUYEN: float = 1.0e8
 
@@ -589,12 +575,12 @@ HASEBE_C_WT_OKUYEN_PER_YEAR: float = 0.0
 #   年量 [kg/年]      = kmol/h × MW [kg/kmol] × OPERATING_HOURS_PER_YEAR
 #   年額 [億円/年]    = 年量 × 単価 [円/kg] / 1e8
 #
-# 設計判断 (2026-05-09): 単価は全て 円/kg で統一。kmol/h ベースの流量と MW で
+# 単価は全て 円/kg で統一。kmol/h ベースの流量と MW で
 #   年量に変換する一貫した式 (OPEX_utilities と同様の 1e8 スケール) で扱う。
 # ==============================================================================
 
 # LPG プロパン (C3H8) 単価 [円/kg]  CIF 基準 (輸入基地隣接想定)
-# 設計判断 (2026-05-18): 大規模 PDH プラント (年産 40 万 t C3H6) は港湾コンビナート
+# 大規模 PDH プラント (年産 40 万 t C3H6) は港湾コンビナート
 #   立地が一般的なため、国内配送費を含まない CIF 価格を採用。
 # 出典: 財務省 貿易統計 液化プロパン 輸入 CIF 価格
 #   URL: https://www.customs.go.jp/toukei/suii/html/time_latest.htm (accessed 2026-05-18)
@@ -605,15 +591,15 @@ HASEBE_C_WT_OKUYEN_PER_YEAR: float = 0.0
 LPG_C3H8_JPY_PER_KG: float = 95.0
 
 # LPG n-ブタン (C4H10) 単価 [円/kg]  CIF 基準 (C3H8 と同シナリオ)
-# 設計判断 (2026-05-18): C3H8 と同じ CIF ベースで揃える。実勢でも C3H8 ± 5% 以内。
+# C3H8 と同じ CIF ベースで揃える。実勢でも C3H8 ± 5% 以内。
 # 出典: 財務省 貿易統計 液化ブタン 輸入 CIF 価格
 #   URL: https://www.customs.go.jp/toukei/suii/html/time_latest.htm (accessed 2026-05-18)
 # 換算: CP n-ブタン $580/t × 158.8595 円/USD / 1000 ≒ 92.5 円/kg、丸めて 95 円/kg
 # 注: C3H8 と同価で扱う (ペナルティ的差別化が必要なら個別更新)
 LPG_C4H10_JPY_PER_KG: float = 95.0
 
-# Backward compat: 旧 LPG_FEED_JPY_PER_KG を参照しているコード用 (主にプロパン基準)
-# 設計判断 (2026-05-18): C3H8 と C4H10 を個別単価化したため、共通参照名としてプロパン値を割当
+# Backward compat: LPG_FEED_JPY_PER_KG を参照しているコード用 (主にプロパン基準)。
+# C3H8 と C4H10 を個別単価化したため、共通参照名としてプロパン値を割当。
 LPG_FEED_JPY_PER_KG: float = LPG_C3H8_JPY_PER_KG
 
 # ポリマーグレード C3H6 (≥99.5 wt%) 出荷価格 [円/kg]

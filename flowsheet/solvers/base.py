@@ -6,10 +6,10 @@ Tear stream 加速法の抽象基底クラス。
   - SuccessiveSubstitution: x_next = α × computed + (1-α) × current  (旧来法)
   - Wegstein: 履歴 2 点から最適加速係数 q を自動計算
 
-設計判断 (2026-05-08, profile 結果反映):
+性能特性:
   内側反復ロジック (Python) は全体時間の <1% で、ODE 積分が 99% 以上を占める。
   ただし反復回数を減らせば ODE 呼び出し数も比例して減るため、Wegstein は
-  「反復回数を 70 → 20 に減らす」効果で実質 3-4 倍速をもたらす。
+  反復回数を減らす効果で実質的な高速化をもたらす。
 """
 
 from abc import ABC, abstractmethod

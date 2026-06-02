@@ -1,10 +1,9 @@
 """
 ターゲット温度から冷媒/熱媒を自動選択し、その単価を返す。
 
-設計判断 (2026-05-08):
-  contest.md §2-3 のユーティリティ階層に従って、ターゲット温度を引数に
-  最も適した tier を選ぶ。
-  「離散選択」モードと「連続補間」モードの 2 つを提供する。
+contest.md §2-3 のユーティリティ階層に従って、ターゲット温度を引数に
+最も適した tier を選ぶ。
+「離散選択」モードと「連続補間」モードの 2 つを提供する。
 
   (1) 離散モード ("discrete"):
       実プラントの段階的な refrigerant system に即した選択。
@@ -55,7 +54,7 @@ from src.cost_parameters import (
 )
 
 
-# 設計判断: ターゲット温度と冷媒/熱媒供給温度の最低伝熱差 [K]。
+# ターゲット温度と冷媒/熱媒供給温度の最低伝熱差 [K]。
 # 経験則として 10K (logmean ベースで現実的に到達できる下限)。
 _MIN_APPROACH_TEMP_K = 10.0
 
@@ -77,7 +76,7 @@ class UtilityTier:
 
 # ---------------------------------------------------------------------------
 # 冷却 tier 一覧 (供給温度の高い順 = コストの安い順)
-# 設計判断: 単調順序を保つことが重要。これにより
+# 単調順序を保つことが重要。これにより
 #   (a) discrete モード: 「最初に approach を満たす tier」= 「最も安い適切な tier」
 #   (b) continuous モード: 補間が単調になり、温度が下がるほどコストが上がる
 # ---------------------------------------------------------------------------
@@ -136,9 +135,9 @@ def _interp_linear(x: float, points: List[Tuple[float, float]]) -> Tuple[float, 
 def _closest_tier(target_T_K: float, tiers: List[UtilityTier]) -> UtilityTier:
     """target_T_K に対応する tier を返す (連続モードでの supply_T 提供用)。
 
-    設計判断 (2026-05-09): 「最近傍 tier」だと target が tier 境界を僅かに下回る
-    場合に approach 不足で ΔT_lm 不成立になる。下流で ΔT を計算する用途では、
-    target を物理的に到達可能な「最も安い (=最も暖かい) feasible tier」を選ぶべき。
+    「最近傍 tier」だと target が tier 境界を僅かに下回る場合に approach 不足で
+    ΔT_lm 不成立になる。下流で ΔT を計算する用途では、target を物理的に到達可能な
+    「最も安い (=最も暖かい) feasible tier」を選ぶべき。
 
     Cooling: supply_T + approach ≤ target を満たす中で supply_T 最大の tier。
     Heating: supply_T - approach ≥ target を満たす中で supply_T 最小の tier。

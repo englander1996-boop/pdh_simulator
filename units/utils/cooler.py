@@ -1,13 +1,10 @@
 """
-冷却器 / 加熱器 (改訂版)
+冷却器 / 加熱器
 
-設計判断 (2026-05-08):
-  - 旧版は冷却水単独前提・潜熱無視のダミー実装だった。
   - contest.md §2-3 のユーティリティ階層に従い、ターゲット温度から自動的に
-    冷媒/熱媒を選択し、その単価を equipment 結果に含める形に改訂。
+    冷媒/熱媒を選択し、その単価を equipment 結果に含める。
   - 相変化 (蒸発・凝縮) は phase_change=True でフラグ指定すると、
     src.component_data.LATENT_HEAT_KJ_PER_KMOL を使って潜熱を Q に加算する。
-    旧版で Mem 気化器 OPEX が 0 になっていた既知バグを解消。
 
 注意事項:
   - VLE を持たない簡略モデル。phase_change の有無は呼び出し側で判定する必要あり
@@ -40,7 +37,6 @@ from flowsheet.heat_integration import StreamPhase, lookup_U, utility_phase
 class CoolerEquipment:
     """冷却器/加熱器の装置情報。
 
-    旧版から追加:
       utility_name      : 選択された冷媒/熱媒の名前 (例 "冷却水", "MP Steam")
       utility_jpy_per_GJ: その単価 [円/GJ]
       Q_latent_kW       : 潜熱分の熱量 [kW] (相変化なしのとき 0)
@@ -108,8 +104,8 @@ def simulate_cooler(
         Q_sensible_kW += F_mol_s * cp * (T_out_target - stream.T_in) / 1000.0
 
     # ---- 潜熱 [kW] (相変化指定時のみ) ----
-    # 設計判断: 加熱方向のみ潜熱を加算 (T_out > T_in で蒸発)。
-    # 凝縮 (T_out < T_in) も理論上は潜熱を扱うべきだが、本フローでは現状不要 (旧版踏襲)。
+    # 加熱方向のみ潜熱を加算 (T_out > T_in で蒸発)。
+    # 凝縮 (T_out < T_in) も理論上は潜熱を扱うべきだが、本フローでは現状不要。
     Q_latent_kW = 0.0
     if phase_change and T_out_target > stream.T_in:
         for k, F in stream.F_in.items():
@@ -121,8 +117,8 @@ def simulate_cooler(
     Q_kW = Q_sensible_kW + Q_latent_kW
 
     # ---- ユーティリティ自動選択 ----
-    # 設計判断: target が inlet より低ければ冷却、高ければ加熱として
-    # 適切な tier を選ぶ。equipment に名前と単価を埋め込み、economics.py が
+    # target が inlet より低ければ冷却、高ければ加熱として適切な tier を選ぶ。
+    # equipment に名前と単価を埋め込み、economics.py が
     # それを直接読み出して OPEX を計算する。
     utility = select_utility(target_T_K=T_out_target, inlet_T_K=stream.T_in)
 
@@ -146,9 +142,8 @@ def simulate_cooler(
     A_sens = abs(Q_sensible_kW) * 1000.0 / (U_sens * dT_eff)
     A_lat  = abs(Q_latent_kW)   * 1000.0 / (U_lat  * dT_eff) if Q_latent_kW > 0 else 0.0
     A_m2   = max(A_sens + A_lat, 10.0)
-    # 設計判断 (2026-05-18): A_m2 が nan/inf になると下流の calc_he_capex_okuyen に
-    # 伝播して CAPEX が nan 化し、TAC が不連続になる。早期に raise して原因追跡を
-    # 容易にする (旧版は silent 伝播)。
+    # A_m2 が nan/inf になると下流の calc_he_capex_okuyen に伝播して CAPEX が
+    # nan 化し、TAC が不連続になる。早期に raise して原因追跡を容易にする。
     import math as _math
     if not _math.isfinite(A_m2):
         raise ValueError(

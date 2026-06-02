@@ -1,17 +1,16 @@
 """SM (surrogate model) バックエンド — Dist1 / Dist3 を学習済み GPR で置換する。
 
-設計判断 (2026-05-25):
-  exp3 (HYSYS バックエンド) の遅さは「HSC を毎パス開き直す COM オーバーヘッド」が
-  支配項 (塔の計算自体は ~0.3s と高速)。Dist1/Dist3 を学習済みサロゲートに置換すると
-  当該塔の HYSYS 呼び出しが消え、HYSYS 塔が Dist2 のみになって swap が原理的に消滅する。
-  (warm-start は使わない方針 — SM は入力→出力の決定的写像なので経路依存もない。)
+HYSYS バックエンドの遅さは「HSC を毎パス開き直す COM オーバーヘッド」が支配項
+(塔の計算自体は ~0.3s と高速)。Dist1/Dist3 を学習済みサロゲートに置換すると
+当該塔の HYSYS 呼び出しが消え、HYSYS 塔が Dist2 のみになって swap が原理的に消滅する。
+(SM は入力→出力の決定的写像なので経路依存はない。)
 
 モデル (models/column{1,3}_sm.pkl):
   dict 形式。`regressors`=ターゲット別 GaussianProcessRegressor、
   `classifier`=RandomForest Pipeline (feasibility 判定)、
   `x_scaler`/`y_scalers`=StandardScaler。`target_scales` は y_scaler.scale_ と同値で冗長。
 
-予測手順 (HYSYS 実測との突合せで確定、2026-05-25):
+予測手順 (HYSYS 実測との突合せで確定):
   Xs = x_scaler.transform(X)
   各 target: y = y_scalers[t].inverse_transform(regressors[t].predict(Xs))
   feasibility: classifier.predict(X)  ← raw X (Pipeline 内蔵 scaler)
@@ -22,7 +21,7 @@
 
 分配 (回収率) の扱い:
   model3 は spec 入力を持たず、サンプリング時の固定 spec 戦略を埋め込んでいる。
-  ユーザー決定 (2026-05-25): **Dist3 SM の分配をそのまま設計値として「正」とする**。
+  Dist3 SM の分配はそのまま設計値として「正」とする。
   製品純度 (Out_TopPropene) は spec を満たすので製品仕様上 OK、回収率は SM 準拠。
 
 出力 → DistResult は HYSYS 経路と同じ provider._column_result_to_dist_result を再利用し、

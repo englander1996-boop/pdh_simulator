@@ -1,7 +1,7 @@
 """
 optimization/reporting.py — 最適化結果の CSV / JSON / 比較表出力
 
-設計判断 (pandas 不依存):
+pandas 不依存:
   - 標準ライブラリ csv / json で十分。numpy/scipy は環境にあるが、依存を最小化。
   - CSV は Excel / Optuna Dashboard / Jupyter の何処でも読める汎用形式。
   - JSON は best 1 件のみ (人間可読のサマリ)。

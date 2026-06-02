@@ -11,13 +11,8 @@ r"""HYSYS COM 接続の低レイヤラッパー。
   - 構造パラメータ (段数) は COM で変更不可なので、段数別 HSC を切替える方式。
     段数解決は registry.py に委ねる。
   - フィード段は他入力をすべて済ませた「最後」に SpecifyFeedLocation で
-    書き込まないと収束しない (G:\サロゲートモデル\main で確立された手順)。
+    書き込まないと収束しない。
   - ポップアップは別スレッドで poll しないと、ソルバ実行中の警告で計算が止まる。
-
-元コードからの移植元:
-  - HysysPopupMonitor: G:\サロゲートモデル\main\column1\lhs_column1.py
-  - set_feed_stage / run_column_and_wait / click_run_button_gui:
-      G:\サロゲートモデル\main\column{1,2,3}\run_single_column*.py
 """
 from __future__ import annotations
 
@@ -80,24 +75,20 @@ _GW_OWNER = getattr(win32con, "GW_OWNER", 4)
 
 
 # ---------------------------------------------------------------------------
-# swap_case 安定化待ち時間 (2026-05-25 短縮)
+# swap_case 安定化待ち時間
 # ---------------------------------------------------------------------------
-# 設計判断 (2026-05-25): swap_case は HSC を Close→Open し直すたびに HYSYS 内部の
-# 初期化を待つため固定 sleep を挟む。過去 (〜2026-05-22) は empty-value (Solver 未走)
-# バグ回避で保守的に計 7.0s 積まれていたが、1 パスで塔切替 2-3 回 × 内側 ~10 反復の
-# ため総時間の支配項になっていた (exp3 290s のうち ~200s が swap sleep)。
-# cold 解の結果は待ち時間に依存しない (= 結果中立) ので、安定動作を保てる範囲で短縮。
-# 短すぎた場合は fill_outputs (base.py) が empty-value を検出して明示的に失敗扱いに
-# するので、無音の精度劣化ではなく可視の penalty として現れる。
-# 必要なら下の値を戻すだけで旧挙動に復帰できる。
-_SWAP_SLEEP_AFTER_CLOSE_S     = 0.5   # 旧 1.0
-_SWAP_SLEEP_AFTER_OPEN_S      = 2.0   # 旧 3.0
-_SWAP_SLEEP_AFTER_ACTIVATE_S  = 1.0   # 旧 2.0
-_SWAP_SLEEP_AFTER_ACTIVEDOC_S = 0.5   # 旧 1.0
+# swap_case は HSC を Close→Open し直すたびに HYSYS 内部の初期化を待つため固定 sleep を
+# 挟む。cold 解の結果は待ち時間に依存しない (= 結果中立)。短すぎた場合は fill_outputs
+# (base.py) が empty-value (Solver 未走) を検出して明示的に失敗扱いにするので、無音の
+# 精度劣化ではなく可視の penalty として現れる。
+_SWAP_SLEEP_AFTER_CLOSE_S     = 0.5
+_SWAP_SLEEP_AFTER_OPEN_S      = 2.0
+_SWAP_SLEEP_AFTER_ACTIVATE_S  = 1.0
+_SWAP_SLEEP_AFTER_ACTIVEDOC_S = 0.5
 
 
 # ---------------------------------------------------------------------------
-# HysysPopupMonitor (移植: lhs_column1.HysysPopupMonitor)
+# HysysPopupMonitor
 # ---------------------------------------------------------------------------
 
 class HysysPopupMonitor:
@@ -333,7 +324,7 @@ class HysysPopupMonitor:
 def set_feed_stage(col, feed_stream, feed_stage: int) -> bool:
     r"""フィード段を feed_stage に変更する。
 
-    手順 (G:\サロゲートモデル\main\column1\lhs_column1.py の実績手順):
+    手順:
       1. col.ColumnFlowsheet.Operations.Item(0) で Main Tower 取得
       2. tower.SpecifyFeedLocation(int_feed, stage) を試行 (stage は 0始まり/1始まり両方試行)
       3. ダメなら DeleteFeedStream + AddFeedStream フォールバック
@@ -426,13 +417,10 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
 
     COM API → GUI ボタンクリックの順でフォールバック。
 
-    設計判断 (2026-05-22 改訂):
-      旧版は `case.Solver.IsSolving` (= メイン flowsheet の Solver) を polling していたが、
-      これは塔の sub-flowsheet とは別物で、塔だけ動かしている時は常に False のままだった。
-      → column2 で「収束済み」 GUI 表示なのに私のコードは「Solver 未起動」と誤判定し
-        empty value で失敗していた。
-      本版は **塔の sub-flowsheet Solver** (`col.ColumnFlowsheet.Solver`) を polling 対象に
-      切替え、IsSolving + Converged の両方で判定する。
+    収束判定は **塔の sub-flowsheet Solver** (`col.ColumnFlowsheet.Solver`) を polling 対象に
+    し、IsSolving + Converged の両方で判定する。メイン flowsheet の `case.Solver.IsSolving`
+    は塔だけ動かしている時は常に False のままで、収束済みでも「Solver 未起動」と誤判定するため
+    使わない。
 
     Returns
     -------
@@ -476,7 +464,7 @@ def run_column_and_wait(col, case, column_name: str, timeout: float = 120.0,
         col_solver = None
 
     if col_solver is None:
-        # fallback: case.Solver で見る (旧挙動、最低限のサポート)
+        # fallback: case.Solver で見る (最低限のサポート)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -582,13 +570,11 @@ class HysysSession:
             self._safe_cleanup()
             raise HysysConnectionError(f"HYSYS 起動失敗: {e}") from e
 
-        # 設計判断 (2026-06-02): .Visible setter は一部 PC の Aspen HYSYS V14 で
-        # com_error 0xC00D271E ("例外が発生しました") を投げる (環境依存。家用 PC で
-        # 100% 再現、学校 PC では成功)。Dispatch / .Name / SimulationCases など他 API は
-        # その PC でも正常動作するので、HYSYS 自体は使える。COM automation は既定で
-        # headless 起動するため Visible 設定は計算に必須でない。よってここでの失敗は
-        # 致命扱いにせず警告に留め、セッションを継続する (旧版はこの 1 行で全評価が
-        # penalty 落ちしていた)。
+        # .Visible setter は一部 PC の Aspen HYSYS V14 で com_error 0xC00D271E
+        # ("例外が発生しました") を投げる (環境依存)。Dispatch / .Name / SimulationCases
+        # など他 API はその PC でも正常動作するので、HYSYS 自体は使える。COM automation は
+        # 既定で headless 起動するため Visible 設定は計算に必須でない。よってここでの失敗は
+        # 致命扱いにせず警告に留め、セッションを継続する。
         try:
             self._app.Visible = bool(self.visible)
         except Exception as e:
@@ -608,13 +594,13 @@ class HysysSession:
                 f"HSC オープン失敗: {self.hsc_path}: {e}"
             ) from e
 
-        # HSC オープン直後の安定化待ち (run_single_column3.py より、time.sleep(2.0))。
+        # HSC オープン直後の安定化待ち。
         # GUI 描画完了とコンポーネント初期化を保証するため。
         time.sleep(2.0)
 
-        # 設計判断 (2026-05-22): Visible=True でも SimulationCases.Open() で開いた
-        # case は HYSYS V14 GUI に自動表示されない仕様。case.Activate() で明示的に
-        # アクティブ化する (失敗してもエラーにせず、計算には影響なし)。
+        # Visible=True でも SimulationCases.Open() で開いた case は HYSYS V14 GUI に
+        # 自動表示されない仕様。case.Activate() で明示的にアクティブ化する
+        # (失敗してもエラーにせず、計算には影響なし)。
         if self.visible:
             for method_name in ("Activate", "Show"):
                 try:
@@ -709,9 +695,9 @@ class HysysSession:
         フローシート評価で Dist1 → Dist2 → Dist3 と HSC を切替える時、app ごと
         再起動すると COM が不安定になるので、case のみ差替え。
 
-        設計判断 (2026-05-22 改訂): swap 後の sleep を 5秒に延長。HYSYS は HSC を
-        Open した直後にバックグラウンドで内部初期化を行うため、即座に書込み・Solver 起動
-        すると empty value (Solver 未走) が返るケースが column3 → swap で再現した。
+        HYSYS は HSC を Open した直後にバックグラウンドで内部初期化を行うため、即座に
+        書込み・Solver 起動すると empty value (Solver 未走) が返る。これを避けるため
+        swap 後に安定化 sleep を挟む。
         """
         new_path = Path(new_hsc_path).resolve()
         if not new_path.exists():
@@ -746,9 +732,9 @@ class HysysSession:
         self.hsc_path = new_path
         # 安定化待ち
         time.sleep(_SWAP_SLEEP_AFTER_OPEN_S)
-        # 設計判断 (2026-05-22): swap_case 後は **常に** Activate を呼ぶ。
+        # swap_case 後は **常に** Activate を呼ぶ。
         # visible=False でも Activate しないと ActiveDocument が前の case のまま残って
-        # Solver 起動が前のセッションの状態を引きずる (Dist3 で empty value 発生の原因)。
+        # Solver 起動が前のセッションの状態を引きずり、empty value が発生する。
         for method_name in ("Activate", "Show"):
             try:
                 method = getattr(self._case, method_name)

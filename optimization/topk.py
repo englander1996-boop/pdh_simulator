@@ -5,7 +5,7 @@ BO ループは高速化のため全塔 FUG で回すが、FUG は narrow-margin
 振れることがある (Dist1/Dist3)。BO 終了後、Profit 上位の候補だけを rigorous +
 Stage 2 (HEN synthesis) で再評価し、現実的な最終解を提示する。
 
-設計判断:
+方針:
   - BO study から effective_TAC 昇順 (≒ Profit 降順) で top-k を抽出。
   - 各候補について、SOLVER_TOPK (例: 全塔 rigorous) + apply_stage2=True で再評価。
   - 再評価で feasibility が崩れたり TAC が大きく変動するケースは、FUG bias が
@@ -56,7 +56,7 @@ def reevaluate_topk(
     config:            OperatingConfig,
     *,
     apply_hi:               bool  = True,
-    apply_stage2:           bool  = False,   # 2026-05-31: HEN(Stage2)不採用、HIのみ
+    apply_stage2:           bool  = False,   # HEN(Stage2)不採用、HI のみ
     hi_dT_min_K:            float = 10.0,
     strict_recovery_check:  bool  = True,
     recovery_tolerance:     float = 0.10,

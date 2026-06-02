@@ -2,26 +2,19 @@
 
 study.optimize の callbacks= に渡して、各 trial 完了時に compact な状態表示を行う。
 
-設計判断 (2026-05-20、ユーザー要望):
-  Optuna デフォルトの logger は "Trial N finished with value: X and parameters: {…}"
-  を全 param 込みで 1 行に出すため可読性が低い。
-  独自 callback で 1 trial = 4-5 行の構造化された表示に置き換える。
+Optuna デフォルトの logger は "Trial N finished with value: X and parameters: {…}" を
+全 param 込みで 1 行に出すため可読性が低い。独自 callback で 1 trial = 4-5 行の構造化
+された表示に置き換える。
     - 1 行目: status (★ BEST / ✓ feas / ✗ infeas) + TAC + reason + 経過秒
     - 2-4 行目: 全 design vars をユニット別にグループ化
     - 5 行目: progress (完了/全体, feasibility 率, elapsed, ETA, pace, top fails tally)
 
-  ETA は直近 N=20 trial の duration 中央値で計算 (累積平均は trial 間ばらつきで暴れる)。
+ETA は直近 N=20 trial の duration 中央値で計算 (累積平均は trial 間ばらつきで暴れる)。
 
-設計判断 (2026-05-22 L1 観測強化、ユーザー要望「丁寧にログを入れて、探索してる途中に
-  どこで詰まってるかわかるように」):
-    旧 _fmt_failure は failure_reason 文字列を 8 種ラベルに丸めるだけで、
-    例えば「生産量未達」と出ても (1077/1186 で -9.2pp 不足) のような数値が見えず、
-    BO ループを止めるか CSV を後で見るしか判断材料がなかった。
-    本版は trial.user_attrs に 2026-05-22 で追加した failure_unit + 各装置の
-    penalty_reason + key actual 値を読んで「Mem.bp_le_cold_out (T_bp=305<313)」
-    形式に構造化表示。さらに closure state に Counter を持ち、top 5 failure mode を
-    progress 行に追加表示することで「100 trial で prod_under=58 件 → F_fresh 高すぎ」
-    のようなパターンを走行中に把握できる。
+失敗理由は trial.user_attrs の failure_unit + 各装置の penalty_reason + key actual 値を
+読んで「Mem.bp_le_cold_out (T_bp=305<313)」形式に構造化表示する。さらに closure state に
+Counter を持ち、top 5 failure mode を progress 行に追加表示することで「100 trial で
+prod_under=58 件 → F_fresh 高すぎ」のようなパターンを走行中に把握できる。
 """
 
 from __future__ import annotations
@@ -173,8 +166,8 @@ def _fmt_reason_from_trial(trial: optuna.trial.FrozenTrial) -> str:
     if fu == 'spec_c3h6_purity':
         c3 = a.get('c3h6_purity_wtfrac', 0.0) or 0.0
         if c3 > 0:
-            # 閾値は config 依存 (決定A で 99.45 wt% に緩和)。ここは user_attrs しか持たず
-            # threshold を知らないので、ハードコード比較を書かず実測値だけ示す (h2 行と同様)。
+            # 閾値は config 依存。ここは user_attrs しか持たず threshold を知らないので、
+            # ハードコード比較を書かず実測値だけ示す (h2 行と同様)。
             return f"spec.c3h6_purity ({c3*100:.2f}wt%)"
         return "spec.c3h6_purity"
     if fu == 'spec_h2_purity':
@@ -220,7 +213,7 @@ def _fmt_vars(params: dict, user_attrs: dict | None = None) -> list[str]:
     g = params.get
 
     # 反応器: 軸流 (z_cat_m/D_reactor_m) か 径方向流 (D_inner_m/bed_thickness_m/H_m) かを
-    # params のキーで判定して表示を切替 (2026-05-30 径方向流対応)。
+    # params のキーで判定して表示を切替。
     if 'z_cat_m' in params:
         rx = (
             f"Reactor(axial): T={g('T_in_K', 0):.0f}K z={g('z_cat_m', 0):.1f}m "
@@ -254,7 +247,7 @@ def _fmt_vars(params: dict, user_attrs: dict | None = None) -> list[str]:
         f"rec_LK_d2={rec_lk_s}  rec_HK_d2={rec_hk_s}"
     )
 
-    # 収率表示 (2026-05-23 追加): user_attrs から production/F_fresh_used を取って表示。
+    # 収率表示: user_attrs から production/F_fresh_used を取って表示。
     if user_attrs is not None:
         prod = user_attrs.get('production_kmol_h', 0.0) or 0.0
         f_used = user_attrs.get('F_C3H8_fresh_used_kmol_h', 0.0) or 0.0
@@ -319,9 +312,8 @@ def make_compact_callback(n_trials_total: int) -> Callable[[optuna.Study, optuna
         if is_feas:
             state['n_feas'] += 1
 
-        # 観測ラベル (2026-05-22): failure_unit を tally に積む。
-        # feasible でも failure_unit='success' で計上 (top fails には success も入るが
-        # _fmt_tally で見やすく)。
+        # failure_unit を tally に積む。feasible でも failure_unit='success' で計上
+        # (top fails には success も入るが _fmt_tally で見やすく)。
         fu = trial.user_attrs.get('failure_unit', '') or ''
         if fu:
             state['tally'][fu] += 1
@@ -395,7 +387,7 @@ def make_compact_callback(n_trials_total: int) -> Callable[[optuna.Study, optuna
             f"pace {median_dur:.1f}s/trial  best {best_s}"
         )
 
-        # 観測ラベル (2026-05-22): top fails 累計を progress の次行に。
+        # top fails 累計を progress の次行に。
         # 例: top fails: r_mem=12  r_psa=8  spec_production_under=58  r_rx=5  timeout=3
         tally_s = _fmt_tally(state['tally'], top_k=5)
         tally_line = f"       top fails: {tally_s}" if tally_s else ""

@@ -89,10 +89,9 @@ class SpecSpec:
     c3h6_min_wtfrac:         float  # C3H6 製品の質量分率下限
     h2_min_molfrac:          float  # H2 製品のモル分率下限
     production_min_relative: float  # 生産量の許容相対不足 (target × これ未満は違反)
-    # 設計判断 (2026-05-17): 旧版は片側 spec (undershoot のみ違反)。BO が
-    # overshoot 戦略で生産量過剰にして revenue 稼ぐ → yield 低下、を防ぐため
-    # 両側化。production_max_relative > 0 のときに overshoot も soft penalty 対象。
-    # 0.0 にすると無効化 = 旧片側仕様と同じ挙動。
+    # 両側 spec。BO が overshoot 戦略で生産量過剰にして revenue を稼ぐ (= yield
+    # 低下) のを防ぐ。production_max_relative > 0 のときに overshoot も soft
+    # penalty 対象。0.0 にすると無効化 = 片側 (undershoot のみ違反) 仕様。
     production_max_relative: float = 0.0
 
 

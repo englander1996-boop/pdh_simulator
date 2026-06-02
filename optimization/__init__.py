@@ -8,13 +8,12 @@ optimization モジュール — 多変数最適化 + top-k 候補の re-evaluat
   - topk.py:          BO 上位候補の rigorous 再評価  (optuna 必須)
   - reporting.py:     CSV / JSON / txt 比較レポート出力       (optuna 必須)
 
-注 (2026-05-31): HEN 合成 (旧 hen_synthesis.py, Stage 2) は不採用 (ヒートインテグレーションは
-  HI = Stage 1 ピンチ targeting のみ) のため削除した。
+ヒートインテグレーションは HI = Stage 1 ピンチ targeting のみ (HEN 合成 = Stage 2 は不採用)。
 
 main.py は本モジュールを薄くオーケストレーションする。
 
 依存:
-  - optuna が未インストールでも `hen_synthesis` / `search_space` /
+  - optuna が未インストールでも `search_space` /
     `objective` (の make_objective ファクトリ) は使用可能。
   - 未インストール時は `study` / `topk` / `reporting` の import がスキップされ、
     本パッケージから当該シンボルは公開されない (= main.py は動かない)。
@@ -29,7 +28,7 @@ try:
     _HAS_OPTUNA = True
 except ImportError:
     _HAS_OPTUNA = False
-    # 設計判断: ImportWarning はデフォルトで非表示。UserWarning を使って必ず表示させる。
+    # ImportWarning はデフォルトで非表示。UserWarning を使って必ず表示させる。
     _warnings.warn(
         "optuna が未インストールです。多変数最適化機能 (main.py / optimization.study など) は\n"
         "使用できません。インストール方法:\n"
@@ -41,7 +40,6 @@ except ImportError:
     )
 
 # ---- optuna 不要なシンボル (常に load) ----
-# 注 (2026-05-31): HEN 合成 (旧 hen_synthesis) は不採用 (HI のみ) のため削除済。
 from optimization.search_space import (
     VarSpec,
     EXPECTED_KEYS,

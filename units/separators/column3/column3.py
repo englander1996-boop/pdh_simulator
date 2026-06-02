@@ -1,7 +1,6 @@
 """
 Dist3: C3 スプリッター (FUG ベース)
 
-設計判断 (2026-05-08):
   Membrane 透過後 (20 bar, 飽和液) からポリマーグレード C3H6 を回収。
   PDH プロセスで最もエネルギー集約的な塔 (C3H6/C3H8 揮発度差が小さい)。
   塔頂: C3H6 製品 (≥99.5 wt%)
@@ -32,9 +31,8 @@ from stream.stream import ProcessStream
 
 
 # 既定 tunables: BO/exp で上書きされない場合に使う。
-# 設計判断 (2026-05-09):
-#   PR で α(C3H6/C3H8 @20bar) ≈ 1.07 (CC は 1.10 と過大推定) のため R_min が
-#   7.22 → 10.08 に上昇。R = 12.0 (= R_min × 1.19) は経済最適レンジの下限近傍。
+#   PR で α(C3H6/C3H8 @20bar) ≈ 1.07、R_min ≈ 10.08。
+#   R = 12.0 (= R_min × 1.19) は経済最適レンジの下限近傍。
 #   Dist3 は OPEX 支配的 (Q_reb ~80MW) で R を下げる効果が最も大きく、
 #   BO で振るときは下限 11.0 程度 (margin 1.09) を限度に。
 _DEFAULT_TUNABLES = ColumnTunables(
@@ -65,13 +63,10 @@ def _dist3_dynamic_recovery_HK_bot(
 ) -> float:
     """製品純度 spec から recovery_HK_bot を動的計算 (Dist3 特有のロジック)。
 
-    設計判断 (2026-05-19):
-      旧版は recovery_HK_bot=0.99 hardcode で、Dist3 のフィード C3H8 量が極少
-      (~1%) のとき製品純度 100% の overspec を生んでいた。Gilliland feasibility
-      check (src/distillation_core.py:1060-1101) がこの高 recovery 達成のための
-      N_stages を強制し、BO が N=170+ を選ばざるを得ない構造になっていた。
-      本関数はフィード組成から「純度 99.5 wt% spec を満たす最低 recovery_HK_bot」
-      を逆算し、Gilliland check の基準を真の spec 制約に揃える。
+    フィード組成から「純度 99.5 wt% spec を満たす最低 recovery_HK_bot」を逆算し、
+    Gilliland feasibility check (src/distillation_core.py) の基準を真の spec 制約に
+    揃える。recovery_HK_bot を固定値にすると、フィード C3H8 量が極少 (~1%) のとき
+    製品純度 100% の overspec を生み、それを達成するため N_stages が過大化する。
 
     物質収支:
       F_LK_top = rec_LK_top × F_LK_feed
@@ -99,7 +94,7 @@ def simulate_column3(
 
     LK/HK/K_method/q は本ラッパで固定: LK='B' (C3H6), HK='A' (C3H8), K_method='pr', q=1.0
     recovery_LK_top は None なら 0.99 既定 (BO 等で上書き可)。
-    recovery_HK_bot は None なら **製品純度 99.5 wt% から動的計算** (2026-05-19〜)。
+    recovery_HK_bot は None なら **製品純度 99.5 wt% から動的計算**。
     float 明示なら尊重 (BO で振りたいときの後方互換、要注意: 過剰な高値は overspec を再発させる)。
     """
     t = tunables if tunables is not None else _DEFAULT_TUNABLES
@@ -109,7 +104,7 @@ def simulate_column3(
         from units.vle.hysys.provider import solve_column3_via_hysys
         return solve_column3_via_hysys(feed, t, fixed if fixed is not None else _DEFAULT_FIXED)
 
-    # SM (surrogate) 経路。学習済み GPR で HYSYS 解を近似 (2026-05-25)。
+    # SM (surrogate) 経路。学習済み GPR で HYSYS 解を近似。
     # In_Propane = feed の C3H8 mol 分率 (spec 入力なし)。分配は SM 準拠を設計値として採用。
     if t.solver_method == 'sm':
         from src.distillation_sm import solve_column3_via_sm

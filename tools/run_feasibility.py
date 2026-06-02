@@ -52,7 +52,7 @@ def main():
         sys.exit(1)
     storage_url = f'sqlite:///{db_path.as_posix()}'
 
-    # 設計判断 (2026-05-17): main.py が run ごと subdir 構造を採用 (outputs/main_<ts>/)。
+    # main.py は run ごと subdir 構造を採用 (outputs/main_<ts>/)。
     # output_dir 未指定なら DB と同じ subdir に出す。
     output_dir = Path(args.output_dir) if args.output_dir else db_path.parent
 

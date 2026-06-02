@@ -50,7 +50,7 @@ def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
     print("=" * 72)
     print()
     sw = design.swing
-    # 反応器モデルの種別で表示を分岐 (2026-05-30: 径方向流対応)。
+    # 反応器モデルの種別で表示を分岐 (径方向流対応)。
     # 径方向流 (RadialDesignVars) は z_cat/D を持たず D_inner/bed_thickness/H を持つ。
     if hasattr(sw, 'bed_thickness'):
         print("[反応器 (Radial flow 径方向流)]")
@@ -219,16 +219,14 @@ def show_unit_details(R: dict) -> None:
     eff  = R['r_rx'].effluent
     # V_cat per vessel (= 触媒だけの体積、200 m³ 制約対象) と
     # V_vessel per vessel (= 容器の物理体積) を両方表示。
-    # 設計判断 (2026-05-30): 軸流は V_cat=V_vessel·(1-eps) だが、径方向流は
-    #   V_vessel=πr_o²H が中心捕集管 void を含むため V_cat/V_vessel≠(1-eps)。
-    #   どちらの幾何でも正しい W_cat から逆算する (W_cat=V_cat_total×N_swing×ρ_b)。
+    # 軸流は V_cat=V_vessel·(1-eps) だが、径方向流は V_vessel=πr_o²H が中心捕集管
+    #   void を含むため V_cat/V_vessel≠(1-eps)。どちらの幾何でも正しい W_cat から
+    #   逆算する (W_cat=V_cat_total×N_swing×ρ_b)。
     rho_b = 900.0  # FixedParams.rho_b と整合
     # V_cat/基 (= 1 缶あたり触媒体積、200 m³ 制約対象): Catalyst_Weight_Total は
     #   全段(全 n_beds)合計なので、総基数 N_reactors_total で割る。
     #   N_reactors_total = N_parallel × N_swing_sets × n_beds (軸流/単段は n_beds=1)。
     #   Oleflex 多段は各段同一ジオメトリ ([[radial_flow]] 434) なので per-vessel は厳密に等価。
-    #   旧実装は N_swing×N_parallel でしか割らず、多段で n_beds 倍 (3 段なら 3 倍) に
-    #   膨らんで「V_cat/基 > V_vessel/基」という非物理表示になっていた (計算は正常、表示のみのバグ)。
     if eq.N_reactors_total > 0:
         v_cat_per_vessel = eq.Catalyst_Weight_Total / (rho_b * eq.N_reactors_total)
     else:
@@ -470,11 +468,9 @@ def show_hi_summary(result) -> None:
 def show_stage2_synthesis(result) -> None:
     """Stage 2 (HEN synthesis) の結果: 熱交換の組み合わせ (hot↔cold) と移動熱量を表示。
 
-    設計判断 (2026-05-26 ユーザー要望): 旧版は 1 行サマリのみで matching 詳細を省略して
-    いたが、「どの hot ストリームとどの cold ストリームを、何 kW 交換するか」(= HEN の
-    実構成) を結果に出す。データは HENResult.matches (各 HEMatch に hot_label/cold_label/
-    Q_kW/温度/A/CAPEX) に揃っているので表で展開する。exp1/exp3/special/main top-k の
-    display_full_results は全て本関数を通るので一括で反映される。
+    「どの hot ストリームとどの cold ストリームを、何 kW 交換するか」(= HEN の
+    実構成) を表で展開する。データは HENResult.matches (各 HEMatch に hot_label/
+    cold_label/Q_kW/温度/A/CAPEX) に揃っている。
     """
     if result.hen_result is None or result.economics_synth is None:
         return
@@ -549,11 +545,8 @@ def show_tac_summary(result, C3H6_product: float) -> None:
     sign_word = "黒字" if final_econ.profit >= 0 else "赤字"
     print(f"  ▶ 最終 Profit ({final_label})    : {final_econ.profit:+9.3f} 億円/年"
           f"  ({sign_word})")
-    # 設計判断 (2026-05-22): 旧表示は `effective_TAC = TAC − Revenue + ペナルティ` の
-    # 旧式を前提に `penalty_amount = effective_TAC - (TAC - Revenue)` で逆算していたが、
-    # flowsheet/runner.py:413 で 2026-05-21 に純 TAC 最小化 (`eff_econ.TAC + soft_penalty`)
-    # に変更済 → 旧式逆算では Revenue 項が紛れ込んだ過大値 (例: 27 億の実 penalty が
-    # 839 億として表示) になっていた。現コード式に合わせて単純差分にする。
+    # effective_TAC は純 TAC 最小化 (eff_econ.TAC + soft_penalty) なので、penalty は
+    # effective_TAC と TAC の単純差分で求まる。
     penalty_amount = result.effective_TAC - final_econ.TAC
     if penalty_amount > 0.001:
         print(f"  + spec 違反ペナルティ        : {penalty_amount:+9.3f} 億円/年")

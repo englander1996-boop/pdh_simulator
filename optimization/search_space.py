@@ -4,7 +4,7 @@ optimization/search_space.py — 探索空間スキーマと params ↔ Flowshee
 main.py の SEARCH_SPACE 辞書を解釈し、Optuna trial から params を suggest する。
 suggest された params (+ 欠落キーの baseline 補完) から FlowsheetDesignVars を構築する。
 
-設計判断:
+方針:
   - SEARCH_SPACE のキーをコメントアウトすれば、その変数は baseline 固定となる。
     変数の追加・削除は main.py のみ編集すれば完結する (本モジュール変更不要)。
   - N_feed (蒸留塔フィード段) は探索対象外。core 側で Kirkbride 推奨を自動採用するため、
@@ -50,7 +50,7 @@ EXPECTED_KEYS = (
     'P_dist3_Pa', 'N_dist3', 'reflux_dist3',
     # F_fresh (BO で直接指定、外側ループ skip)
     'F_C3H8_fresh_kmol_h',
-    # 塔別 recovery (旧 0.99 ハードコードを変数化)
+    # 塔別 recovery
     'rec_LK_top_dist1', 'rec_HK_bot_dist1',
     'rec_LK_top_dist2', 'rec_HK_bot_dist2',
     'rec_LK_top_dist3', 'rec_HK_bot_dist3',
@@ -66,11 +66,10 @@ _N_FEED_PLACEHOLDER = 1
 
 
 # ---------------------------------------------------------------------------
-# 依存サンプリング (2026-05-22 E-plan)
+# 依存サンプリング
 # ---------------------------------------------------------------------------
-# 設計判断: 物理的に必須の不等式 (例: P_H > feed.P_in = design.dist2.P_col) を
-# search bounds 越しに保証する仕組み。Mem の silent penalty 経路 ph_le_pfeed を
-# 物理的に発生不可にできる。
+# 物理的に必須の不等式 (例: P_H > feed.P_in = design.dist2.P_col) を search bounds
+# 越しに保証する仕組み。Mem の silent penalty 経路 ph_le_pfeed を物理的に発生不可にできる。
 #
 # 実装方式: post-clip
 #   - Optuna の suggest_float は静的 bounds (low, high) を持ち、TPE の KDE/Sobol の
@@ -111,36 +110,28 @@ def _apply_dependent_lows(params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# F_fresh × D_reactor SV カップリング (2026-05-22 forensic, 施策 2b)
-# 注 (2026-05-30): これは**軸流反応器 (D_reactor_m) 専用**かつ 2026-05-23 に呼出し廃止済
-#   (下記 suggest_params 参照)。径方向流 (reactor_kind='radial') では D_reactor_m を持たず
-#   呼ばれもしないため無関係。残置のみ (将来 軸流で再有効化する場合の参照用)。
+# F_fresh × D_reactor SV カップリング
+# 注: これは**軸流反応器 (D_reactor_m) 専用**かつ呼出しは廃止済 (下記 suggest_params 参照)。
+#   径方向流 (reactor_kind='radial') では D_reactor_m を持たず呼ばれもしないため無関係。
+#   残置のみ (将来 軸流で再有効化する場合の参照用)。
 # ---------------------------------------------------------------------------
-# 設計判断: main_20260522_214750 (n=130 stopped) で Reactor SV>3 violation が 15件
-# (= 全体 12%)、いずれも D=7.0-7.6m + F_fresh=1200-1700 の組合せで発生。
 # SV = (F_in_total × R × T) / (P_in × A_cross × N_par) は解析的なので、suggest 直後に
-# F_fresh を「D から計算した F_max を超えていたら下げる」ことで SV>3 を構造的に回避。
+# F_fresh を「D から計算した F_max を超えていたら下げる」ことで SV>3 を構造的に回避する。
 #
 # 既存 _apply_dependent_lows と同じ post-clip パターン。違いは:
 #   - 既存: 依存値より低かったら持ち上げる
 #   - 本関数: D から決まる F_max より高かったら下げる
 #
 # 推定モデル: F_in_total ≈ MULT × F_fresh (= recycle 比) と仮定。
-# 214750 forensic で測定:
-#   SV>3 cases (D=7.0-7.6, N_par=2): MULT ≈ 6.2-6.4
-#   SV<0.5 case (D=9.7, N_par=4):    MULT ≈ 2.5
 # 注意: MULT は強い非線形性あり (F 縮小すると recycle 比が増加する観測あり)。
 # 厳密な SV<3 保証は無理だが、TPE への「方向シグナル」として機能させる目的で
-# MULT=6.5 (= 214750 観測中央値 + 軽い安全マージン) を採用。
-# D=7 では F が ~836 まで clip → prod_under 発生 → TPE は D=7 回避を学習。
-# D=9.5 (履歴 best) では clip ≈ 1551 で F=1380-1500 範囲内、影響なし。
-# N_parallel は worst case = 2 を仮定 (V_cat 小=小 D & 小 z_cat の組合せ)。
+# MULT=6.5 を採用。N_parallel は worst case = 2 を仮定 (V_cat 小=小 D & 小 z_cat の組合せ)。
 #
 # TPE 動作: Optuna は trial.params に suggest 値を記録するため、F=1500 suggest →
 # 内部で 1100 にクリップされたら、TPE は「F=1500 で objective が悪かった」と
 # 学習する (実評価は 1100)。この乖離は副作用だが、結果として TPE は「小 D 領域では
 # 実 F が抑えられて prod_under が出る → 避ける」を learn する想定。
-_SV_COUPLING_MULT     = 6.5   # recycle 倍率 (214750 中央値 6.2-6.4 + 軽い安全マージン)
+_SV_COUPLING_MULT     = 6.5   # recycle 倍率
 _SV_COUPLING_N_PAR    = 2     # N_parallel worst case
 _SV_COUPLING_SV_LIMIT = 3.0   # m/s (units.reactors.swing.FixedParams.SV_max_m_per_s と同期)
 _REACTOR_P_IN_PA      = 5.0e4 # config.pressure.reactor_inlet_Pa (0.5 bar 固定) と同期
@@ -278,13 +269,11 @@ def suggest_params(trial, search_space: Dict[str, VarSpec]) -> Dict[str, Any]:
             )
         else:
             raise ValueError(f"未知の type {vtype!r} (許容: 'int' | 'float')")
-    # 依存サンプリングのクリップ (2026-05-22 E-plan)
+    # 依存サンプリングのクリップ
     _apply_dependent_lows(params)
-    # 設計判断 (2026-05-23 forensic, main_20260523_085918): F×D SV カップリング廃止。
-    # 95% の trial で発動 (= 過剰)、高 T_in で F_clip が F_min 1380 を大幅に下回り
-    # (中央 927)、spec_production_under 50 件の主因に。SV violation は
-    # reactor_sv_shortfall 信号で TPE が自然に学習するため、構造クリップは不要。
-    # 呼出し削除 (関数 _apply_sv_coupling 自体は他用途の可能性あり残置)。
+    # F×D SV カップリングは廃止 (高 T_in で F_clip が F_min を大幅に下回り
+    # spec_production_under を多発させた)。SV violation は reactor_sv_shortfall 信号で
+    # TPE が自然に学習するため構造クリップは不要。関数 _apply_sv_coupling は残置。
     # _apply_sv_coupling(params)  # 廃止
     return params
 
@@ -308,7 +297,7 @@ def build_design(
     baseline : dict | None
         suggest 対象外の変数のデフォルト値。None なら DEFAULT_BASELINE を使用。
     reactor_kind : str
-        'axial' (既定, swing 軸流固定床) | 'radial' (径方向流)。2026-05-30 追加。
+        'axial' (既定, swing 軸流固定床) | 'radial' (径方向流)。
         'radial' のとき D_inner_m/bed_thickness_m/H_m から RadialDesignVars を構築する。
     """
     if baseline is None:

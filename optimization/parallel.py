@@ -1,11 +1,11 @@
 """マルチプロセス並列最適化 (multi-core) のための worker 起動・worker 本体。
 
-設計判断 (2026-05-26): Optuna の n_jobs(スレッド) は GIL で CPU 律速の本問題を
-速くできず、かつ penalty_scale(module global) がスレッド競合で壊れるため不可。
-代わりに **複数プロセスが同じ study(共有 SQLite storage) を load_if_exists で共有**
-する分散最適化を使う。各プロセスは単スレッド = GIL 無関係・penalty_scale はプロセス
-分離で安全。worker 同士は DB 経由で running trial が見えるので constant_liar=True が
-効き、冗長サンプリングを抑える。QMC startup は worker 毎に seed をずらして重複回避。
+Optuna の n_jobs(スレッド) は GIL で CPU 律速の本問題を速くできず、かつ
+penalty_scale(module global) がスレッド競合で壊れるため不可。代わりに **複数プロセスが
+同じ study(共有 SQLite storage) を load_if_exists で共有** する分散最適化を使う。
+各プロセスは単スレッド = GIL 無関係・penalty_scale はプロセス分離で安全。worker 同士は
+DB 経由で running trial が見えるので constant_liar=True が効き、冗長サンプリングを抑える。
+QMC startup は worker 毎に seed をずらして重複回避。
 
 正しさ(学習方向)について:
   並列 async TPE は「方向が壊れる」のではなく「sample 効率がやや落ちる」だけ
@@ -13,15 +13,14 @@
   控えめな worker 数(3-4)でほぼ逐次同等の品質に到達し、wall-clock は ~N 倍速。
 
 役割:
-  - coordinator (sub1 の run_pipeline / main(旧special).main / sub2.main 内から呼ぶ): study を
+  - coordinator (sub1 の run_pipeline / main.main / sub2.main 内から呼ぶ): study を
     SQLite で作成 → spawn_workers() で N worker を起動・待機 → 既存の top-k/レポートをそのまま実行。
   - worker (本ファイルを `python -m optimization.parallel --worker ...` で起動):
     共有 study を load_study し、自前の sampler(TPE constant_liar + QMC seed=base+i) で
     担当 n_trials を最適化。
 
-注 (2026-05-29 改名): 旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py, 旧 special.py→main.py。
-  kind は新ファイル名に合わせて 'main'(旧special, HYSYS+SM) / 'sub1'(旧main, FUG) / 'sub2'(旧final)。
-  本 main(HYSYS) は単一 COM で並列不可 (N_WORKERS=1) のため kind='main' 経路は実質 sub1/sub2 用。
+kind は対象ファイルを表す: 'main'(HYSYS+SM) / 'sub1'(FUG) / 'sub2'(SM/rigorous/SM)。
+  main(HYSYS) は単一 COM で並列不可 (N_WORKERS=1) のため kind='main' 経路は実質 sub1/sub2 用。
 """
 from __future__ import annotations
 
@@ -36,7 +35,7 @@ from typing import Callable
 _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-# 旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py に退避済み。worker から bare import するため path 追加。
+# worker から sub/ 配下のモジュールを bare import するため path 追加。
 _SUB = os.path.join(_ROOT, 'sub')
 if _SUB not in sys.path:
     sys.path.insert(0, _SUB)
@@ -82,11 +81,10 @@ def _storage_with_timeout(storage_url: str):
 def _build_objective(kind: str) -> Callable:
     """worker プロセスで objective 関数を再構築する。
 
-    kind='sub1' : sub1(旧 main.py).SEARCH_SPACE / SOLVER_BO 等から make_objective で構築 (FUG)。
-    kind='main' : main.py(旧 special).objective をそのまま使う (HYSYS/SM、module global 依存)。
-    kind='sub2' : sub2(旧 final.py).objective をそのまま使う (SM/rigorous/SM + Stage2 全trial)。
+    kind='sub1' : sub1.SEARCH_SPACE / SOLVER_BO 等から make_objective で構築 (FUG)。
+    kind='main' : main.objective をそのまま使う (HYSYS/SM、module global 依存)。
+    kind='sub2' : sub2.objective をそのまま使う (SM/rigorous/SM + Stage2 全trial)。
     import 時に pipeline/main() は走らない (どれも if __name__=='__main__' ガード)。
-    (旧 main.py→sub/sub1.py, 旧 final.py→sub/sub2.py, 旧 special.py→main.py に改名済み。)
     """
     if kind == 'sub1':
         import sub1 as M
@@ -108,8 +106,8 @@ def _build_objective(kind: str) -> Callable:
         import main as S
         return S.objective
     if kind == 'sub2':
-        # 設計判断 (2026-05-27): sub2 (旧 final.py) = (sm, rigorous, sm) + Stage2 全trial。
-        # main(旧special) と同じく module global (penalty_scale) 依存だが worker はプロセス分離で安全。
+        # sub2 = (sm, rigorous, sm) + Stage2 全trial。main と同じく module global
+        # (penalty_scale) 依存だが worker はプロセス分離で安全。
         import sub2 as Fm
         return Fm.objective
     raise ValueError(f"未知の kind: {kind!r} ('main' | 'sub1' | 'sub2')")
@@ -144,7 +142,7 @@ def _run_worker(kind: str, study_name: str, storage_url: str,
         elif kind == 'sub2':
             import sub2 as Fm
             callbacks = [Fm._make_final_callback(n_trials)]
-        else:  # kind == 'main' (旧 special, HYSYS+SM)
+        else:  # kind == 'main' (HYSYS+SM)
             import main as S
             callbacks = [S._make_main_callback(n_trials)]
     except Exception:
@@ -189,7 +187,7 @@ def spawn_workers(
     作業 (IDE/HYSYS GUI 等) に CPU を譲る。8コア飽和してもマシンが軽いまま。
     """
     set_sqlite_wal(db_path)
-    # 設計判断 (2026-05-26): worker を低優先度で起動し対話作業を妨げない (Windows)。
+    # worker を低優先度で起動し対話作業を妨げない (Windows)。
     _flags = 0
     if low_priority and os.name == 'nt':
         _flags = getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0)
@@ -210,8 +208,8 @@ def spawn_workers(
         ]
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
-        # 設計判断: main(旧special) の worker は各々 HYSYS インスタンスを立てるので
-        # PDH_PER_UNIT_LOG 等の env はそのまま継承させる。
+        # main の worker は各々 HYSYS インスタンスを立てるので PDH_PER_UNIT_LOG 等の
+        # env はそのまま継承させる。
         p = subprocess.Popen(cmd, stdout=fout, stderr=subprocess.STDOUT,
                              env=env, cwd=_ROOT)
         procs.append((p, fout))
@@ -219,9 +217,9 @@ def spawn_workers(
         print(f"[parallel] worker {i} 起動 PID={p.pid} seed={seed} "
               f"n_trials={per[i]} log={logf}", flush=True)
 
-    # 全 worker 完了待ち。設計判断 (2026-05-27): 並列中 coordinator が沈黙すると
-    # 進捗が見えないため、DB を定期(既定 60s)読みして集約進捗を 1 行表示する
-    # (詳細な per-trial ログは各 _worker*.log に出続ける)。env PDH_PARALLEL_PROGRESS_SEC で間隔調整。
+    # 全 worker 完了待ち。並列中 coordinator が沈黙すると進捗が見えないため、DB を
+    # 定期(既定 60s)読みして集約進捗を 1 行表示する (詳細な per-trial ログは各
+    # _worker*.log に出続ける)。env PDH_PARALLEL_PROGRESS_SEC で間隔調整。
     import time as _time
     _t0 = _time.time()
     _interval = float(os.environ.get('PDH_PARALLEL_PROGRESS_SEC', '60'))
@@ -287,7 +285,7 @@ def _main_cli() -> None:
     if args.worker:
         _run_worker(args.kind, args.study_name, args.storage,
                     args.n_trials, args.seed, args.n_startup)
-        # main(旧special, HYSYS) の worker は HYSYS を確実にクローズ
+        # main(HYSYS) の worker は HYSYS を確実にクローズ
         if args.kind == "main":
             try:
                 from units.vle.hysys.provider import shutdown_default_provider

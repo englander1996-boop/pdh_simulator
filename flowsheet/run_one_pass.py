@@ -52,37 +52,29 @@ _ZERO = {'A': 0.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0, 'Z': 0.0}
 
 
 # ---------------------------------------------------------------------------
-# trace bypass (2026-05-19 追加、モデル簡略化に対する数値補正)
+# trace bypass (モデル簡略化に対する数値補正)
 # ---------------------------------------------------------------------------
 #
-# 設計判断 (2026-05-19): PSA / Mem の design モデルは入口組成に「主要成分のみ」
-# の前提を置いている (PSA は CH4 破過計算、Mem は C3H6/C3H8 二成分透過)。
-# 上流 (Dist2 partial cond) で微量の不純物 (例: C3H6 漏れ → PSA 入口に C3,
-# C2H6 漏れ → Mem 入口に C2) が流れ込むと簡略モデルが破綻し _penalty_result
-# を返してしまう。
+# PSA / Mem の design モデルは入口組成に「主要成分のみ」の前提を置いている
+# (PSA は CH4 破過計算、Mem は C3H6/C3H8 二成分透過)。上流 (Dist2 partial cond)
+# で微量の不純物 (例: C3H6 漏れ → PSA 入口に C3, C2H6 漏れ → Mem 入口に C2) が
+# 流れ込むと簡略モデルが破綻し _penalty_result を返してしまう。
 #
-# 本来は PSA / Mem を多成分対応に拡張すべき (TODO) だが、当面は orchestration
-# 層で「閾値未満の微量成分を design 計算から除き、マスバランスは保ったまま下流
-# (PSA: offgas, Mem: retentate=recycle) に直接ルーティング」する近似処置を入れる。
-# これは「物理装置の追加」ではなく「シミュレータの数値処理」であり、物理嘘の
-# force-move とは区別される (= マスは保たれる、設計計算の適用範囲を明示)。
-#
-# 閾値超過時は warning を出して「もう微量とは言えない量」を明示。
+# 対処として orchestration 層で「閾値未満の微量成分を design 計算から除き、
+# マスバランスは保ったまま下流 (PSA: offgas, Mem: retentate=recycle) に直接
+# ルーティング」する近似処置を入れる。これは「物理装置の追加」ではなく
+# 「シミュレータの数値処理」であり、マスは保たれる (設計計算の適用範囲を明示)。
 _TRACE_BYPASS_FRAC = 0.01    # 入口総モル流量に対する微量判定閾値 (1%)
-# 設計判断 (2026-05-19 確定): 1% で固定。
-# 当初 5% / 15% への拡張を試したが、これは「Dist2 設計の不味さ (10%+ 漏れ) を
-# シミュレータの bypass で隠す」物理嘘になっていた。本来の意図は:
+# 1% で固定。本来の意図:
 #   - Dist2 を設計でしっかり詰めて、物理的に C3 漏れ <1% を達成する
 #   - 残った微量 (≤ 1%) を bypass で吸収 (= 数値処理として透過的)
 # つまり 1% 閾値は「設計が正しいことの保証」、超えたら設計が悪い (=本物の警告)。
-# BO は探索範囲を制約することで <1% 領域を探すよう誘導 (search_space.py を見直し)。
 _PSA_TRACE_COMPS = ('A', 'B')                # PSA で許容しない: C3H8, C3H6
 _MEM_TRACE_COMPS = ('C', 'D', 'E', 'F')      # Mem で許容しない: H2, CH4, C2H4, C2H6
 
 
-# 設計判断 (2026-05-22): iter ごとにどのユニットで penalty が出たかを stderr/stdout に
-# 出すロガー。環境変数 PDH_PER_UNIT_LOG=1 で有効化。BO ループで巨大ログにならないよう
-# デフォルト OFF。
+# iter ごとにどのユニットで penalty が出たかを stderr/stdout に出すロガー。
+# 環境変数 PDH_PER_UNIT_LOG=1 で有効化。BO ループで巨大ログにならないようデフォルト OFF。
 _PER_UNIT_LOG = os.environ.get('PDH_PER_UNIT_LOG', '0') == '1'
 
 def _log_unit_failure(unit_name: str, equipment) -> None:
@@ -132,9 +124,8 @@ def _apply_trace_bypass(
                          (frac - threshold) の最大値 [-]。超過なしなら 0。
                          BO objective の連続 penalty 化に runner.py で利用。
     """
-    # 設計判断 (2026-05-20、ユーザー方針): 閾値超過時の warning は出さない。
-    # 過去版は「PSA/Mem の多成分対応化を検討」と促していたが、多成分化は実施しない
-    # 方針確定 (理由: 1-2% 漏れは有効数字範囲で許容、多成分化はコスト対効果悪い)。
+    # 閾値超過時の warning は出さない (多成分化は実施しない方針: 1-2% 漏れは
+    # 有効数字範囲で許容、多成分化はコスト対効果が悪い)。
     # max_excess_frac は将来 BO penalty 化する余地として戻り値に残す (現状未使用)。
     F_total = sum(max(F, 0.0) for F in F_in.values())
     cleaned: Dict[str, float] = dict(F_in)
@@ -162,15 +153,12 @@ def _apply_trace_bypass(
 # ---------------------------------------------------------------------------
 # Warning 集約ヘルパ
 # ---------------------------------------------------------------------------
-# 旧版 (〜2026-05-17) は warnings.simplefilter("ignore") で全 warning を抑制し、
-# fallback の発生 (PR EOS Z=1 fallback、brentq 偽根、Wang-Henke MESH 残差超過に
-# よる FUG fallback 等) が静かに進行していた。これが原因で「数値結果は正常だが
-# 実は silent fallback が走っていて TAC が 1 億円/年単位で過小評価」という事案が
-# 2026-05-10 に発覚した (STATUS_2026-05-10.md 参照)。
-#
-# 本実装 (2026-05-18) では catch_warnings(record=True) + simplefilter("always") で
-# warning を抑制せず捕捉し、ラベル付きで結果 dict に格納する。runner.py が
-# failure_reason に集約することで、BO log で fallback 発火が追跡可能になる。
+# warning を抑制すると fallback の発生 (PR EOS Z=1 fallback、brentq 偽根、
+# Wang-Henke MESH 残差超過による FUG fallback 等) が静かに進行し、「数値結果は
+# 正常だが実は silent fallback が走っていて TAC が過小評価」となる危険がある。
+# そこで catch_warnings(record=True) + simplefilter("always") で warning を抑制せず
+# 捕捉し、ラベル付きで結果 dict に格納する。runner.py が failure_reason に集約する
+# ことで、BO log で fallback 発火が追跡可能になる。
 class _CapturedWarning:
     """source ラベル付きの warning エントリ。"""
     __slots__ = ('source', 'category', 'message', 'filename', 'lineno')
@@ -256,7 +244,7 @@ def _build_penalty_one_pass_result(
         # Mem shortfall (Reactor 失敗で Mem 未到達 = 0 で伝播)
         mem_ph_shortfall=0.0, mem_bp_shortfall=0.0,
         mem_phase_shortfall=0.0, mem_other_shortfall=0.0,
-        # 観測ラベル (2026-05-22)
+        # 観測ラベル
         first_failed_unit='r_rx',
     )
     # 上流の r1 + reactor の penalty_reason / SV_actual を抽出。下流は stub なので無視。
@@ -266,12 +254,11 @@ def _build_penalty_one_pass_result(
 
 
 # ---------------------------------------------------------------------------
-# 蒸留塔 penalty 早期検出 (2026-05-20 追加)
+# 蒸留塔 penalty 早期検出
 # ---------------------------------------------------------------------------
-# 設計判断: 旧版は r1/r2/r3 が penalty (CAPEX=1e9 sentinel, feasible=False) で
-# 全成分流量ゼロの top/bottom を返したあと下流の simulate_jt_expansion / PSA / Mem
-# に流れ、`ValueError: expansion_valve: 全成分流量がゼロです` で例外 crash していた
-# (BO #001 trial 等で多発)。runner.py は例外を catch するが、TPE constraints_func に
+# r1/r2/r3 が penalty (CAPEX=1e9 sentinel, feasible=False) で全成分流量ゼロの
+# top/bottom を返すと、下流の simulate_jt_expansion / PSA / Mem が「全成分流量が
+# ゼロ」で例外 crash する。runner.py は例外を catch するが、TPE constraints_func に
 # 渡る情報が「solver_failure 固定」になり連続シグナルが失われる。
 # 本ヘルパは塔 penalty を早期検出して solver に penalty_hit で抜けてもらう経路に
 # 変換し、同時に N_shortfall / dT_shortfall を計算して runner.py 経由で
@@ -280,14 +267,14 @@ _RIG_TOL_K = 0.05   # Wang-Henke 収束 tol (src/distillation_rigorous.py と同
 # PSA penalty 連続シグナルの基準 (psa_system.py の _T_ABS_MIN, _U0_MAX と同期)
 _PSA_T_ABS_MIN_S = 60.0
 _PSA_U0_MAX_MS   = 1.0
-# PSA 床圧損 penalty の基準 (psa_system.py の PSAFixedParams.dP_max_bar と同期、2026-05-31)
+# PSA 床圧損 penalty の基準 (psa_system.py の PSAFixedParams.dP_max_bar と同期)
 _PSA_DP_MAX_BAR  = 0.3
 # Reactor SV penalty 連続シグナルの基準 (swing.py の FixedParams.SV_{min,max}_m_per_s と同期)
 _REACTOR_SV_MIN_MS = 0.5
 _REACTOR_SV_MAX_MS = 3.0
 # Reactor ΔP penalty 連続シグナルの基準 (swing.py の FixedParams.dP_over_P_max と同期)
 _REACTOR_DP_OVER_P_MAX = 0.10
-# Mem penalty 連続シグナル用の安全マージン (2026-05-22)
+# Mem penalty 連続シグナル用の安全マージン
 #   ph_le_pfeed:  P_H が feed.P_in に何倍近いか → log10 比
 #   bp_le_cold:   bp が cold_out に何 K 不足か → 対数比 (T 単位)
 #   vapor_cond:   T_in が T_dew に何 K 不足か → 対数比
@@ -305,9 +292,9 @@ def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
         - 'reactor_other_shortfall' [-] : SV 以外の penalty (input_invalid, sim_failure,
           volume_zero, capex_exception) で 1.0、正常完走で 0。
 
-    設計判断 (2026-05-21): PSA shortfall と同じパターン。SV < min なら D を小さく or
-    並列数を増やす方向、SV > max なら D を大きく or 並列数を減らす方向に TPE が
-    学習できるよう正負を log10 比で連続化。
+    PSA shortfall と同じパターン。SV < min なら D を小さく or 並列数を増やす方向、
+    SV > max なら D を大きく or 並列数を減らす方向に TPE が学習できるよう
+    正負を log10 比で連続化する。
     """
     out = {
         'reactor_sv_shortfall':    0.0,
@@ -329,8 +316,8 @@ def _compute_reactor_shortfall(r_rx) -> Dict[str, float]:
         else:
             out['reactor_sv_shortfall'] = 1.0  # 想定外 (SV=0 等)
     elif reason == 'dP_excess':
-        # 設計判断 (2026-05-30): ΔP/P_in が閾値超過した分を連続シグナル化。
-        # 超過量 (ratio - max) を返し、BO に z_cat↓ / D↑ / 粒径↑ 方向を学習させる。
+        # ΔP/P_in が閾値超過した分 (ratio - max) を連続シグナル化し、
+        # BO に z_cat↓ / D↑ / 粒径↑ 方向を学習させる。
         dp = getattr(eq, 'dP_over_P_actual', 0.0) or 0.0
         out['reactor_dp_shortfall'] = max(dp - _REACTOR_DP_OVER_P_MAX, 0.0)
     else:
@@ -353,9 +340,9 @@ def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
         - 'psa_feed_shortfall' [-] : feed 異常 (no_non_C3_feed / no_CH4_feed) で 1.0。
           これらは上流 (Dist2 rigorous) が異常組成を返した場合に発火する稀ケース。
 
-    設計判断 (2026-05-21): silent _penalty_result() の代替シグナル。BO の TPE
-    constraints_func で feasible 境界への接近度を学習させる目的。正常完走時は
-    すべて 0.0 を返す (penalty_reason='')。
+    silent _penalty_result() の代替シグナル。BO の TPE constraints_func で
+    feasible 境界への接近度を学習させる目的。正常完走時はすべて 0.0 を返す
+    (penalty_reason='')。
     """
     out = {
         'psa_t_abs_shortfall': 0.0,
@@ -378,8 +365,8 @@ def _compute_psa_shortfall(r_psa) -> Dict[str, float]:
     elif reason == 'u_0_above_max' and u_0 > 0:
         out['psa_u_0_shortfall'] = math.log10(max(u_0 / _PSA_U0_MAX_MS, 1.0))
     elif reason == 'dp_excess':
-        # 設計判断 (2026-05-31): 床 ΔP が上限超過した分 [bar] を連続シグナル化。
-        # BO に D_col↑ / L_bed↓ / 流量↓ 方向を学習させる (反応器 ΔP と同パターン)。
+        # 床 ΔP が上限超過した分 [bar] を連続シグナル化し、BO に D_col↑ / L_bed↓ /
+        # 流量↓ 方向を学習させる (反応器 ΔP と同パターン)。
         dp = getattr(eq, 'dP_bar_actual', 0.0) or 0.0
         out['psa_dp_shortfall'] = max(dp - _PSA_DP_MAX_BAR, 0.0)
     elif reason in ('no_non_C3_feed', 'no_CH4_feed'):
@@ -418,13 +405,11 @@ def _compute_mem_shortfall(r_mem) -> Dict[str, float]:
         - 'mem_other_shortfall' [-] : 上記以外の numerical 失敗 (vap/ode/comp/cond
               exception, nan, invalid_input, neg_feed 等) で 1.0、正常完走で 0。
 
-    設計判断 (2026-05-22): PSA / Reactor で先行導入したパターンに揃える。
-    silent _penalty_result() 経路 (membrane_system.py の 16 箇所) が BO に方向を
-    渡せず、main_20260522_005631 で 80% の trial が PSA/Mem CAPEX sentinel hit で
-    無方向に死んでいた問題への対処。Mem feed は Dist2 塔底 → mem_precool で
-    config.temperature.mem_feed_K (= 323.15K 固定) まで加熱されてから入るので、
-    露点・bp 関連の shortfall は実質的に Dist2 圧力 / Dist3 圧力を動かすシグナル
-    として効く。
+    PSA / Reactor と同じパターン。silent _penalty_result() 経路 (membrane_system.py の
+    複数箇所) が BO に方向を渡せず、trial が PSA/Mem CAPEX sentinel hit で無方向に
+    死ぬ問題への対処。Mem feed は Dist2 塔底 → mem_precool で
+    config.temperature.mem_feed_K まで加熱されてから入るので、露点・bp 関連の
+    shortfall は実質的に Dist2 圧力 / Dist3 圧力を動かすシグナルとして効く。
     """
     out = {
         'mem_ph_shortfall':    0.0,
@@ -494,9 +479,9 @@ def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, 
         # スケールが過大なので log 圧縮で 0-10 程度に抑える。
         # 例: dT_max=56K → log10(56/0.05) ≈ log10(1120) ≈ 3.05
         out[f'dist{idx}_dT_shortfall'] = math.log10(max(dT_max / _RIG_TOL_K, 1.0))
-    # 設計判断 (2026-05-28): HYSYS Dist2 の cold-top 失敗 (凝縮器ΔT不成立) は N_needed/dT_max が
-    # ともに 0 で、TPE には「方向不明 infeasible」としか伝わっていなかった (r2 失敗の 86%=125件)。
-    # 塔頂温度が凝縮可能下限 (最冷媒供給温度 +10K = utility 戻り温度) を何K下回るかを連続シグナル化し、
+    # HYSYS Dist2 の cold-top 失敗 (凝縮器ΔT不成立) は N_needed/dT_max がともに 0 で、
+    # TPE には「方向不明 infeasible」としか伝わらない。塔頂温度が凝縮可能下限
+    # (最冷媒供給温度 +10K = utility 戻り温度) を何K下回るかを連続シグナル化し、
     # TPE が col2_p↑ / reflux↓ で塔頂を暖める勾配を学習できるようにする。失敗 message
     # ("...condenser ΔT 不成立 (T_top=-99.4°C, T_util=-100.0°C)") に埋め込まれた値から復元する
     # (HYSYS 経路は T_top を equipment に構造化保存しないため message パースで取得)。
@@ -510,9 +495,9 @@ def _compute_dist_shortfalls(col_key: str, col_result, col_design) -> Dict[str, 
 
 
 # ---------------------------------------------------------------------------
-# 観測ラベル抽出 (2026-05-22 L1 観測強化、ユーザー要望)
+# 観測ラベル抽出
 # ---------------------------------------------------------------------------
-# 設計判断: shortfall (連続値) は既に user_attrs に流れているが、各装置が持つ
+# shortfall (連続値) は既に user_attrs に流れているが、各装置が持つ
 # 「どの penalty_reason ラベルで死んだか」「実 actual 値はいくつだったか」は
 # trial に届いていない。BO 走行中に「Mem.bp_le_cold_out (T_bp=305K < T_cold=313K)」
 # のような具体ラベル + 数値を live 表示できるよう、result dict に構造化フィールド
@@ -729,7 +714,7 @@ def _build_penalty_after_column(
         if col_result is not None:
             shortfalls = _compute_dist_shortfalls(failed_col_key, col_result, failed_col_design)
             base.update(shortfalls)
-    # 観測ラベル (2026-05-22): どの装置で詰まったかを明示。
+    # 観測ラベル: どの装置で詰まったかを明示。
     # 上流に passed kwargs のうち unit result だけ抜き出して diag 抽出。
     base['first_failed_unit'] = failed_col_key
     base.update(_EMPTY_UNIT_DIAG)
@@ -786,15 +771,14 @@ def run_one_pass(
     # ---- Step 1: Pump1 → Dist1 (Fresh のみ) ----
     # 原料は液 (30°C 飽和液) のため、Dist1 (17 bar) への昇圧は液送ポンプで行う。
     # contest §3-3-3 「加圧すべき箇所には、ポンプ(液) を入れること」に従う。
-    # 設計判断 (2026-05-09): 出口圧力は design.dist1.P_col に同期する
+    # 出口圧力は design.dist1.P_col に同期する
     # (operating.toml の pump1_out_Pa は backward compat のため残置だが未使用)。
     pump1 = simulate_pump(fresh, P_out_target=design.dist1.P_col)
     with _capture_warnings("Dist1", warnings_captured):
         r1 = simulate_column1(pump1.outlet, tunables=design.dist1)
 
-    # 設計判断 (2026-05-20): Dist1 FUG が _penalty_result (Gilliland infeasible 等) を
-    # 返したとき、r1.top.F_in は全成分ゼロ → 下流 simulate_jt_expansion が
-    # `ValueError: 全成分流量がゼロ` で crash する経路があった (BO trial #0,1,9,12,...で多発)。
+    # Dist1 FUG が _penalty_result (Gilliland infeasible 等) を返すと、r1.top.F_in は
+    # 全成分ゼロ → 下流 simulate_jt_expansion が「全成分流量がゼロ」で crash する。
     # 早期に penalty 経路に分岐し、shortfall を TPE 用 user_attr に格納する。
     if not getattr(r1.equipment, 'feasible', True):
         _log_unit_failure('Dist1 (r1)', r1.equipment)
@@ -805,10 +789,9 @@ def run_one_pass(
         result['warnings_captured'] = warnings_captured
         return result
 
-    # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)
-    # 設計判断 (2026-05-08): 旧版は P を書き換えるだけで T を維持していたが
-    # 物理的には等エンタルピー (JT) 膨張で温度低下する。反応器入口プレヒート
-    # Q_preheat の見積もり精度を上げるため simulate_jt_expansion を経由する。
+    # 塔頂を反応器圧力 (0.5 bar) に膨張 (C4 除去済みの C3 主成分)。
+    # 物理的には等エンタルピー (JT) 膨張で温度低下するため、反応器入口プレヒート
+    # Q_preheat の見積もり精度を上げる目的で simulate_jt_expansion を経由する。
     # 膨張弁本体はコストフリー (装置 CAPEX/OPEX に計上しない、配管中の絞り弁)。
     dist1_top_rx = simulate_jt_expansion(
         ProcessStream(F_in=dict(r1.top.F_in), T_in=r1.top.T_in, P_in=r1.top.P_in),
@@ -843,19 +826,17 @@ def run_one_pass(
         T_feed=reactor_inlet.T_in,
         P_in=reactor_inlet.P_in,
     )
-    # 反応器モデルの選択 (2026-05-30): design.swing に SwingDesign(軸流) が入っていれば
-    # 軸流固定床、RadialDesignVars(径方向流) が入っていれば径方向流を実行。型でディスパッチ
+    # 反応器モデルの選択: design.swing に SwingDesign(軸流) が入っていれば軸流固定床、
+    # RadialDesignVars(径方向流) が入っていれば径方向流を実行。型でディスパッチ
     # するため既存の軸流コンストラクタは無改修で動く。両者とも (DesignVars, FeedStream,
     # FixedParams) → SimulationResult の同一インターフェースで、出力 dataclass も共有。
     if isinstance(design.swing, RadialDesignVars):
-        # 2026-05-31: Oleflex 型 多段 (径方向流断熱床 N 段直列 + 段間再加熱)。
-        #   既定 3 段 (実機 UOP Oleflex の 3〜4 基直列に対応、ユーザー決定 2026-05-31)。
+        # Oleflex 型 多段 (径方向流断熱床 N 段直列 + 段間再加熱)。
+        #   既定 3 段 (実機 UOP Oleflex の 3〜4 基直列に対応)。
         #   単段では PDH 吸熱で床が降温し per-pass 転化率 ~30% で頭打ち → プロパン巨大 recycle →
-        #   膜フィード希釈 (propylene 18%) → 膜回収 30% → Dist3 SM 分類器の学習域 (In_Flow≥0.36)
-        #   割れで main BO feasible 0 になっていた。3段+段間再加熱で per-pass ~59%(純feed)/~39%
-        #   (recycle 込み full flowsheet)、膜フィード ~52% に濃縮、Dist3 通過 (In_Flow 0.535)、収率 46→70%。
-        #   3段 vs 4段: 収率≈選択率で頭打ち (3段sel74%≈4段sel73%) のため収率はほぼ同等だが、4段は
-        #   加熱炉燃料/反応器CAPEX/ΔP が増えるだけ → TAC 上 3段が有利。段数決定の経緯は report 反応器章。
+        #   膜フィード希釈 → 膜回収低下 となるため、3段+段間再加熱で per-pass を引き上げ
+        #   膜フィードを濃縮する。3段 vs 4段は収率≈選択率で頭打ち (収率はほぼ同等) だが、
+        #   4段は加熱炉燃料/反応器CAPEX/ΔP が増えるため TAC 上 3段が有利 (詳細は report 反応器章)。
         #   env PDH_RADIAL_N_BEDS で上書き可 (感度解析用)。
         _n_beds = int(os.environ.get('PDH_RADIAL_N_BEDS', '3'))
         if _n_beds >= 2:
@@ -866,15 +847,13 @@ def run_one_pass(
     else:
         r_rx = simulate_swing_reactor_system(design.swing, swing_feed, SwingFixed())
 
-    # 設計判断 (2026-05-17): reactor が penalty 返却 (例: SV 範囲外、V_cat 異常等で
-    # _penalty_result()) のとき、effluent は F=0, T=0, P=0。このまま下流の cooler/
-    # compressor に流すと「P_in=0」で ValueError 発生 → solver.py の penalty_hit
-    # 検査まで到達できない。早期に「penalty 状態で zero 流」のダミーを返して下流の
-    # 全装置を penalty 結果でスキップする。solver 側で Reactor_CAPEX >=
-    # PENALTY_CAPEX_THRESHOLD_OKUYEN をもって penalty_hit と判定する。
-    # 設計判断 (2026-05-21): Reactor SV penalty 経路の連続シグナルを抽出。
-    # 旧版は silent _penalty_result() で BO が「D を上下どちらに動かせば良いか」
-    # 分からなかった。reactor_sv_shortfall を user_attr → constraints_func に渡す。
+    # reactor が penalty 返却 (例: SV 範囲外、V_cat 異常等で _penalty_result()) のとき、
+    # effluent は F=0, T=0, P=0。このまま下流の cooler/compressor に流すと「P_in=0」で
+    # ValueError 発生 → solver.py の penalty_hit 検査まで到達できない。早期に
+    # 「penalty 状態で zero 流」のダミーを返して下流の全装置を penalty 結果でスキップする。
+    # solver 側で Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN をもって penalty_hit と判定する。
+    # Reactor SV penalty 経路の連続シグナルを抽出し、reactor_sv_shortfall を
+    # user_attr → constraints_func に渡して BO が D の調整方向を学習できるようにする。
     reactor_shortfalls = _compute_reactor_shortfall(r_rx)
     if r_rx.equipment.Reactor_CAPEX >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
         _log_unit_failure('Reactor (r_rx)', r_rx.equipment)
@@ -895,7 +874,7 @@ def run_one_pass(
     # 反応器圧力 0.5 bar → Dist2 圧力 8.5 bar = 圧縮比 17:1。
     # 単段では断熱温度上昇が過大になる (~T_in×4) ため等圧縮比 √17≈4.12 の 2 段
     # に分割し、段間で T_intercool まで冷却して動力と機械的負荷を低減する。
-    # 設計判断 (2026-05-09): Comp2 最終出口圧力は design.dist2.P_col に同期する
+    # Comp2 最終出口圧力は design.dist2.P_col に同期する
     # (operating.toml の comp2_out_Pa は backward compat のため残置だが未使用)。
     cooled = simulate_cooler(
         rx_out,
@@ -906,9 +885,9 @@ def run_one_pass(
     P_out_final = design.dist2.P_col
     P_mid       = math.sqrt(P_in_comp2 * P_out_final)
     T_intercool = config.temperature.cooler_after_reactor_K
-    # 設計判断 (2026-05-09): Comp2b 出口 (~151°C) は Dist2 dew point (~50°C @ 8.5 bar)
-    # を遥かに上回る超加熱蒸気。Dist2 partial condenser に直接入れると顕熱を冷凍冷媒で
-    # 処理することになるため、工業実機の desuperheater (冷却水 HE) で dew 直上まで冷却。
+    # Comp2b 出口 (~151°C) は Dist2 dew point (~50°C @ 8.5 bar) を遥かに上回る超加熱蒸気。
+    # Dist2 partial condenser に直接入れると顕熱を冷凍冷媒で処理することになるため、
+    # 工業実機の desuperheater (冷却水 HE) で dew 直上まで冷却する。
     # Q ~12 MW を冷却水 (60 円/GJ) で除去 → 冷凍冷媒 (~1820 円/GJ) より遥かに安い。
     T_dist2_feed_K = 323.15   # 50°C: 8.5bar dew (~40-50°C) より少し上、5K margin
     with _capture_warnings("Comp2/Dist2", warnings_captured):
@@ -920,7 +899,7 @@ def run_one_pass(
                                     process_phase=StreamPhase.GAS)
         r2        = simulate_column2(desuper.outlet, tunables=design.dist2)
 
-    # 設計判断 (2026-05-20): Dist2 rigorous (Wang-Henke) 収束失敗時 → penalty_result。
+    # Dist2 rigorous (Wang-Henke) 収束失敗時 → penalty_result。
     # 下流 PSA / Mem は r2.top / r2.bottom がゼロ流量で組成計算が破綻するため早期 return。
     # dT_max_rigorous が equipment に格納されているので shortfall を TPE に伝える。
     if not getattr(r2.equipment, 'feasible', True):
@@ -939,9 +918,9 @@ def run_one_pass(
         return result
 
     # ---- Step 4: PSA ----
-    # trace bypass (2026-05-19): PSA design モデルは C3 を扱えないため、入口の
-    # C3 微量分 (≤ 1% of total) を design 計算から除き、後で offgas に合算する。
-    # 2026-05-20: 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
+    # trace bypass: PSA design モデルは C3 を扱えないため、入口の C3 微量分
+    # (≤ 1% of total) を design 計算から除き、後で offgas に合算する。
+    # 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
     psa_in_cleaned, psa_bypass, psa_trace_excess = _apply_trace_bypass(
         r2.top.F_in, _PSA_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='PSA',
     )
@@ -953,10 +932,10 @@ def run_one_pass(
     # PSA penalty を log (PDH_PER_UNIT_LOG=1 時のみ stderr)
     if getattr(r_psa.equipment, 'CAPEX_total', 0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
         _log_unit_failure('PSA (r_psa)', r_psa.equipment)
-    # 設計判断 (2026-05-21): PSA silent penalty 経路に対する連続 shortfall を抽出。
-    # solver.py:191 が CAPEX sentinel で penalty_hit を判定するが、その情報のみだと
-    # BO は「どう逃げれば良いか」分からない。psa_t_abs_shortfall 等を計算して
-    # one_pass dict に積み、objective.py 経由で TPE constraints_func に届ける。
+    # PSA silent penalty 経路に対する連続 shortfall を抽出。solver が CAPEX sentinel で
+    # penalty_hit を判定するが、その情報のみだと BO は「どう逃げれば良いか」分からない。
+    # psa_t_abs_shortfall 等を計算して one_pass dict に積み、objective.py 経由で
+    # TPE constraints_func に届ける。
     psa_shortfalls = _compute_psa_shortfall(r_psa)
     # bypass 分を offgas に合算 (マスバランス保持)。r_psa.offgas は Dict[str,float]。
     if any(v > 0 for v in psa_bypass.values()):
@@ -968,14 +947,13 @@ def run_one_pass(
     # Dist2 を 8.5 bar 運転にした影響で塔底液の泡点が ~20°C まで下がり、冷却水
     # では液状態を保てない。膜の P_H <= 9.5 bar (Hua et al. 2024) を守るため、
     # 塔底液を mem_feed_K まで気化・過熱してガスフィードで膜へ送る。
-    # 設計判断 (2026-05-08): 旧版は感熱のみで潜熱無視 → Mem 気化器 OPEX が 0
-    # になっていた既知バグ。phase_change=True で潜熱を加算する。
-    # 設計判断 (2026-05-31, 案②): Dist2 を高圧運転して塔頂 cold-top (極低温で冷媒到達不能) を
-    # 回避する場合，塔底圧 (= col2_p) が膜 P_H (≤9.5bar, Hua 膜検証範囲) を超えうる。膜は P_H 入口
+    # phase_change=True で潜熱を加算する (感熱のみだと Mem 気化器 OPEX が 0 になる)。
+    # Dist2 を高圧運転して塔頂 cold-top (極低温で冷媒到達不能) を回避する場合，
+    # 塔底圧 (= col2_p) が膜 P_H (≤9.5bar, Hua 膜検証範囲) を超えうる。膜は P_H 入口
     # 前提なので，超過分は膜前で JT 膨張弁により P_H まで減圧する (配管中の絞り弁、コストフリー。
     # リサイクル流の減圧と同扱い)。これにより「Dist2 圧 < 膜 P_H」の連成制約が外れ，脱エタン塔を
     # 実機並み (20-30bar) の高圧で運転して塔頂を暖められる (プロピレン冷媒/冷却水域)。
-    # col2_p ≤ P_H の従来ケースでは膨張不要 (= 後段の膜供給圧縮機が P_H まで昇圧、挙動不変)。
+    # col2_p ≤ P_H のケースでは膨張不要 (= 後段の膜供給圧縮機が P_H まで昇圧)。
     if r2.bottom.P_in > design.mem.P_H:
         r2_bottom_for_mem = simulate_jt_expansion(r2.bottom, P_out=design.mem.P_H)
     else:
@@ -986,10 +964,10 @@ def run_one_pass(
         phase_change=True,
         process_phase=StreamPhase.LIQUID,    # 顕熱区間: 液相加熱、潜熱区間は EVAPORATING に自動切替
     )
-    # trace bypass (2026-05-19): Mem design モデルは C3H6/C3H8 二成分のみを扱う。
+    # trace bypass: Mem design モデルは C3H6/C3H8 二成分のみを扱う。
     # 上流 (Dist2 bot) に微量の non-C3 (H2/CH4/C2H4/C2H6) が混在する場合、
-    # それを抽出して retentate (= recycle) に合算する。閾値超え時は warning。
-    # 2026-05-20: 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
+    # それを抽出して retentate (= recycle) に合算する。
+    # 閾値超過分 (= max_excess_frac) を BO penalty 用に runner.py へ伝播。
     mem_in_cleaned, mem_bypass, mem_trace_excess = _apply_trace_bypass(
         mem_precool.outlet.F_in, _MEM_TRACE_COMPS, _TRACE_BYPASS_FRAC, label='Mem',
     )
@@ -999,8 +977,8 @@ def run_one_pass(
         T_in=mem_precool.outlet.T_in,
         P_in=mem_precool.outlet.P_in,
     )
-    # 設計判断 (2026-05-31): 膜性能の感度解析用に Q_A/alpha 劣化係数を env で上書き可能にする
-    #   (PDH_RECYCLE_ACCEL と同じ方式)。env 未設定なら 1.0 = 文献代表値そのまま (挙動不変)。
+    # 膜性能の感度解析用に Q_A/alpha 劣化係数を env で上書き可能にする。
+    #   env 未設定なら 1.0 = 文献代表値そのまま。
     #   exp/exp_membrane_sensitivity.py が 1 プロセス内で env を切替えて TAC 頑健性を評価する。
     _mem_qa_factor    = float(os.environ.get('PDH_MEM_QA_FACTOR', '1.0'))
     _mem_alpha_factor = float(os.environ.get('PDH_MEM_ALPHA_FACTOR', '1.0'))
@@ -1013,11 +991,10 @@ def run_one_pass(
     # Mem penalty を log (PDH_PER_UNIT_LOG=1 時のみ stderr)
     if getattr(r_mem.equipment, 'CAPEX_total', 0) >= PENALTY_CAPEX_THRESHOLD_OKUYEN:
         _log_unit_failure('Mem (r_mem)', r_mem.equipment)
-    # 設計判断 (2026-05-22): Mem silent penalty 経路に対する連続 shortfall を抽出。
-    # solver.py:191 が CAPEX sentinel で penalty_hit を判定するが、その情報のみだと
-    # BO は「どう逃げれば良いか」分からない。mem_ph_shortfall / mem_bp_shortfall /
-    # mem_phase_shortfall / mem_other_shortfall を one_pass dict に積み、
-    # objective.py 経由で TPE constraints_func に届ける。
+    # Mem silent penalty 経路に対する連続 shortfall を抽出。solver が CAPEX sentinel で
+    # penalty_hit を判定するが、その情報のみだと BO は「どう逃げれば良いか」分からない。
+    # mem_ph_shortfall / mem_bp_shortfall / mem_phase_shortfall / mem_other_shortfall を
+    # one_pass dict に積み、objective.py 経由で TPE constraints_func に届ける。
     mem_shortfalls = _compute_mem_shortfall(r_mem)
     # mem_bypass は recycle に合算 (= reactor 入口 mixer で扱われる)。tear_mem 構造は
     # 'A', 'B' しか持たないので、bypass 分は別チャネルで管理し reactor_inlet 直前で合流。
@@ -1032,8 +1009,8 @@ def run_one_pass(
     with _capture_warnings("Dist3", warnings_captured):
         r3 = simulate_column3(mem_to_dist3, tunables=design.dist3)
 
-    # 設計判断 (2026-05-20): Dist3 penalty 早期検出。Dist3 失敗時は tear_dist3 が
-    # ゼロ確定するので次反復で recycle_dist3 expansion が ValueError を再発する。
+    # Dist3 penalty 早期検出。Dist3 失敗時は tear_dist3 がゼロ確定するので
+    # 次反復で recycle_dist3 expansion が ValueError を再発する。
     if not getattr(r3.equipment, 'feasible', True):
         _log_unit_failure('Dist3 (r3)', r3.equipment)
         result = _build_penalty_after_column(
@@ -1066,7 +1043,7 @@ def run_one_pass(
     T_d3_new  = r3.bottom.T_in
     T_mem_new = r_mem.retentate.T_out
 
-    # 観測ラベル (2026-05-22): success path でも PSA/Mem は早期 return しないため、
+    # 観測ラベル: success path でも PSA/Mem は早期 return しないため、
     # 「Dist3 まで素通りしたが実は r_psa/r_mem に penalty_reason が刺さってる」trial が
     # ある (solver は CAPEX sentinel で後から penalty_hit を判定する経路)。
     # ここで第一失敗ユニットを特定し、診断ラベル群を user_attrs 用に出しておく。
@@ -1099,7 +1076,7 @@ def run_one_pass(
         **reactor_shortfalls,
         # Mem shortfall (正常完走時は全 0、ph/bp/phase/other の penalty 経路で > 0)
         **mem_shortfalls,
-        # 観測ラベル (2026-05-22)
+        # 観測ラベル
         first_failed_unit=first_failed,
     )
     result.update(unit_diag)

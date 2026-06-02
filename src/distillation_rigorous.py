@@ -1,7 +1,7 @@
 """
 蒸留塔 rigorous VLE 求解 (Wang-Henke 法、MESH 方程式 tray-by-tray)。
 
-設計判断 (2026-05-09): FUG (shortcut) との切替 BO 用 rigorous モード本体。
+FUG (shortcut) との切替 BO 用 rigorous モード本体。
   ColumnTunables.solver_method='rigorous' のとき distillation_core.py の
   _simulate_rigorous() からこのモジュールが呼ばれる。
 
@@ -59,18 +59,17 @@ _T_MAX_K = 600.0      # stage T の上限
 _EPS     = 1e-12
 
 # 収束パラメータ (デフォルト)
-# 設計判断 (2026-05-19 Phase D): narrow-margin 設計で dT_max が ~7K で stall するケース
-# (Dist2 trial #258 級) に対処するため max_iter を 200 → 500 に拡張。
-# damping は Wegstein 加速の初回フォールバック値。失敗時の retry では 0.2 (no Wegstein)
-# を使う (_simulate_rigorous で実装)。
+# narrow-margin 設計で dT_max が ~7K で stall するケースに対処するため
+# max_iter を大きめ (500) に取る。damping は Wegstein 加速の初回フォールバック値。
+# 失敗時の retry では 0.2 (no Wegstein) を使う (_simulate_rigorous で実装)。
 _DEFAULT_MAX_ITER  = 500
 _DEFAULT_T_TOL_K   = 0.05    # ストレージ毎の T 変化が < 0.05 K で収束
 _DEFAULT_DAMPING   = 0.5     # T プロファイル更新の重み (0=無更新, 1=全更新、Wegstein 初回フォールバック)
-# 失敗時 retry 用パラメータ (Phase D, 2026-05-19)
+# 失敗時 retry 用パラメータ
 _RETRY_DAMPING     = 0.2     # Wegstein 振動を抑えた pure substitution 寄り
 _RETRY_DISABLE_WEGSTEIN = True   # retry では Wegstein を使わず damping のみ
 
-# Phase E (2026-05-19): partial condenser stage 1 で non-condensable を液側から除く際の K 上書き値
+# partial condenser stage 1 で non-condensable を液側から除く際の K 上書き値
 # 物理的「液側に入らない」= K → ∞ の理想化。1e8 は数値オーバーフローを避けつつ
 # tridiagonal で x_1[i] → V_2 y_2 / (D × K) ≈ 0 を作れる十分大きい値。
 _K_NONCONDENSABLE_LARGE = 1.0e8
@@ -96,9 +95,8 @@ _LAMBDA_KJ_PER_MOL: Dict[str, float] = {
 _LAMBDA_DEFAULT = 15.0    # [kJ/mol] フォールバック
 
 # 純成分 NBP (1 atm 沸点) [K]、Clausius-Clapeyron 計算用 (Ref: NIST)
-# 2026-05-19 修正 (Phase E): 旧版は H2/CH4 に「重平均で異常にならない程度の placeholder」
-# 値 (H2=100, CH4=150) を入れていたが、_K_cc_fallback で使うと CC が誤った K を返す
-# (例: H2 K=0.2 で完全に物理逆方向)。実 NBP に置き換えて CC が正しい K を出すようにする。
+# H2/CH4 も実 NBP を入れる。placeholder 値だと _K_cc_fallback の CC が誤った K
+# (例: H2 K=0.2 で物理逆方向) を返すため。
 _T_NBP_K: Dict[str, float] = {
     'A': 231.0,   # C3H8 (−42.1°C)
     'B': 225.5,   # C3H6 (−47.6°C)
@@ -195,7 +193,7 @@ def wang_henke_solve(
     damping:          float = _DEFAULT_DAMPING,
     T_top_init_K:     Optional[float] = None,
     T_bot_init_K:     Optional[float] = None,
-    use_wegstein:     bool = True,    # Phase D (2026-05-19): retry 用に Wegstein 無効化可
+    use_wegstein:     bool = True,    # retry 用に Wegstein 無効化可
 ) -> RigorousResult:
     """Wang-Henke で多成分蒸留塔の MESH を解く。
 
@@ -210,7 +208,7 @@ def wang_henke_solve(
       - 単相領域に逸脱した場合は T を _T_MIN/MAX_K にクランプして次反復へ
       - max_iter で打ち切り、converged=False で返す (呼び出し側で FUG フォールバック)
     """
-    # ---- 1. 設計判断 (基本パラメータ) ----
+    # ---- 1. 基本パラメータ ----
     F_total = sum(max(F, 0.0) for F in feed_F.values())
     if F_total <= _EPS:
         return _failure_result("feed flow ≤ 0", N_stages, comps)
@@ -244,7 +242,7 @@ def wang_henke_solve(
         )
 
     # 段毎の V, L 配列 (1-indexed: index 0 は使わない)
-    # 設計判断 (2026-05-09): Wang-Henke の正しい CMO 規約:
+    # Wang-Henke の CMO 規約:
     #   L[j] = stage j → stage j+1 (下方向の液流量)
     #   V[j] = stage j → stage j-1 (上方向の気流量)
     # フィード段 j=N_feed では:
@@ -283,13 +281,12 @@ def wang_henke_solve(
         # L[1] = L_top (reflux) はすでにセット済み
 
     # ---- 3. 初期 T プロファイル (線形) ----
-    # 設計判断: 塔頂 (LK 主体) と塔底 (HK 主体) の純成分沸点を初期推定。
+    # 塔頂 (LK 主体) と塔底 (HK 主体) の純成分沸点を初期推定。
     # FUG から渡された値があればそれを使う、無ければ z 全成分で粗推定。
     #
-    # 2026-05-19 修正: bubble_point_T が NaN を返す系 (H2/CH4 等の incondensable を
-    # 含むフィード, 例: Dist2 z=[H2 11.7%, CH4 2.4%, ...]) で NaN が伝播して
-    # max/min クランプを抜け _T_MAX_K=600K trivial 解 (K=1 全段) に陥っていた。
-    # フォールバック値を成分加重平均沸点 (CC ベース) に置換、さらに NaN check を追加。
+    # bubble_point_T が NaN を返す系 (H2/CH4 等の incondensable を含むフィード) では
+    # NaN が伝播して max/min クランプを抜け _T_MAX_K=600K trivial 解 (K=1 全段) に
+    # 陥るため、フォールバック値を成分加重平均沸点 (CC ベース) に置換し NaN check を行う。
     if T_top_init_K is None or T_bot_init_K is None:
         T_mid = float('nan')
         try:
@@ -323,9 +320,9 @@ def wang_henke_solve(
         for i, c in enumerate(comps):
             x[j, i] = z_feed[c]
 
-    # Phase E (2026-05-19): partial cond の non-condensable インデックス集合 (現状は
-    # _compute_K_profile の縮退検出ベース CC フォールバックで処理されるため、ここでは
-    # 使わない。将来 K 強制上書き等の追加対策を入れる場合に備えて保持)。
+    # partial cond の non-condensable インデックス集合 (現状は _compute_K_profile の
+    # 縮退検出ベース CC フォールバックで処理されるため未使用。K 強制上書き等の追加
+    # 対策を入れる場合に備えて保持)。
     non_condensable_idx: List[int] = []
     if partial_condenser:
         non_condensable_idx = [
@@ -345,7 +342,7 @@ def wang_henke_solve(
         # 5a. 現在の T, x で K 値を計算 (各段で PR EOS + phi_L/phi_V)
         # Newton step では K 値を内部で再計算するので、ここの K_profile は
         # tridiagonal 用 (= MESH の係数行列) のみに使う。
-        # Phase E (2026-05-19): partial cond stage 1 で non-condensable K を上書き。
+        # partial cond stage 1 で non-condensable K を上書きする。
         K = _compute_K_profile(
             T, x, comps, P_col, K_method,
             partial_condenser=partial_condenser,
@@ -382,12 +379,11 @@ def wang_henke_solve(
                     x_new[j, i] = z_feed[c]
 
         # 5d. 各段で Newton 1 ステップ → T_calc プロファイル
-        # 旧版は scipy.brentq で完全収束させていたが、Wang-Henke 外側で
-        # 何度も呼ばれるので各段は粗い更新で十分。1 ステップ Newton で十分速い。
-        # partial_condenser stage 1 では bubble-point が単相領域に落ちて
-        # 真値から ±20K ズレることがある (Dist2 既知問題、KNOWN_PLACEHOLDERS.md
-        # 参照)。ただし T を凍結すると x との整合が崩れて MESH 残差が爆発する
-        # ため、T の更新は通常通り行う。outlier は MESH の自然な収束点。
+        # Wang-Henke 外側で何度も呼ばれるので各段は粗い更新で十分。1 ステップ
+        # Newton で済ませる (= "粗い内側 + Wegstein 加速外側" の戦略)。
+        # partial_condenser stage 1 では bubble-point が単相領域に落ちて真値から
+        # ±20K ズレることがあるが、T を凍結すると x との整合が崩れて MESH 残差が
+        # 爆発するため、T の更新は通常通り行う。outlier は MESH の自然な収束点。
         T_calc = np.copy(T)
         for j in range(N_stages):
             T_calc[j], _ = _bubble_T_newton_step(
@@ -400,8 +396,8 @@ def wang_henke_solve(
         #   q = s/(s-1), s = (T_calc[j] - T_calc_prev[j]) / (T[j] - T_prev[j])
         #   q ∈ [-5, 0] にクランプ (加速のみ、振動方向への発散を防止)
         # 初回 2 反復は履歴がないので固定 damping にフォールバック。
-        # Phase D (2026-05-19): use_wegstein=False のときは pure substitution (damping 固定) のみ
-        # を使う。narrow-margin で Wegstein が振動方向に逸脱するケースの retry 用。
+        # use_wegstein=False のときは pure substitution (damping 固定) のみを使う
+        # (narrow-margin で Wegstein が振動方向に逸脱するケースの retry 用)。
         if T_prev is None or T_calc_prev is None or not use_wegstein:
             T_damped = (1.0 - damping) * T + damping * T_calc
             T_damped = np.clip(T_damped, _T_MIN_K, _T_MAX_K)
@@ -443,11 +439,10 @@ def wang_henke_solve(
         )
 
     # ---- 5g. 最終 consistency パス (MESH 残差を縮める) ----
-    # 設計判断 (2026-05-10): Wegstein は T が静止する点で停止するが、その時点では
-    # x が「1反復前の K」で解かれた状態のため、MESH 方程式に微小残差が残る。
-    # この残差は成分別マスバランスを破ることがある (Dist1 で C3H8/C4H10 ≈ 5% 入れ替わり等)。
-    # 修正: 収束後に「最終 T での K を計算 → x を tridiagonal で再求解」を 2-3 回繰り返し
-    # x と K の整合を取る。T は固定 (= 静止点維持)、x のみ磨く。
+    # Wegstein は T が静止する点で停止するが、その時点では x が「1反復前の K」で
+    # 解かれた状態のため MESH 方程式に微小残差が残り、成分別マスバランスを破ること
+    # がある。そこで収束後に「最終 T での K を計算 → x を tridiagonal で再求解」を
+    # 2-3 回繰り返し x と K の整合を取る。T は固定 (= 静止点維持)、x のみ磨く。
     # 経験的に 2-3 回で MESH 残差は 1e-3 → 1e-6 オーダーまで縮む。
     for polish_iter in range(3):
         K_polish = _compute_K_profile(
@@ -508,8 +503,7 @@ def wang_henke_solve(
     F_bot_kmolh = {c: B * x[N_stages - 1, i] for i, c in enumerate(comps)}
 
     # ---- always-on validation (内部不整合の早期検知) ----
-    # 設計判断 (2026-05-10): B_bottoms バグの再発防止に、収束時に毎回
-    # MESH 残差と成分マスバランスを計算して結果に含める。
+    # 収束時に毎回 MESH 残差と成分マスバランスを計算して結果に含める。
     # 大きな値が出れば solver 内部の不整合 (B_bot 取り違え、index off-by-one,
     # K=1 trivial 罠など) を呼び出し側で気付ける。
     mesh_max, mesh_mean, n_res = 0.0, 0.0, 0
@@ -590,10 +584,10 @@ def _bubble_T_newton_step(
       - Newton が暴れるケース (極小 df/dT、df/dT 符号反転) に備えて
         T 変化を _NEWTON_DT_MAX_K [K] でクランプする
 
-    2026-05-19 修正 (Phase E 続き): PR EOS が単相縮退 (Z_L ≈ Z_V → 全成分 K=1) の
-    場合、f(T) = Σ 1·x_i - 1 = 0 で停止して T が動かない問題を修正。縮退検出時は
-    K と df/dT を Clausius-Clapeyron で再計算する。これにより subcooled な T_init
-    から正しい bubble point へ Newton が収束する。
+    単相縮退対応: PR EOS が単相縮退 (Z_L ≈ Z_V → 全成分 K=1) の場合、
+    f(T) = Σ 1·x_i - 1 = 0 で停止して T が動かなくなる。縮退検出時は K と df/dT を
+    Clausius-Clapeyron で再計算し、subcooled な T_init から正しい bubble point へ
+    Newton が収束するようにする。
 
     Returns
     -------
@@ -614,7 +608,7 @@ def _bubble_T_newton_step(
     # K 値計算
     K_values: List[float] = []
     if is_degenerate or is_failed:
-        # CC フォールバック (Phase E、2026-05-19)
+        # CC フォールバック
         for i, c in enumerate(comps):
             K_values.append(_K_cc_fallback(c, T_old, P))
     else:
@@ -674,16 +668,11 @@ def _compute_K_profile(
     では Z_L, Z_V とも有効な根が得られる。仮 T で単相に張り付いた場合は
     None を返して呼び出し側でフォールバック。
 
-    2026-05-19 修正 (Phase E "single-phase degeneracy auto-fallback"):
+    single-phase degeneracy auto-fallback:
       partial_condenser=True で PR EOS が単相縮退 (Z_L ≈ Z_V → 全成分 K≈1 で
       分離装置として機能不能) を返した段は、Clausius-Clapeyron で K を再計算する。
       CC は純成分蒸気圧ベースで H2 (Tc=33K) など超臨界成分にも K_huge を返すため、
       物理的に妥当な「H2/CH4 はほぼ液相に入らない」結果になる。
-
-      バグ発見の経緯 (HYSYS との乖離調査 2026-05-19):
-        stage 1 で T=-73°C / 8.5bar / x={H2:64%, ...} の状態に PR が Z_L=Z_V を
-        返し K=1 全成分の縮退解になっていた。この縮退で C3H6 漏れが 4.5% に膨らみ
-        HYSYS 報告の <1% と乖離。CC フォールバックで縮退を解消する。
     """
     N_stages, n_comp = x.shape
     K = np.zeros_like(x)
@@ -698,7 +687,7 @@ def _compute_K_profile(
         is_degenerate = abs(Z_V - Z_L) < _Z_DEGEN_TOL
         for i in range(n_comp):
             if is_degenerate:
-                # 単相縮退: CC で K を再計算 (Phase E 修正)
+                # 単相縮退: CC で K を再計算
                 K[j, i] = _K_cc_fallback(comps[i], T[j], P_col)
             else:
                 try:
@@ -744,11 +733,9 @@ def _solve_tridiagonal(
     ----------
     B_bottoms : float
         塔底産物の流量 [kmol/h] = F_total - D_total。
-        L[N_stages] (= L_bot = R·D + q·F) とは別物。
-        Bug fix (2026-05-10): 旧版では `B_bot = L[N_stages]` としていたが、
-        これは L_bot (= 塔底段に下りる液量) で、bottom product flow B とは
-        全く異なる値 (Dist1 で ~20×)。リボイラ方程式が壊れて Dist1 の
-        成分マスバランスが破綻していた。
+        L[N_stages] (= L_bot = R·D + q·F、塔底段に下りる液量) とは別物。
+        両者を取り違えるとリボイラ方程式が壊れ、成分マスバランスが破綻する
+        (B_bottoms は L_bot より大幅に小さい)。
     """
     A = np.zeros(N_stages)   # 0-indexed
     B = np.zeros(N_stages)
@@ -813,13 +800,10 @@ def _solve_tridiagonal(
 def _failure_result(msg: str, N_stages: int, comps: List[str]) -> RigorousResult:
     """収束失敗時のダミー結果。distillation_core.py 側で警告 + FUG フォールバック対象。
 
-    設計判断 (2026-05-18 確認): RigorousResult dataclass は array フィールド
-    (T_profile_K, x/y/K_profile, F_top, F_bot, V/L) を必須としているため、failure 時も
-    全フィールドを埋める必要がある。flag-based の signal は `converged=False` で表現済み。
-    caller (distillation_core.py:680) は `if not rig.converged: raise RuntimeError(...)`
-    で明示的に判定するため、nan/0.0 配列が下流計算に伝播することはない。
-    本構造は問題ないため、追加リファクタは不要 (KNOWN_PLACEHOLDERS §4 から削除)。
-
+    RigorousResult は array フィールド (T_profile_K, x/y/K_profile, F_top, F_bot,
+    V/L) を必須とするため failure 時も全フィールドを埋める。失敗 signal は
+    `converged=False` で表現し、caller が明示的に判定するので nan/0.0 配列が下流
+    計算に伝播することはない。
     T_profile_K に nan、x/y に 0.0、K に 1.0 を埋めるのは「無意味な値」を強調するため。
     """
     return RigorousResult(

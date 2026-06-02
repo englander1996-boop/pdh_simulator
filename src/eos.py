@@ -30,9 +30,9 @@ from scipy.optimize import brentq
 from .config import THERMO_DATA, R
 
 # bubble_point_T は thermo (CalebBell, MIT, v0.6.0 pin) の PRMIX に依存する。
-# 欠落をモジュール load 時に fail-fast させる: かつて関数内 lazy import + 呼び出し側
-# の except Exception で ModuleNotFoundError がサイレントに握り潰され、PSA/Mem の
-# 偽 penalty として現れる事故があった (2026-05-12)。
+# 欠落をモジュール load 時に fail-fast させる (関数内 lazy import だと
+# ModuleNotFoundError が呼び出し側の except でサイレントに握り潰され、PSA/Mem の
+# 偽 penalty として現れるのを防ぐ)。
 try:
     from thermo.eos_mix import PRMIX as _PRMIX
 except ImportError as _e:
@@ -213,11 +213,11 @@ def z_factor(T: float, P: float, x: List[float], keys: List[str],
     A, B, *_ = _mix(T, P, x, keys)
     roots = _cubic_z(A, B)
     if not roots:
-        # 設計判断 (2026-05-18): PR EOS の cubic root が単相領域で消失する境界
-        # (e.g., 臨界点近傍、低温真空) で Z=1 (理想気体) を返す。下流の fugacity
-        # 計算は φ ≈ 1 となり K ≈ p_sat/P で近似される。蒸留塔の rigorous solver
-        # では MESH 残差で検出されて FUG fallback するが、PSA/Mem の単純な流量
-        # 計算では誤差が直接 CAPEX に伝播するため注意 (定量はユーザー検証要)。
+        # PR EOS の cubic root が単相領域で消失する境界 (e.g., 臨界点近傍、
+        # 低温真空) で Z=1 (理想気体) を返す。下流の fugacity 計算は φ ≈ 1 となり
+        # K ≈ p_sat/P で近似される。蒸留塔の rigorous solver では MESH 残差で
+        # 検出されて FUG fallback するが、PSA/Mem の単純な流量計算では誤差が
+        # 直接 CAPEX に伝播するため注意 (定量はユーザー検証要)。
         warnings.warn(
             f"z_factor: PR EOS 実根なし (T={T:.1f}K, P={P/1e5:.2f}bar, "
             f"phase={phase!r}, keys={keys})。Z=1 (理想気体) で fallback。"
@@ -302,20 +302,14 @@ def bubble_point_T(P: float, x: List[float], keys: List[str],
     外側ループ: T を brentq で探索
     内側ループ: thermo の PRMIX でフガシティー係数取得 (= 単相→二相遷移を正しく扱う)
 
-    --- 実装の経緯 (2026-05-10) ---
-    旧版は手作り PR EOS (`_mix`, `_cubic_z`, `fugacity_coeff` 等) を使っていたが、
-    PR EOS の単相→二相遷移境界 (Z_V = Z_L 縮退点) で brentq が偽根を返す問題があり、
-    Dist2 stage 1 で T = -92°C (f = -0.30) を返す不具合が発生した。
-    対症療法として post-validate (|f| > 0.1 なら NaN) を入れていたが原則的に悪手。
-
-    本版では thermo (CalebBell/thermo, MIT, 0.6.0 pin) の PRMIX を使う。
-    thermo は cubic root 切替を正しく扱い:
+    --- ソルバ選択 ---
+    手作り PR EOS だと単相→二相遷移境界 (Z_V = Z_L 縮退点) で brentq が偽根を
+    返す問題があるため、thermo (CalebBell/thermo, MIT, 0.6.0 pin) の PRMIX を使う。
+    thermo は cubic root 切替を正しく扱う:
       - 両相成立: phis_l と phis_g 両方が valid な値
       - 単相: AttributeError (= 「この T では液相 (or 気相) しか存在しない」signal)
-    これで偽根問題が根本解決し、post-validate も不要。
-
-    src/eos.py の他関数 (z_factor, fugacity_coeff 等) は手作り版のまま (= 影響なし、
-    呼び出し側は src/eos.py の API を unchanged で利用)。
+    これにより偽根問題が根本解決し、post-validate が不要になる。
+    src/eos.py の他関数 (z_factor, fugacity_coeff 等) は手作り版のまま。
 
     Note:
       探索範囲 [150K, 500K] のデフォルトは C3H6/C3H8 等の混合を想定。極低温成分

@@ -6,9 +6,7 @@ exp1.py / 将来の他 exp スクリプトで共通の処理:
   - キャプチャ中も stderr に進捗を流し続ける (黙々と待たされる感を回避)
   - 進捗 ticker (バックグラウンドスレッドで N 秒ごとに残り時間ヒントを stderr へ)
   - 例外/失敗時もキャプチャ済みログは残す
-
-設計判断:
-  - exp1.py に直書きしていた logging/ticker/save 処理を関数化、別 exp でも再利用可
+  - logging/ticker/save 処理を関数化し、複数の exp スクリプトで再利用可
   - stdout キャプチャ vs 直出力は save_output フラグで切替
 """
 

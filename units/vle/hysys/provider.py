@@ -52,10 +52,9 @@ _SENTINEL_CAPEX = max(PENALTY_CAPEX_THRESHOLD_OKUYEN, 1e8)
 class _SessionCache:
     """3 セッション同時保持型キャッシュ (app 1 つで複数 case 保持)。
 
-    設計判断 (2026-05-22): フローシート全体評価で Dist1/Dist2/Dist3 を順次呼ぶとき、
-    case swap (Close + Open) するだけでも sleep 含めて 1塔 ~10秒。3塔で 30秒/iter。
-    → 3 つの case を全て開きっぱなしにして、Activate で切替えるだけにすれば、
-    各 iter で HSC Open/Close 不要になり大幅高速化。
+    フローシート全体評価で Dist1/Dist2/Dist3 を順次呼ぶとき、case swap (Close + Open)
+    するだけでも sleep 含めて 1塔 ~10秒、3塔で 30秒/iter かかる。app を使い回し case を
+    切替えるだけにすることで HSC Open/Close を減らし高速化する。
 
     仕様:
       - app は HysysSession 1 つで保持
@@ -71,10 +70,9 @@ class _SessionCache:
         self.visible = visible
         self.keep_open = keep_open
         self.max_cases = max_cases
-        # 設計判断 (2026-05-25): force_cold=True のとき、同一 key の再取得でも HSC を
-        # 開き直して cold 解を保証する。Dist1/Dist3 を SM 化して HYSYS 塔が Dist2 のみに
-        # なると swap が起きず Dist2 が開きっぱなし=warm-start になる。warm-start 不採用
-        # 方針 (BO 張り付き回避) を単一塔ケースでも貫くためのスイッチ。
+        # force_cold=True のとき、同一 key の再取得でも HSC を開き直して cold 解を保証する。
+        # HYSYS 塔が 1 つだけになると swap が起きず開きっぱなし=warm-start になるため、
+        # warm-start 不採用方針 (BO 張り付き回避) を単一塔ケースでも貫くためのスイッチ。
         self.force_cold = force_cold
         self._app_session: Optional[HysysSession] = None
         # OrderedDict 相当: 古い順に並ぶ
@@ -92,8 +90,7 @@ class _SessionCache:
             self._cases[key] = self._app_session._case
             return self._app_session
 
-        # 設計判断 (2026-05-22 改訂): 3 セッション同時保持で Dist3 が iter 2 以降で
-        # Solver 走らない症状が出たので、swap_case 経由に戻す (app 使い回しのみ維持)。
+        # app は使い回し、case は swap_case 経由で切替える。
         # 同 key なら現セッションそのまま、異なる key なら HSC を swap。
         if key == next(iter(self._cases), None):
             if self.force_cold:
@@ -103,7 +100,7 @@ class _SessionCache:
                 self._cases[key] = self._app_session._case
             return self._app_session
 
-        # 異なる key: swap で切替 (debug で動作実績ある経路)
+        # 異なる key: swap で切替
         try:
             self._app_session.swap_case(hsc_path)
             # _cases を最新の key だけに更新 (古い key は捨てる、case は Close 済み)
@@ -156,16 +153,15 @@ class HysysVLEProvider:
         self.visible = visible
         self.timeout_sec = timeout_sec
         self.keep_open = keep_open
-        # 設計判断 (2026-05-25): PDH_HYSYS_FORCE_COLD=1 で同一塔の再解も毎回 cold
-        # (HSC 開き直し) にする。SM 化で HYSYS 塔が 1 つだけになると warm-start に
-        # なるのを防ぐスイッチ (warm-start 不採用方針)。
+        # PDH_HYSYS_FORCE_COLD=1 で同一塔の再解も毎回 cold (HSC 開き直し) にする。
+        # HYSYS 塔が 1 つだけになると warm-start になるのを防ぐスイッチ (warm-start 不採用方針)。
         _force_cold = os.environ.get('PDH_HYSYS_FORCE_COLD', '0') == '1'
         self._cache = (
             _SessionCache(visible=visible, keep_open=keep_open, force_cold=_force_cold)
             if use_cache else None
         )
         self._run_counter = 0
-        # 設計判断 (2026-05-25): Dist1 (column1) の結果メモ化。
+        # Dist1 (column1) の結果メモ化。
         #   run_one_pass で Dist1 のフィードは Fresh LPG のみ。リサイクル (tear) は
         #   Dist1 の「後」(反応器入口) で合流するため、内側リサイクル反復に対して
         #   Dist1 の入力 (feed 組成・流量・T・P + tunables) は完全に不変。
@@ -209,7 +205,7 @@ class HysysVLEProvider:
 
     # ---- 各塔の solve API ----
     def solve_column1(self, feed: ProcessStream, tunables: ColumnTunables) -> DistResult:
-        # 設計判断 (2026-05-25): Dist1 は内側リサイクル反復に対し入力不変なのでメモ化。
+        # Dist1 は内側リサイクル反復に対し入力不変なのでメモ化。
         # 入力 (feed + tunables) が直近と一致すれば前回結果をそのまま返す (cold 結果の
         # 厳密再利用、warm-start ではない)。詳細は __init__ のメモ説明を参照。
         key = _column1_memo_key(feed, tunables)
@@ -394,12 +390,12 @@ def _build_input(column_id: str, feed: ProcessStream, t: ColumnTunables):
     # PDH 側の feed は kmol/h で持っている
     feed_total_kmolh = float(sum(max(v, 0.0) for v in feed.F_in.values()))
 
-    # 設計判断 (2026-05-22 改訂): 温度は HSC のデフォルト (Calculated 設定) を維持。
-    # 圧力は lhs_column*.py の運用通り「塔圧 + 50 kPa」で書込む (Independent 設定で書ける)。
+    # 温度は HSC のデフォルト (Calculated 設定) を維持。
+    # 圧力は「塔圧 + 50 kPa」で書込む (Independent 設定で書ける)。
     # アダプタ側で feed_pressure_kpa=None なら自動的に col_p_kpa + FEED_PRESSURE_MARGIN_KPA
     # を採用するので、ここでは None のまま渡してアダプタに委ねる。
-    #   - 温度: 入力しない (HSC 内 Calculated、ユーザー方針 2026-05-22)
-    #   - 圧力: 書込む (lhs_column*.py 実績、Independent)
+    #   - 温度: 入力しない (HSC 内 Calculated)
+    #   - 圧力: 書込む (Independent)
     feed_temp_c = None
     feed_p_kpa  = None    # アダプタが col_p_kpa + 50 で計算する
 
@@ -485,7 +481,7 @@ def _column_result_to_dist_result(
     Q_reb_kW  = float(cr.qr_mw)  * 1000.0
 
     # utility 選択 + A 計算 + HE CAPEX
-    # 設計判断: distillation_core._simulate_rigorous の Step 6-8 と同じロジックで揃える。
+    # distillation_core._simulate_rigorous の Step 6-8 と同じロジックで揃える。
     # 失敗時は penalty (sentinel CAPEX) で BO 探索から除外させる。
     try:
         cond_utility = select_cooling_utility(max(T_top_K, _T_COOLING_FLOOR_K), mode='continuous')
@@ -511,11 +507,10 @@ def _column_result_to_dist_result(
         capex_reb  = calc_he_capex_okuyen(A_reb)
 
     # ---- 塔本体 (vessel + trays) CAPEX ----
-    # 設計判断 (2026-05-25): SM/HYSYS 経路でも FUG/rigorous (distillation_core Step 9) と
-    # 同じ式で塔径・塔高・vessel/trays CAPEX を計算する。必要量 (塔頂流量・還流比・塔頂温度・
-    # 塔頂組成・N) は SM/HYSYS 出力から全て得られる (model1/3 とも Out_RefluxRatio あり)。
-    # 旧版は暫定 0 で、BO の TAC が塔サイズに無反応 (flat) だった。本計算で N/還流が CAPEX に
-    # 効き、BO が「feasible 縁で段数最小=安い塔」を探索できるようになる。
+    # SM/HYSYS 経路でも FUG/rigorous (distillation_core Step 9) と同じ式で塔径・塔高・
+    # vessel/trays CAPEX を計算する。必要量 (塔頂流量・還流比・塔頂温度・塔頂組成・N) は
+    # SM/HYSYS 出力から全て得られる。N/還流が CAPEX に効くことで、BO が「feasible 縁で
+    # 段数最小=安い塔」を探索できる。
     from src.component_data import MW as _MW, liquid_density_mix as _liq_rho
     from src.distillation_core import _vessel_capex_okuyen as _vessel_capex
     from src.cost_calculator import calc_tray_capex_okuyen as _tray_capex
@@ -588,12 +583,11 @@ def _compute_he_area(T_proc: float, Q_kW: float, utility_name: str,
     """
     T_util_in = _supply_T_for_utility(utility_name)
     if utility_first:
-        # 設計判断 (2026-05-31, 実験で確定): 冷却ユーティリティの「戻り温度」は相で決まる。
+        # 冷却ユーティリティの「戻り温度」は相で決まる。
         #   - 顕熱クーラント (冷却水・空冷・+5/+15℃ 冷媒の液相域 = LIQUID/GAS): 吸熱で +10K 昇温。
         #   - 蒸発冷媒 (エチレン/プロピレン -25℃ 以下 = EVAPORATING): 潜熱吸熱で **沸点一定 (≒等温)**。
-        #     戻り≈供給なので dT は T_top - T_supply。従来は蒸発冷媒にも +10K を当てており、
-        #     -96℃級の塔頂が -100℃エチレンで凝縮可能なのに cold-top 誤判定していた (HYSYS Dist2 で多発)。
-        #     ※これは新規冷媒の追加ではなく，既存 -100℃ エチレン冷媒の蒸発を正しくモデル化する物理修正。
+        #     戻り≈供給なので dT は T_top - T_supply。これにより -96℃級の塔頂が -100℃エチレンで
+        #     凝縮可能なケースを cold-top 誤判定しない。
         _util_ph = utility_phase(utility_name)
         if _util_ph == StreamPhase.EVAPORATING:
             dT1 = dT2 = T_proc - T_util_in        # 等温冷媒: 全域 dT = T_top - T_supply
