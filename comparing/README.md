@@ -7,6 +7,26 @@
 全変数 + 熱統合を同時最適化) の best と突き合わせて **ΔTAC (損失額) を定量化**する比較ケース群。
 これにより「素朴手法に対して BO がどれだけ得をするか」を本物のプラント TAC で示す。
 
+## 一括実行 (推奨)
+
+全 case を 1 コマンドで直列実行し、BO ベスト (`../outputs/main_*/best.json`) との
+ΔTAC = TAC(本手法) − TAC(BO) を比較表 (CSV)・棒グラフ (PNG)・レポート貼付用 Markdown 表に
+まとめるエントリ `run_all.py` を用意している (HYSYS のある PC で実行)。
+
+```powershell
+# 計画と import 検証だけ (HYSYS 不要)
+.\.venv\Scripts\python.exe comparing\run_all.py --dry-run
+# 全 22 ケース実行 (HYSYS 直列、~33h 目安。1 ケース完了ごとに results へ逐次保存)
+.\.venv\Scripts\python.exe comparing\run_all.py
+# レポートと同じ BO 基準に固定する場合
+.\.venv\Scripts\python.exe comparing\run_all.py --baseline outputs\main_20260601_150117\best.json
+# 一部だけ
+.\.venv\Scripts\python.exe comparing\run_all.py --only case_rep_styrene2025,case_rep_eo2025
+```
+
+成果物は `comparing/results/comparison_<ts>.{csv,md,png}`。HYSYS は単一 COM インスタンスのため
+**直列実行のみ (並列不可)**。BO 基準は未指定なら最新の `outputs/main_*/best.json` を自動採用する。
+
 ## case フォルダ構成
 
 各 case は独立スクリプト `comparing/<case>/main.py`。実行は
