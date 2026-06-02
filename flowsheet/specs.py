@@ -1,7 +1,7 @@
 """
 製品仕様 (純度・生産量) の compliance チェック。
 
-設計判断 (2026-05-08, 相談時の合意):
+設計方針:
   - 「収束反復ノイズ (tear stream の前後反復差)」と「製品品質 (純度)」を
     別の判定基準として完全に分離する。
   - solver は流量の収束だけ見て、品質はここで独立に評価する。
@@ -23,7 +23,7 @@ from config.load import OperatingConfig
 
 
 # 成分分子量 [kg/kmol]
-# 設計判断: contest.md §3-2 の反応式に登場する成分の標準分子量。
+# contest.md §3-2 の反応式に登場する成分の標準分子量。
 # C3H8/C3H6/H2/C2H4/CH4/C2H6/C4H10 を A〜F, Z にマッピング (ProcessStream 仕様)。
 _MW = {
     'A': 44.10,   # C3H8
@@ -49,10 +49,9 @@ class SpecComplianceResult:
     h2_purity_molfrac:   float
     production_kmol_h:   float
     target_kmol_h:       float
-    # 設計判断 (2026-05-26): 生産量スペックの実効閾値を結果に保持する。
-    # display 等が production_min_relative / production_max_relative を知らなくても
-    # 正しい両側閾値を表示できるようにするため (旧 display は target×0.99 を
-    # ハードコードしており、実 config の 5% 許容と食い違って誤表示していた)。
+    # 生産量スペックの実効閾値を結果に保持する。display 等が
+    # production_min_relative / production_max_relative を知らなくても
+    # 正しい両側閾値を表示できるようにするため。
     threshold_low_kmol_h:  float
     threshold_high_kmol_h: float
 
@@ -63,9 +62,8 @@ class SpecComplianceResult:
     c3h6_violation_pp:       float   # %pt (>0 のとき不足)
     h2_violation_pp:         float   # %pt
     production_violation_pp: float   # %pt (target に対する不足率/超過率 × 100、両方とも正値)
-    # 設計判断 (2026-05-21): 旧版は production violation を符号なし 1 つの値で持っていたが
     # 「下限不足」と「上限超過」で BO が動かすべき方向が逆 (F_fresh を上げる/下げる) なので、
-    # TPE が区別できるよう direction を追加 ('low' | 'high' | 'ok')。
+    # TPE が区別できるよう direction を持つ ('low' | 'high' | 'ok')。
     # production_under_pp / production_over_pp として連続シグナル化し、runner.py が
     # user_attrs に格納 → constraints_func で別エントリとして TPE に渡す。
     production_direction:    str     # 'low' (下限不足) | 'high' (上限超過) | 'ok'
@@ -105,7 +103,7 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
     target_kmol_h     = _target_kmol_h(config)
 
     # ---- 判定 ----
-    # 設計判断 (2026-05-17): production は両側 spec 化が可能。
+    # production は両側 spec で評価する。
     #   下限: production >= target × (1 - production_min_relative)  常時有効
     #   上限: production <= target × (1 + production_max_relative)  max_relative > 0 で有効
     # 上限 spec を有効にすると BO は「overshoot で revenue 稼ぐ」戦略を取れなくなり、
@@ -119,7 +117,7 @@ def check_specs(one_pass: dict, config: OperatingConfig) -> SpecComplianceResult
     production_pass = threshold_low <= production_kmol_h <= threshold_high
 
     # ---- 違反量を %pt 単位で正規化 ----
-    # 設計判断: 異なる種類の制約 (質量分率 / モル分率 / 流量比率) を %pt スケールに
+    # 異なる種類の制約 (質量分率 / モル分率 / 流量比率) を %pt スケールに
     # 揃えることで、ペナルティ係数 spec_coef_okuyen を1つで管理できるようにする。
     c3h6_violation_pp = max(0.0, (spec.c3h6_min_wtfrac - c3h6_wt) * 100.0)
     h2_violation_pp   = max(0.0, (spec.h2_min_molfrac  - h2_mol)  * 100.0)

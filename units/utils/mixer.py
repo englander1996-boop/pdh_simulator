@@ -1,11 +1,9 @@
 """
-ストリームミキサー (改訂版)
+ストリームミキサー
 
-設計判断 (2026-05-08):
-  旧版はモル流量加重平均で T を出していたため、Cp が異なる成分が混ざる場合や
-  温度差が大きい場合 (例: 反応器入口で 100°C のリサイクルと 600°C は混ざる場合)
-  に物理的に不正確だった。本版では成分別 Cp を考慮した
-  エンタルピーバランスで T_out を求める。
+  成分別 Cp を考慮したエンタルピーバランスで T_out を求める。単純なモル流量
+  加重平均では、Cp が異なる成分が混ざる場合や温度差が大きい場合 (例: 反応器
+  入口で 100°C のリサイクルと 600°C が混ざる場合) に物理的に不正確になる。
 
 エンタルピーバランス (基準温度 T_ref を導入して両辺で消える):
   Σ_i (F_i × Cp_mix_i × (T_i - T_ref)) = (Σ F_out × Cp_mix_out) × (T_out - T_ref)
@@ -68,9 +66,8 @@ def mix_streams(streams: List[ProcessStream]) -> ProcessStream:
     if H_denom <= 0.0:
         # 全流量ゼロの異常ケース。298.15K (基準温度) を返すが、下流の cooler/
         # compressor が「P_in=0 流量=0」状態を受け取って ValueError を投げる場合
-        # がある。設計判断 (2026-05-18): silent fallback だと原因追跡が難しいため
-        # warning を出す。flowsheet/run_one_pass.py の _capture_warnings 経由で
-        # BO log に残る。
+        # がある。silent fallback だと原因追跡が難しいため warning を出す。
+        # flowsheet/run_one_pass.py の _capture_warnings 経由で BO log に残る。
         import warnings as _warnings
         _warnings.warn(
             f"mix_streams: 全流量ゼロ (H_denom={H_denom:.3e})。"

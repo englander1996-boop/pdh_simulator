@@ -1,17 +1,15 @@
 """
 膨張弁 (Joule-Thomson 等エンタルピー膨張)
 
-設計判断 (2026-05-08):
   ヒートインテグレーション設計のために、配管中の減圧操作で起こる JT 効果
-  (温度低下) を陽に扱う。これまで run_one_pass.py では P を書き換えるだけで
-  T を維持していたが、それでは反応器入口プレヒート Q_preheat が過小評価
-  される問題があった。
+  (温度低下) を陽に扱う。T を維持するだけだと反応器入口プレヒート Q_preheat
+  が過小評価される。
 
   本モジュールは PR EOS (src/eos.py) を使い、等エンタルピー条件
        H(T_in, P_in) = H(T_out, P_out)
   を満たす T_out を数値的に解く。
 
-仮定 (2026-05-08, 文献根拠なし):
+仮定 (文献根拠なし):
   - 「vapor 相のまま膨張する」(部分気化を扱わない)
     根拠: PDH プロセスでの対象 3 流体 (dist1_top_rx, recycle_dist3,
           recycle_mem) は名目上ガス相。
@@ -123,7 +121,7 @@ def simulate_jt_expansion(
     P1 = stream.P_in
 
     # ---- 入口エンタルピー (vapor 相) ----
-    # 設計判断 (2026-05-08): vapor 相を仮定 (上記 docstring の仮定参照)。
+    # vapor 相を仮定 (上記 docstring の仮定参照)。
     try:
         Z1  = z_factor(T1, P1, x, keys, 'vapor')
         Hr1 = residual_enthalpy(T1, P1, x, keys, Z1)
@@ -154,11 +152,11 @@ def simulate_jt_expansion(
     try:
         T2 = brentq(enthalpy_balance, T_lo, T_hi, xtol=0.05, maxiter=200)
     except (ValueError, RuntimeError) as e:
-        # 設計判断 (2026-05-18): JT 膨張の brentq 失敗時は理想気体仮定 (T2=T1) で
-        # 返す。実気体の JT 冷却効果が無視されるため反応器入口プレヒート Q_preheat
-        # が過小推算になる可能性あり (定量はユーザー検証要)。warning は
-        # flowsheet/run_one_pass.py の _capture_warnings 経由で BO log に残るため、
-        # 頻発時は探索範囲または PR EOS 適用範囲を見直すこと。
+        # JT 膨張の brentq 失敗時は理想気体仮定 (T2=T1) で返す。実気体の JT 冷却
+        # 効果が無視されるため反応器入口プレヒート Q_preheat が過小推算になる
+        # 可能性あり。warning は flowsheet/run_one_pass.py の _capture_warnings
+        # 経由で BO log に残るため、頻発時は探索範囲または PR EOS 適用範囲を
+        # 見直すこと。
         warnings.warn(
             f"expansion_valve: brentq 収束失敗 ({e}, T1={T1:.1f}K, "
             f"P1={P1/1e5:.2f}→P2={P_out/1e5:.2f} bar)。"

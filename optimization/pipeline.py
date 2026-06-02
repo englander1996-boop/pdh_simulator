@@ -5,7 +5,7 @@ main.py の main() を関数化し、設定 dataclass で全パラメータを�
 top-k 完了後、ベスト候補について exp1 と同じ詳細レポート (show_input_snapshot +
 display_full_results) を出力する機能も追加。
 
-設計判断:
+方針:
   - main.py は § 1-5 の編集領域 + run_pipeline(...) 呼び出し 1 行のみに集中
   - 例外/KeyboardInterrupt の救出ロジックは pipeline 内に集約
   - 詳細表示は top-k 再評価の result を再利用 (= 追加計算なし)
@@ -45,13 +45,12 @@ class PipelineConfig:
     n_topk:      int             = 10
     seed:        int             = 42
     sampler:     str             = 'tpe'
-    # 設計判断 (2026-05-21): n_jobs=1 推奨 (penalty_scale が thread-local でない)。
-    # 並列化したい場合は n_jobs=2-4 程度。同時に N_TRIALS を増やすと実効サンプル数↑。
+    # n_jobs=1 推奨 (penalty_scale が thread-local でない)。並列化したい場合は n_jobs=2-4
+    # 程度。同時に N_TRIALS を増やすと実効サンプル数↑。
     n_jobs:      int             = 1
-    # 設計判断 (2026-05-26): n_workers>1 でマルチプロセス並列最適化。
-    # 共有 SQLite storage(save_sqlite=True 必須) を N プロセスで分担。各プロセス単スレッド
-    # で penalty_scale/GIL 問題なし。constant_liar=True で冗長サンプリング抑制。
-    # 1 で従来の単一プロセス。詳細は optimization/parallel.py。
+    # n_workers>1 でマルチプロセス並列最適化。共有 SQLite storage(save_sqlite=True 必須) を
+    # N プロセスで分担。各プロセス単スレッドで penalty_scale/GIL 問題なし。
+    # constant_liar=True で冗長サンプリング抑制。1 で単一プロセス。詳細は optimization/parallel.py。
     n_workers:   int             = 1
 
     # § 2. ソルバ選択
@@ -64,7 +63,7 @@ class PipelineConfig:
 
     # § 3. 評価オプション
     apply_hi:              bool  = True
-    apply_stage2_topk:     bool  = False   # 2026-05-31: HEN(Stage2)不採用、HIのみ
+    apply_stage2_topk:     bool  = False   # HEN(Stage2)不採用、HI のみ
     hi_dT_min_K:           float = 10.0
     strict_recovery_bo:    bool  = False
     strict_recovery_topk:  bool  = True
@@ -89,11 +88,11 @@ class PipelineConfig:
     # ベスト候補の詳細表示 (exp1 と同じ display_full_results)
     display_best_full:         bool = True
 
-    # 設計判断 (2026-05-21): warm-start 機能。BO 開始前に既知良設計の params を
-    # study.enqueue_trial() で先頭注入する。TPE が startup random サンプリングの
-    # 序盤で良い領域近傍を評価でき、後続 trial の探索効率が大幅向上する。
-    # 各 dict は SEARCH_SPACE のキーを含む params 辞書 (build_design に渡せる形)。
-    # 範囲外の値は Optuna が暗黙に補正 or 警告するため、bounds と整合した値を渡すこと。
+    # warm-start 機能。BO 開始前に既知良設計の params を study.enqueue_trial() で先頭注入
+    # する。TPE が startup random サンプリングの序盤で良い領域近傍を評価でき、後続 trial の
+    # 探索効率が大幅向上する。各 dict は SEARCH_SPACE のキーを含む params 辞書
+    # (build_design に渡せる形)。範囲外の値は Optuna が暗黙に補正 or 警告するため、
+    # bounds と整合した値を渡すこと。
     warm_start_trials:         List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -223,7 +222,7 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     _validate(cfg)
 
     # ---- パス準備 ----
-    # 設計判断 (2026-05-17): 各 run の成果物 6 ファイルを 1 subdir にまとめる。
+    # 各 run の成果物 6 ファイルを 1 subdir にまとめる。
     # outputs/main_<timestamp>/{optuna.db, trials.csv, best.json, topk.txt,
     #   feasibility.txt, feasibility_2d.png}
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -265,12 +264,10 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     )
 
     # ---- warm-start: 既知良 trial の params を先頭注入 ----
-    # 設計判断 (2026-05-21): TPE は startup random サンプリングで feasibility を当てに
-    # 行くが、本問題は feasible 領域が極めて狭く (1% 以下)、運悪く 50 trial 全 infeasible
-    # で TPE が立ち上がれないケースが頻発した (例: 20260521_023614 で 122 trial 中 1 feas)。
-    # study.enqueue_trial() で過去 run の優秀 params を最初に強制評価することで、
-    # (a) feasibility の足場を確実に作る (b) TPE モデルが「これに近い領域は良い」と
-    # 学習できる、の 2 つの効果を得る。
+    # 本問題は feasible 領域が極めて狭く (1% 以下)、startup random サンプリングで
+    # 全 infeasible になり TPE が立ち上がれないことがある。study.enqueue_trial() で
+    # 既知良 params を最初に強制評価することで、(a) feasibility の足場を確実に作る
+    # (b) TPE モデルが「これに近い領域は良い」と学習できる、の 2 つの効果を得る。
     if cfg.warm_start_trials:
         n_enqueued = 0
         for params in cfg.warm_start_trials:
@@ -284,8 +281,8 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
         print(f"[warm-start] {n_enqueued} trial を enqueue (注入順に最初の {n_enqueued} trial で評価される)")
 
     # ---- BO ループ実行 (KeyboardInterrupt / 致命的例外でも部分結果を保存) ----
-    # 設計判断 (2026-05-20): Optuna 標準 logger を WARNING に絞り、自前 compact callback で
-    # 1 trial = 構造化 5 行表示 (status + vars 3 行 + progress/ETA) に置換。可読性向上。
+    # Optuna 標準 logger を WARNING に絞り、自前 compact callback で 1 trial = 構造化
+    # 5 行表示 (status + vars 3 行 + progress/ETA) に置換 (可読性向上)。
     import optuna as _optuna_for_log
     _optuna_for_log.logging.set_verbosity(_optuna_for_log.logging.WARNING)
     from optimization.callbacks import make_compact_callback
@@ -299,11 +296,11 @@ def run_pipeline(cfg: PipelineConfig) -> dict:
     bo_fatal_error = None
     try:
         if _para:
-            # 設計判断 (2026-05-26): 共有 SQLite study を N worker プロセスで分担。
-            # workers が DB に trial を書き込む → 以降の top-k/レポートは study.trials
-            # (= DB 再クエリ) でそのまま全 trial を見られる。
+            # 共有 SQLite study を N worker プロセスで分担。workers が DB に trial を
+            # 書き込む → 以降の top-k/レポートは study.trials (= DB 再クエリ) でそのまま
+            # 全 trial を見られる。
             from optimization.parallel import spawn_workers
-            # kind='sub1': このパイプラインを使うのは sub/sub1.py (旧 main.py, FUG/rigorous) のみ。
+            # kind='sub1': このパイプラインを使うのは sub/sub1.py (FUG/rigorous) のみ。
             spawn_workers(
                 kind='sub1', study_name=study_name, storage_url=storage_url,
                 db_path=str(paths['db']), n_workers=cfg.n_workers,

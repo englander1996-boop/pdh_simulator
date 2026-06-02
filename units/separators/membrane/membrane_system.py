@@ -123,7 +123,7 @@ class MemDesignVars:
     """最適化アルゴリズムが操作する設計変数"""
     P_H:    float  # 膜供給側（高圧）圧力 [Pa]
     P_L:    float  # 膜透過側（低圧）圧力 [Pa]。**大気圧 1 atm 固定が設計思想**（真空ポンプなし）。
-                   #   全体最適化側は常に 1 atm を渡す。逸脱は simulate 内で一度だけ警告 (膜レビュー#2)。
+                   #   全体最適化側は常に 1 atm を渡す。逸脱は simulate 内で一度だけ警告。
     A_mem:  float  # 総膜面積 [m²]
     # 後段蒸留塔操作圧力 [Pa]（製品圧縮機の出口圧力）
     # 冷媒不使用（Case A）のため T_bp(P_dist, y_perm) > T_cold_out(40°C) が
@@ -186,7 +186,7 @@ class MemFixedParams:
     #       運転して P_H > feed.P_in を確保する必要がある。低圧では C3H8/C3H6 の
     #       泡点が冷却水温度を下回るため液フィードは不可能。ガスフィードに切替える。
     vapor_feed:      bool  = False
-    # ---- 多段圧縮 + 段間冷却 (2026-05-31 追加) ----
+    # ---- 多段圧縮 + 段間冷却 ----
     # !仮置き — 確定値が出たら差し替えること (根拠は要メーカー/教科書確認)。
     # 1 段あたり最大圧縮比。遠心圧縮機の実機慣行 3〜4 の上端として 4.0 を仮置き。
     #   r_max ≥ 全圧縮比 に設定すれば段数 n=1 となり従来の単段モデルに戻せる (感度比較用)。
@@ -196,7 +196,7 @@ class MemFixedParams:
     # 段間冷却器の総括伝熱係数。ガス顕熱-冷却水。化工便覧のガス-液(~0.2)と凝縮(~1.0)の
     #   中間として 0.5 を仮置き (面積算出 A = Q/(U·LMTD) に使用)。
     U_intercool:                     float = 0.5    # !仮置き [kW/(m²·K)]
-    # ---- 膜性能 感度係数 (2026-05-31 追加、レビュー指摘 #1 対応) ----
+    # ---- 膜性能 感度係数 ----
     # !仮置き — 既定 1.0 = 挙動不変。膜の可塑化・界面リーク・経時劣化・混合ガス/高圧での
     #   性能低下を「文献代表値からの低下率」として感度解析するための係数。
     #     Q_A_eff   = Q_A_GPU × Q_A_factor   (透過度)
@@ -211,7 +211,7 @@ class MemFixedParams:
             raise ValueError("eta_comp は (0, 1] でなければなりません。")
         if self.T_hot <= 273.15:
             raise ValueError("T_hot は 273K 超でなければなりません。")
-        # 膜レビュー B (2026-06-01): 感度解析/BO で不正値が流れたときに早期に弾く。
+        # 感度解析/BO で不正値が流れたときに早期に弾く。
         if self.Q_A_GPU <= 0 or self.alpha <= 0:
             raise ValueError("Q_A_GPU と alpha は正値でなければなりません。")
         if self.Q_A_factor <= 0 or self.alpha_factor <= 0:
@@ -242,7 +242,7 @@ def _warn_once_A_per_module(value: float) -> None:
     )
 
 
-# 膜レビュー #2 (2026-06-01): 透過側圧力 P_L は大気圧固定の設計思想 (レポート §膜分離)。
+# 透過側圧力 P_L は大気圧固定の設計思想 (レポート §膜分離)。
 # 全体最適化側は常に 1 atm を渡すが、将来 P_L を探索変数化する事故を防ぐため、
 # 1 atm から大きく外れた P_L が渡されたら一度だけ警告する (P_L 自体は固定運用が前提)。
 _P_L_FIXED_PA: float = _ATM_BAR * 1e5     # 1 atm [Pa]
@@ -327,7 +327,7 @@ class MemEquipmentData:
     # !仮置き — cost_parameters.MEM_UNIT_PRICE_USD_PER_M2 が確定次第、自動的に更新される
     CAPEX_mem:        float = float('nan')  # 膜モジュール（単価仮置き中）
     CAPEX_total:      float = float('nan')  # 合計 [億円]（CAPEX_mem が仮置きのため暫定値）
-    # ---- 段間冷却 (多段圧縮, 2026-05-31 追加) ----
+    # ---- 段間冷却 (多段圧縮) ----
     n_stages_feed:    int   = 1             # フィード圧縮機 段数 (圧縮比小 → 通常 1)
     n_stages_prod:    int   = 1             # 製品圧縮機 段数 (P_L→P_dist 圧縮比大 → 通常 2〜3)
     Q_intercool_kW:   float = 0.0           # 段間冷却 総熱量 [kW] (冷却水 OPEX 用、n=1 なら 0)
@@ -336,23 +336,21 @@ class MemEquipmentData:
     # HI (ピンチ解析) 登録用の段間冷却 温度域 [K] (顕熱ガス冷却。段間冷却なしなら nan)
     T_intercool_in_K:  float = float('nan') # 段間冷却 入口 (各段出口温度の熱量加重平均)
     T_intercool_out_K: float = float('nan') # 段間冷却 出口 (= intercool_T_K)
-    # 設計判断 (2026-05-08): ヒートインテグレーション用ストリーム温度。
+    # ヒートインテグレーション用ストリーム温度。
     # 気化器: vapor_feed=True のとき in/out は feed.T_in 同値、Q_vap_kW=0。
     T_vap_in_K:   float = float('nan')  # 気化器入口温度 [K] (= feed.T_in)
     T_vap_out_K:  float = float('nan')  # 気化器出口温度 [K] (= 露点+過熱度、または feed.T_in)
     T_cond_in_K:  float = float('nan')  # 製品冷却器入口温度 [K] (= 製品圧縮機出口)
     T_cond_out_K: float = float('nan')  # 製品冷却器出口温度 [K] (= 泡点 @ P_dist)
-    # 設計判断 (2026-05-08): 製品冷却器を顕熱(ガスT_in→T_bp)+潜熱(T_bpで凝縮)に分離。
+    # 製品冷却器を顕熱(ガスT_in→T_bp)+潜熱(T_bpで凝縮)に分離。
     # HI 抽出時に温度範囲を持つ顕熱ストリームと潜熱ストリームを別扱いするため。
     # Q_cond_kW = Q_cond_sensible_kW + Q_cond_latent_kW (互換性のため両方保持)。
     Q_cond_sensible_kW: float = 0.0   # ガス顕熱 [kW] (T_cond_in → T_cond_out)
     Q_cond_latent_kW:   float = 0.0   # 凝縮潜熱 [kW] (T_cond_out で凝縮)
-    # ---- penalty 診断 (2026-05-22 追加、BO の TPE constraints_func 用) ----
-    # 設計判断: PSA / Reactor と同じパターン (psa_system.py:279-287 参照)。
-    # silent _penalty_result() 経路が BO に「方向のシグナル」を渡せず 80% の trial が
-    # 無方向で死ぬ問題への対処。penalty 発火時に「どの条件で死んだか」「actual 値」を
-    # 保持し、run_one_pass._compute_mem_shortfall が log10(actual/limit) 等の連続
-    # shortfall を計算して TPE 構成制約に流す。通常完走時は penalty_reason='' のまま。
+    # ---- penalty 診断 (BO の TPE constraints_func 用) ----
+    # penalty 発火時に「どの条件で死んだか」「actual 値」を保持し、
+    # run_one_pass._compute_mem_shortfall が log10(actual/limit) 等の連続 shortfall を
+    # 計算して TPE 構成制約に流す。通常完走時は penalty_reason='' のまま。
     # 理由ラベル:
     #   ''                     正常完走 (CAPEX_total < threshold)
     #   'invalid_input'        feed.P_in/T_in/P_dist が非正値 (上流バグ系、本来到達不可)
@@ -421,10 +419,8 @@ def _penalty_result(
     T_bp_perm_actual, T_cold_out_actual : float
         bp_le_cold_out 経路で透過ガス泡点・冷却水出口温度を保持。
 
-    設計判断 (2026-05-22): 旧版は引数なしの silent penalty で、BO は「どの方向に
-    動かせば feasible に出るか」のシグナルを得られず 80% の trial が無方向で死んでいた。
-    PSA / Reactor で先に導入したパターン (psa_system.py:_penalty_result) を Mem にも
-    展開する。
+    reason・actual 値を BO の TPE constraints_func に渡し、「どの方向に動かせば
+    feasible に出るか」のシグナルにする。
     """
     zero_stream = MemRetentateStream(0.0, 0.0, 0.0, 0.0)
     zero_prod   = MemProductStream(0.0, 0.0, 0.0, 0.0)
@@ -477,25 +473,23 @@ def _lmtd(dT1: float, dT2: float) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 多段等エントロピー圧縮 + 段間冷却 (2026-05-31 追加)
+# 多段等エントロピー圧縮 + 段間冷却
 # ===========================================================================
-# ■ どういうことを検証した上での変更か (レポート記載用)
-#   旧版は膜のフィード/製品圧縮機をそれぞれ compress_isentropic() の "1 回呼び"
-#   = 単段で扱っていた。実フローシートの圧縮比を実値で確認すると:
+# ■ なぜ多段化するか
+#   実フローシートの圧縮比:
 #     - フィード圧縮機: Dist2 塔底 (P_col,2 = 5〜7 bar) → P_H (7.5〜9.5 bar)
 #                       ⇒ 圧縮比 ≈ 1.1〜1.9   … 単段で機械的に妥当
 #     - 製品圧縮機:     P_L = 1 atm → P_dist = Dist3 圧 (16〜19 bar)
 #                       ⇒ 圧縮比 ≈ 16〜19      … 単段は吐出温度・機械設計の両面で非現実的
 #   遠心圧縮機の 1 段あたり圧縮比は実機で概ね 3〜4 が上限であり、製品圧縮機は本来
-#   2〜3 段 + 段間冷却が要る。単段モデルは (a) 吐出温度を非現実的に高く出し、
-#   (b) 段間冷却を省くぶん圧縮仕事 (= 電力 OPEX) を過大評価していた。
-#   → 製品圧縮機の多段化が支配的な是正項目と判断した (フィード側は圧縮比小で実害なし)。
+#   2〜3 段 + 段間冷却が要る。単段では (a) 吐出温度を非現実的に高く出し、
+#   (b) 段間冷却を省くぶん圧縮仕事 (= 電力 OPEX) を過大評価する。
 #
-# ■ 変更の流れ (レポート記載用)
+# ■ 計算の流れ
 #   1. 全圧縮比 r_total = P_out / P_in を計算する。
 #   2. 1 段あたり最大圧縮比 r_max (!仮置き=4.0) から必要段数
 #        n = ceil( ln(r_total) / ln(r_max) ) を決める。
-#      r_total ≤ r_max なら n=1 = 従来の単段挙動と完全一致 (フィード圧縮機はこの枝)。
+#      r_total ≤ r_max なら n=1 = 単段挙動と完全一致 (フィード圧縮機はこの枝)。
 #   3. 各段は等圧縮比 r_stage = r_total^(1/n) で圧縮する (既存 compress_isentropic を流用)。
 #   4. 段と段の間で冷却水により intercool_T_K (!仮置き=40°C) まで顕熱冷却し、次段入口温度を
 #      下げる。これにより総圧縮仕事 W が単段より小さくなる (= 多段+段間冷却の本来の効果)。
@@ -510,7 +504,7 @@ def _lmtd(dT1: float, dT2: float) -> float:
 #
 # ■ 値はすべて !仮置き (max_compression_ratio_per_stage / intercool_T_K / U_intercool)。
 #   確定値が出たら MemFixedParams を差し替えること。r_max ≥ r_total にすれば n=1 となり
-#   旧来の単段モデルに戻せる (= 単段 vs 多段の感度比較が可能)。
+#   単段モデルに戻せる (= 単段 vs 多段の感度比較が可能)。
 # ===========================================================================
 
 def _compress_multistage(
@@ -704,10 +698,8 @@ def _membrane_ode(F_C3H6_feed: float, F_C3H8_feed: float,
     _event_no_flux.terminal  = True
     _event_no_flux.direction = -1
 
-    # 設計判断 (2026-05-08, profile 結果反映):
-    # 元値 rtol=1e-5, atol=1e-8 は scipy デフォルトの 100倍厳しい設定。
-    # profile で全体時間の 9% を占めていた。膜の透過量積分は反応器ほど厳密性が
-    # 要らないため、reactor と統一して rtol=1e-4, atol=1e-7 に緩める。
+    # rtol=1e-4, atol=1e-7 を採用。膜の透過量積分は反応器ほど厳密性が要らないため、
+    # reactor と統一する。
     try:
         sol = solve_ivp(
             ode,
@@ -741,10 +733,9 @@ def _condenser(F_perm_mols: float, y_C3H6: float,
     """
     製品冷却器: 圧縮後の透過ガスを飽和液まで冷却・凝縮。
 
-    設計判断 (2026-05-08, HI 用途追加): 顕熱（ガス T_in → T_bp）と潜熱
-    （T_bp での凝縮）を分離して返す。HI 抽出関数が温度範囲を持つ顕熱
-    ストリームと潜熱ストリームを別々に扱えるようにするため。
-    Q_cond_kW (合計) は従来互換のため残す。
+    顕熱（ガス T_in → T_bp）と潜熱（T_bp での凝縮）を分離して返す。HI 抽出関数が
+    温度範囲を持つ顕熱ストリームと潜熱ストリームを別々に扱えるようにするため。
+    Q_cond_kW (合計) も併せて返す。
 
     Returns
     -------
@@ -822,7 +813,7 @@ def simulate_membrane_system(
         )
     if design.A_mem <= 0 or design.P_H <= 0 or design.P_L <= 0:
         return _penalty_result(reason='invalid_design')
-    # 膜レビュー #2: P_L は大気圧固定の設計思想。固定運用からの逸脱を一度だけ警告 (防御的)。
+    # P_L は大気圧固定の設計思想。固定運用からの逸脱を一度だけ警告 (防御的)。
     _warn_once_P_L_fixed(design.P_L)
     # ID-04: 製品圧縮機が減圧方向になる
     if design.P_dist <= design.P_L:
@@ -833,9 +824,9 @@ def simulate_membrane_system(
         )
         return _penalty_result(reason='pdist_le_pl')
     # ID-05: フィード圧縮機が減圧方向になる
-    # 設計判断 (2026-05-31, 案②): 膜前で塔底を P_H まで JT 減圧する運用 (run_one_pass) を導入した
-    # ため，feed.P_in == P_H (減圧済み) は正常。厳密に feed.P_in > P_H のときのみ penalty とする
-    # (1 Pa の許容)。feed.P_in ≈ P_H なら後段の膜供給圧縮機は圧縮比 1 = 仕事ゼロで通過する。
+    # 膜前で塔底を P_H まで JT 減圧する運用 (run_one_pass) のため、feed.P_in == P_H
+    # (減圧済み) は正常。厳密に feed.P_in > P_H のときのみ penalty とする (1 Pa の許容)。
+    # feed.P_in ≈ P_H なら後段の膜供給圧縮機は圧縮比 1 = 仕事ゼロで通過する。
     if design.P_H < feed.P_in - 1.0:
         warnings.warn(
             f"P_H={design.P_H/1e5:.2f} bar < P_in={feed.P_in/1e5:.2f} bar:"
@@ -854,11 +845,10 @@ def simulate_membrane_system(
 
     z_C3H6_feed = feed.F_C3H6 / F_total_feed  # 供給液中 C3H6 分率
 
-    # ID-03 + 膜レビュー #1 (2026-06-01): 液/ガス相整合性チェック。
+    # ID-03: 液/ガス相整合性チェック。
     # 二成分系では T_bubble < T < T_dew が二相域。液フィードは T ≤ T_bubble、ガスフィードは
-    # T ≥ T_dew を要求する。旧実装は液フィードを T_dew 基準で判定しており、二相域を液相と
-    # 誤認する余地があった（本 run は vapor_feed=True なので発火しないが正確性のため是正）。
-    # dew_point_T / bubble_point_T は収束失敗時に nan を返す（E-3 修正後）ため try/except 不要。
+    # T ≥ T_dew を要求する。
+    # dew_point_T / bubble_point_T は収束失敗時に nan を返すため try/except 不要。
     if fixed.vapor_feed:
         # ガスフィード: 露点以上でなければガス単相でない（凝縮している）
         T_dew_feed = dew_point_T(feed.P_in, [z_C3H6_feed, 1.0 - z_C3H6_feed], _KEYS)
@@ -916,9 +906,9 @@ def simulate_membrane_system(
         if math.isnan(Q_vap_kW) or math.isnan(A_vap):
             return _penalty_result(reason='vap_nan')
 
-    # ---- ユニット 2: フィード圧縮機 (多段化対応, 2026-05-31) ----
+    # ---- ユニット 2: フィード圧縮機 (多段化対応) ----
     # 圧縮比 P_H/feed.P_in は通常 1.1〜1.9 と小さいため、_compress_multistage は
-    # n=1 (= 従来の単段 compress_isentropic と完全一致、段間冷却 0) を返す。
+    # n=1 (= 単段 compress_isentropic と完全一致、段間冷却 0) を返す。
     try:
         (T_feed_comp_out, W_feed_per_mol,
          Q_inter_feed_kW, A_inter_feed_m2, n_stg_feed,
@@ -958,7 +948,7 @@ def simulate_membrane_system(
     x_ret_C3H6 = (F_ret_C3H6_mols / max(F_ret_total_mols, 1e-12))
     stage_cut = (F_perm_C3H6_mols + F_perm_C3H8_mols) / F_feed_mols
 
-    # ---- ユニット 4: 製品圧縮機 (多段化対応, 2026-05-31) ----
+    # ---- ユニット 4: 製品圧縮機 (多段化対応) ----
     # 膜は等温操作と仮定: 透過ガスは T_feed_comp_out, P_L で出る。
     # 圧縮比 P_dist/P_L は P_L=1atm・P_dist=Dist3圧(16〜19bar) で ≈16〜19 と大きいため、
     # _compress_multistage が n≈2〜3 段 + 段間冷却に分割する (単段の非現実性を是正)。
@@ -1030,9 +1020,9 @@ def simulate_membrane_system(
         T_intercool_out_K = float('nan')
     try:
         capex_vap       = 0.0 if fixed.vapor_feed else calc_he_capex_okuyen(A_vap)
-        # 設計判断 (2026-05-31, 案②): 膜前 let-down で塔底が既に P_H のときフィード圧縮機の
-        # 所要動力は ~0 になる。calc_comp_capex は W>0 必須なので，W≲1kW は圧縮機不要として
-        # CAPEX 0 にする (製品圧縮機も対称的にガード)。
+        # 膜前 let-down で塔底が既に P_H のときフィード圧縮機の所要動力は ~0 になる。
+        # calc_comp_capex は W>0 必須なので，W≲1kW は圧縮機不要として CAPEX 0 にする
+        # (製品圧縮機も対称的にガード)。
         capex_comp_feed = calc_comp_capex_okuyen(W_feed_kW) if W_feed_kW > 1.0 else 0.0
         capex_comp_prod = calc_comp_capex_okuyen(W_prod_kW) if W_prod_kW > 1.0 else 0.0
         capex_cond      = calc_he_capex_okuyen(A_cond)
@@ -1086,7 +1076,7 @@ def simulate_membrane_system(
             CAPEX_cond     = capex_cond,
             CAPEX_mem      = capex_mem,
             CAPEX_total    = capex_total,
-            # 段間冷却 (多段圧縮, 2026-05-31)
+            # 段間冷却 (多段圧縮)
             n_stages_feed   = n_stg_feed,
             n_stages_prod   = n_stg_prod,
             Q_intercool_kW  = Q_intercool_total,

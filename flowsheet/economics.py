@@ -56,8 +56,7 @@ class Economics:
     (0.180·C_TM, 2.73·C_OL, 0.23·C_UT delta, 0.23·C_RM delta) を持つ。
     `sum(opex.values()) == total_opex` の不変条件が成り立つ。
 
-    最適化器は effective_TAC = TAC - Revenue + soft_penalty を最小化する
-    (利益最大化と等価)。runner.py 側で計算。
+    最適化器は effective_TAC を最小化する。runner.py 側で計算。
     """
     capex:          dict    # [億円]
     opex:           dict    # [億円/年]   装置別 + Hasebe 集計項 (全て正)
@@ -117,8 +116,8 @@ def _classify_opex_term(key: str) -> str:
     """
     if key.startswith(HASEBE_AGGR_PREFIX):
         return 'HASEBE_AGGR'
-    # 設計判断 (2026-05-31): 膜の定期交換費 ('Mem膜交換') も触媒・吸着剤と同じ
-    #   Hasebe 式 (10) 枠外の消耗品交換費として扱う (1.23× は掛けない)。
+    # 膜の定期交換費 ('Mem膜交換') も触媒・吸着剤と同じ Hasebe 式 (10) 枠外の
+    #   消耗品交換費として扱う (1.23× は掛けない)。
     if '触媒' in key or '吸着剤' in key or '活性炭交換' in key or '膜交換' in key:
         return 'CATALYST_OUT'
     if '原料費' in key or 'Fresh LPG' in key:
@@ -217,11 +216,10 @@ def apply_hasebe_aggregation(
     out[HASEBE_AGGR_PREFIX + f'{multiplier_delta:.2f}·C_RM (原料費 上乗せ分)'] = (
         multiplier_delta * C_RM
     )
-    # 設計判断 (2026-05-13): PDH は気相反応で水処理対象廃棄物が実質発生しない
-    # (使用済み触媒は触媒交換費に内包) ため C_WT = 0 億円/年で固定。
-    # 将来 C_WT > 0 になった場合 (例: 副生水の処理を含める設計変更) でも、
-    # if 判定で項を落とすと OPEX 集計から漏れるため、本実装では常に加算する。
-    # C_WT = 0 のときは加算値も 0 なので副作用なし。
+    # PDH は気相反応で水処理対象廃棄物が実質発生しない (使用済み触媒は触媒交換費に
+    # 内包) ため C_WT = 0 億円/年で固定。将来 C_WT > 0 になった場合でも if 判定で
+    # 項を落とすと OPEX 集計から漏れるため、本実装では常に加算する
+    # (C_WT = 0 のときは加算値も 0 なので副作用なし)。
     out[HASEBE_AGGR_PREFIX + f'{HASEBE_COEFF_C_UT_WT_RM:.2f}·C_WT (廃棄物処理)'] = (
         HASEBE_COEFF_C_UT_WT_RM * C_WT
     )
@@ -256,14 +254,14 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         'Mem F圧縮機': R['r_mem'].equipment.CAPEX_comp_feed,
         'Mem P圧縮機': R['r_mem'].equipment.CAPEX_comp_prod,
         'Mem冷却器':   R['r_mem'].equipment.CAPEX_cond,
-        # 膜圧縮機の多段化に伴う段間冷却器 (2026-05-31)。単段 (n=1) なら 0。
+        # 膜圧縮機の多段化に伴う段間冷却器。単段 (n=1) なら 0。
         'Mem段間冷却器': R['r_mem'].equipment.CAPEX_intercool,
         'Mem膜本体':   R['r_mem'].equipment.CAPEX_mem,
         'Dist3':       R['r3'].equipment.CAPEX,
     }
 
-    # 設計判断 (2026-05-09): 蒸留塔のリボイラ熱媒は equipment.reb_utility_name/単価
-    # から動的に選択 (utility_selector 経由)。固定 LP Steam 前提を撤廃。
+    # 蒸留塔のリボイラ熱媒は equipment.reb_utility_name/単価から動的に選択
+    # (utility_selector 経由)。
     r1_eq, r2_eq, r3_eq = R['r1'].equipment, R['r2'].equipment, R['r3'].equipment
     opex = {
         'Pump1電力':         _ele(R['pump1'].equipment.W_kW),
@@ -278,9 +276,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         f'Dist3リボイラ ({r3_eq.reb_utility_name})':
             _heat(r3_eq.Q_reb, r3_eq.reb_utility_jpy_per_GJ),
         'Mem気化器蒸気':     _heat(R['r_mem'].equipment.Q_vap_kW, LP_STEAM_JPY_PER_GJ),
-        # 設計判断 (2026-05-08): 蒸留塔フィード予熱を独立計上 (旧版は抜けていた)。
-        # 単価は塔のリボイラと同じ utility を流用 (フィード予熱は塔体内ではなく
-        # 専用 HE 想定だが熱源は同レンジで近似)。
+        # 蒸留塔フィード予熱を独立計上。単価は塔のリボイラと同じ utility を流用
+        # (フィード予熱は塔体内ではなく専用 HE 想定だが熱源は同レンジで近似)。
         f'Dist1フィード予熱 ({r1_eq.reb_utility_name})':
             _heat(r1_eq.Q_feed_preheat_kW, r1_eq.reb_utility_jpy_per_GJ),
         f'Dist2フィード予熱 ({r2_eq.reb_utility_name})':
@@ -295,9 +292,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     Q_fuel_kW    = Q_preheat_kW / FURNACE_EFFICIENCY
     opex['Reactor予熱燃料'] = _heat(Q_fuel_kW, FUEL_JPY_PER_GJ)
 
-    # 設計判断 (2026-05-08): cooler.py が utility_selector で選んだユーティリティ名・
-    # 単価を equipment に格納するようになったため、それを直接使う。
-    # ハードコードの COOLING_WATER_JPY_PER_GJ はここでは使わない。
+    # cooler.py が utility_selector で選んだユーティリティ名・単価を equipment に
+    # 格納するため、それを直接使う (ハードコードの COOLING_WATER_JPY_PER_GJ は使わない)。
     cooled_eq      = R['cooled'].equipment
     intercool_eq   = R['intercool'].equipment
     desuper_eq     = R['desuper'].equipment
@@ -311,9 +307,9 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     opex[f"MemPrecool({mem_precool_eq.utility_name})"] = _heat(
         abs(mem_precool_eq.Q_duty_kW), mem_precool_eq.utility_jpy_per_GJ)
 
-    # 設計判断 (2026-05-09): 蒸留塔のコンデンサ単価を equipment.cond_utility_*
-    # から動的選択 (utility_selector 経由) に切替。Dist2 のように T_top が
-    # 氷点下なら自動的にエチレン冷媒 (~9000 円/GJ) が選ばれる。
+    # 蒸留塔のコンデンサ単価を equipment.cond_utility_* から動的選択
+    # (utility_selector 経由)。Dist2 のように T_top が氷点下なら自動的に
+    # エチレン冷媒 (~9000 円/GJ) が選ばれる。
     opex[f'Dist1コンデンサ ({r1_eq.cond_utility_name})'] = _heat(
         r1_eq.Q_cond, r1_eq.cond_utility_jpy_per_GJ,
     )
@@ -323,14 +319,12 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     opex[f'Dist3コンデンサ ({r3_eq.cond_utility_name})'] = _heat(
         r3_eq.Q_cond, r3_eq.cond_utility_jpy_per_GJ,
     )
-    # 設計判断: 膜の冷却器は内部実装が COOLING_WATER 前提のまま (旧版踏襲)。
-    # membrane_system.py 側を utility_selector 統合する次フェーズで更新予定。
+    # 膜の冷却器は内部実装が COOLING_WATER 前提。
     opex['Mem冷却器冷水']      = _heat(R['r_mem'].equipment.Q_cond_kW,
                                         COOLING_WATER_JPY_PER_GJ)
 
-    # 設計判断 (2026-05-31): 膜圧縮機の多段化に伴う段間冷却 (冷却水) を計上。
-    # 多段化で圧縮仕事 (= 電力 OPEX) が下がる代わりに段間冷却器の CAPEX・冷却水 OPEX が
-    # 生じる。仕事だけ下げて段間冷却コストを無視する片側評価を避けるため両方を計上する。
+    # 膜圧縮機の多段化に伴う段間冷却 (冷却水) を計上。多段化で圧縮仕事 (= 電力 OPEX)
+    # が下がる代わりに段間冷却器の CAPEX・冷却水 OPEX が生じるため両方を計上する。
     # HI 統合済: 本キーは heat_integration.classify_heat_opex_key で 'cold' 登録され、
     #   extract_streams の 'H_mem_intercool' ホットストリームと対応する。apply_hi=True 時は
     #   本フラット値が削除され HI tier 別 OPEX へ差し替わる (= 段間排熱がピンチ回収対象、
@@ -344,8 +338,7 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
                                 / CATALYST_LIFE_YEARS / 1.0e8)
     opex['PSA活性炭交換']   = R['r_psa'].equipment.OPEX_adsorbent_okuyen_per_year
 
-    # 設計判断 (2026-05-31): 膜モジュール定期交換費 (レポート §7.6 の C_mem/τ_mem)。
-    # 従来コードに欠落していた費用を追加し、報告書の計上方針とコードを一致させる。
+    # 膜モジュール定期交換費 (レポート §7.6 の C_mem/τ_mem)。
     # 膜本体 CAPEX を耐用年数 (!仮置き MEM_LIFETIME_YEARS) で割った年均等費。
     # 触媒・PSA 活性炭交換と同じく Hasebe 式枠外の消耗品交換費 (1.23× なし)。
     # 膜耐用年数は感度解析用に env で上書き可 (PDH_MEM_LIFETIME_YEARS)。未設定なら !仮置き 既定。
@@ -354,9 +347,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     if _capex_mem is not None and _capex_mem < PENALTY_CAPEX_THRESHOLD_OKUYEN and _mem_life > 0:
         opex['Mem膜交換'] = _capex_mem / _mem_life
 
-    # 設計判断 (2026-05-09): PSA 予熱を OPEX に計上 (旧版は抜けていた)。
-    # T_in (Dist2 塔頂、partial cond で ~-20°C) → T_abs (25°C) へ温度調整。
-    # 加熱方向: LP Steam、冷却方向: 冷却水 (実機ではほぼ加熱方向)。
+    # PSA 予熱を OPEX に計上。T_in (Dist2 塔頂、partial cond で ~-20°C) →
+    # T_abs (25°C) へ温度調整。加熱方向: LP Steam、冷却方向: 冷却水 (実機ではほぼ加熱方向)。
     Q_psa_preheat = R['r_psa'].equipment.Q_preheat_kW
     if Q_psa_preheat > 0:
         opex['PSA予熱 (LP Steam)']   = _heat(Q_psa_preheat,      LP_STEAM_JPY_PER_GJ)
@@ -364,12 +356,12 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
         opex['PSA予熱冷却 (冷却水)'] = _heat(abs(Q_psa_preheat), COOLING_WATER_JPY_PER_GJ)
 
     # ---- 原料費を OPEX に追加 (TAC に含める標準的な定義) ----
-    # 設計判断 (2026-05-09): TAC には化工標準で原料費を含める (Sinnott §6.5,
-    # Turton §8.2)。utility と並べて opex dict に置く。
+    # TAC には化工標準で原料費を含める (Sinnott §6.5, Turton §8.2)。
+    # utility と並べて opex dict に置く。
     fresh_F = R['pump1'].outlet.F_in        # Pump1 inlet/outlet 同じ組成
     F_C3H8_feed  = fresh_F.get('A', 0.0)
     F_C4H10_feed = fresh_F.get('Z', 0.0)
-    # 設計判断 (2026-05-18): C3H8 と C4H10 で個別単価採用 (n-Butane は約 10% 高い実勢)
+    # C3H8 と C4H10 で個別単価採用 (n-Butane は約 10% 高い実勢)
     opex['Fresh LPG 原料費'] = (
         _annual_okuyen(F_C3H8_feed,  MW['A'], LPG_C3H8_JPY_PER_KG)
         + _annual_okuyen(F_C4H10_feed, MW['Z'], LPG_C4H10_JPY_PER_KG)
@@ -396,9 +388,8 @@ def collect_capex_opex(one_pass: dict) -> tuple[dict, dict, dict]:
     )
 
     # Dist1 塔底 (C4H10 富化) も燃料系へ送って CR 計上。
-    # 設計判断 (2026-05-17): LPG (C3H8+C4H10) は HHV ~50 MJ/kg と高位、製品 spec
-    # から外れた C4 を burning するのは工業的に標準 (refinery fuel gas header)。
-    # コンテストで LPG 直販オプションがあれば revenue は更に高くなるが、現状は
+    # LPG (C3H8+C4H10) は HHV ~50 MJ/kg と高位、製品 spec から外れた C4 を
+    # burning するのは工業的に標準 (refinery fuel gas header)。
     # FUEL_JPY_PER_GJ (1500 円/GJ ≒ LNG 相当) で評価する保守的計上。
     dist1_bot_GJ_per_h = _offgas_GJ_per_h(R['r1'].bottom.F_in)
     revenue['Dist1 塔底 燃料クレジット'] = (

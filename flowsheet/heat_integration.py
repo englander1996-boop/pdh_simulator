@@ -1,7 +1,7 @@
 """
 ヒートインテグレーション (HI) ターゲティング・モジュール
 
-設計判断 (2026-05-08):
+設計方針:
   最終的に BO で全体最適化を行う想定で、BO ループ内では「流体ペアリング」を
   行わずに、熱力学的な理論限界値（targeting）だけを返す。
   ペアリングは離散的・組合せ問題なので BO の GP には不向き。
@@ -50,9 +50,8 @@ import math
 #   Q = U · A · ΔT_ln、流速によらず固定 U を使用、9 区分の表で参照。
 #   沸点・露点を通過する場合は前後で分割計算。
 #
-# 設計判断 (2026-05-09): 本プロジェクト用にコンテスト値を採用 (引用)。
-#   旧版は化工便覧の per-stream h ベースだったが、contest 仕様の方が
-#   各 HE の「相のペア」で直接 U を引ける明確な体系のため切替え。
+# 本プロジェクトではコンテスト値を採用 (引用)。各 HE の「相のペア」で直接 U を
+#   引ける明確な体系のため。
 # ---------------------------------------------------------------------------
 
 class StreamPhase:
@@ -115,8 +114,8 @@ def utility_phase(utility_name: str) -> str:
     return StreamPhase.LIQUID
 
 
-# 後方互換性のため h_W_m2K 用の代表値も残置 (Bath 式 _calc_A_total で使用)
-# 設計判断 (2026-05-09): h は U 表とは別概念だが、簡略化のため U/2 を仮置き
+# h_W_m2K 用の代表値 (Bath 式 _calc_A_total で使用)。
+# h は U 表とは別概念だが、簡略化のため U/2 を仮置き
 # (1/U = 1/h_h + 1/h_c、両側等価仮定で h ≈ 2U)。targeting 推算の精度範囲。
 H_LIQUID_LIQUID_W_M2K   = 600.0    # ≈ 2 × 300 (液-液)
 H_HIGH_TEMP_GAS_W_M2K   = 300.0    # ≈ 2 × 150 (ガス-ガス)
@@ -158,7 +157,7 @@ class HIStream:
     Q_latent_kW:    float = 0.0
     T_phase_K:      Optional[float] = None
     h_W_m2K:        float = H_LIQUID_LIQUID_W_M2K
-    # contest §4-4 U 表索引用の相分類 (2026-05-09 追加)
+    # contest §4-4 U 表索引用の相分類
     phase:          str   = StreamPhase.LIQUID
 
     @property
@@ -991,10 +990,9 @@ def extract_streams(
 ) -> List[HIStream]:
     """run_one_pass の戻り値から HI 対象ストリームを抽出する。
 
-    設計判断 (2026-05-08):
-      各ユニットの T_in/T_out/Q は run_one_pass 結果と equipment dataclass から
-      直接読み取り、新たな仮定は導入しない。Q が小さいストリームは自動的に除外。
-      PSA preheat は符号で hot/cold を判定。
+    各ユニットの T_in/T_out/Q は run_one_pass 結果と equipment dataclass から
+    直接読み取り、新たな仮定は導入しない。Q が小さいストリームは自動的に除外。
+    PSA preheat は符号で hot/cold を判定。
 
     Parameters
     ----------
@@ -1054,7 +1052,7 @@ def extract_streams(
     if s: streams.append(s)
 
     # ---- C1: mem_precool (液→気、顕熱+潜熱) ----
-    # 設計判断 (2026-05-09): 顕熱区間は LIQUID、潜熱区間は EVAPORATING で別 stream に分離。
+    # 顕熱区間は LIQUID、潜熱区間は EVAPORATING で別 stream に分離。
     mp_eq = R['mem_precool'].equipment
     if mp_eq.Q_sensible_kW > 1e-6:
         s = _make_sensible_stream(
@@ -1157,8 +1155,8 @@ def extract_streams(
             )
             if s: streams.append(s)
 
-    # ---- Mem 圧縮機 段間冷却器 (与熱、ガス顕熱) — 2026-05-31 多段圧縮で追加 ----
-    # 設計判断: 膜圧縮機の多段化で生じる段間冷却 (ガス T_intercool_in→out のガス顕熱) を
+    # ---- Mem 圧縮機 段間冷却器 (与熱、ガス顕熱) ----
+    # 膜圧縮機の多段化で生じる段間冷却 (ガス T_intercool_in→out のガス顕熱) を
     # ピンチ解析の hot ストリームとして登録し、HI で他流体の予熱に回収可能にする
     # (Comp2 段間冷却 'H2_intercool' と同じ扱い)。これに対応して economics 側の OPEX
     # 'Mem段間冷却 冷水' は classify_heat_opex_key で 'cold' 登録済 → HI 適用時に
@@ -1213,9 +1211,8 @@ def _is_nan(x: float) -> bool:
 
 # economics.py の opex キー → 熱の種別 マッピング
 #
-# 設計判断 (2026-05-09): economics.py が utility 名を動的に埋め込むスタイル
-# (例: 'Dist1リボイラ (LP Steam≒)') に変わったので、固定 key 表は使えない。
-# prefix ベースで判定する (より長く・特異な prefix を先に置く)。
+# economics.py は utility 名を動的に埋め込む (例: 'Dist1リボイラ (LP Steam≒)') ため
+# 固定 key 表は使えず、prefix ベースで判定する (より長く・特異な prefix を先に置く)。
 #
 # economics.py の opex キー命名が変わったら本テーブルを更新すること。
 #
@@ -1247,8 +1244,8 @@ _OPEX_FIXED_HEAT_KEY_KIND: Dict[str, str] = {
     'Mem気化器蒸気':       'hot',
     'Reactor予熱燃料':     'hot',
     'Mem冷却器冷水':       'cold',
-    # 膜圧縮機 段間冷却 (2026-05-31 多段圧縮で追加)。HI 統合: extract_streams の
-    # 'H_mem_intercool' ホットストリームと対応し、HI 適用時に tier 別 OPEX へ差し替わる。
+    # 膜圧縮機 段間冷却。HI 統合: extract_streams の 'H_mem_intercool' ホットストリームと
+    # 対応し、HI 適用時に tier 別 OPEX へ差し替わる。
     'Mem段間冷却 冷水':    'cold',
 }
 
@@ -1374,11 +1371,9 @@ def apply_hi_to_economics(
     非熱系 OPEX (触媒交換、吸着剤交換、原料費、電力) と Revenue・CAPEX は
     そのまま継承する。
 
-    設計判断 (2026-05-09):
-      Phase 1+2 では「HI targeting only」を実装。物理 HE network は合成せず、
-      理論限界 OPEX (Q_H_min, Q_C_min を tier 配分したもの) を採用する。
-      CAPEX は据え置き (実機の HE はそのまま、HI 適用で安くなった OPEX のみ反映)。
-      Phase 3 で HEN CAPEX 置換を実装予定。
+    「HI targeting only」を行う。物理 HE network は合成せず、理論限界 OPEX
+    (Q_H_min, Q_C_min を tier 配分したもの) を採用する。CAPEX は据え置き
+    (実機の HE はそのまま、HI 適用で安くなった OPEX のみ反映)。
 
     Parameters
     ----------

@@ -33,10 +33,9 @@ class Column3Adapter:
         "qc":     "Qc",
         "qr":     "Qr",
     }
-    # lhs_column3.py / run_single_column3.py のフォールバック順 (旧運用、現在は使わない)
     DRAW_RATE_SPEC_NAMES = ("Draw Rate", "Distillate Rate", "留出液流量")
-    # 設計判断 (2026-05-22): Draw Rate (絶対量 spec) は iter 変動に弱いので、
-    # Comp Fraction (= 製品純度比率 spec) に切替え。HSC inspection で確認済み (Active=True)。
+    # Draw Rate (絶対量 spec) は iter 変動に弱いので、Comp Fraction (= 製品純度比率 spec)
+    # を併用できるようにする。
     PURITY_SPEC_NAMES = ("Comp Fraction",)
 
     @classmethod
@@ -64,7 +63,7 @@ class Column3Adapter:
 
             sess.solver_stop()
 
-            # 1. 圧力 (lhs_column3.py 規約: feed.Pressure = 塔圧 + 50 kPa を必ず書込み)
+            # 1. 圧力 (feed.Pressure = 塔圧 + 50 kPa を必ず書込み)
             write_pressure_spr1(ss, spec.col_p_kpa)
             feed_p = (
                 spec.feed_pressure_kpa
@@ -79,8 +78,7 @@ class Column3Adapter:
             if spec.feed_temperature_c is not None:
                 write_feed_temperature(feed, spec.feed_temperature_c)
 
-            # 3. スペック: exp1 rigorous と同じく "recovery × feed_LK" から Draw Rate を
-            # 動的計算 (iter 変動に追従)。
+            # 3. スペック: "recovery × feed_LK" から Draw Rate を動的計算 (iter 変動に追従)。
             # 値が 0-1 範囲なら recovery_LK_top として解釈し、feed の C3H6 (LK='B') 流量
             # から Draw Rate [kgmol/s] を毎回計算。1.0 超なら旧来の絶対量 spec。
             spec_val = float(spec.draw_rate_kgmols)
@@ -139,11 +137,11 @@ class Column3Adapter:
     # ----- 内部 -----
     @staticmethod
     def _write_composition(feed_stream, comps, spec: Column3Input) -> None:
-        """組成書込み。propane_frac が指定されていれば Propane/Propene の 2 成分のみ
-        (lhs_column3.py の運用)、そうでなければ全成分上書き。
+        """組成書込み。propane_frac が指定されていれば Propane/Propene の 2 成分のみ、
+        そうでなければ全成分上書き。
         """
         if spec.propane_frac is not None:
-            # Propane と Propene/Propylene のみ操作 (旧 lhs_column3.py 互換)
+            # Propane と Propene/Propylene のみ操作
             propene_frac = 1.0 - float(spec.propane_frac)
             current = list(feed_stream.ComponentMolarFractionValue)
             j_propane = hysys_index_of(comps, "A")

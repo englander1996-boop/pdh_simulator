@@ -8,7 +8,7 @@
     objective = result.effective_TAC          # 最小化 (= TAC + ペナルティ)
     feasible  = result.is_feasible            # ペナルティ・spec チェックの集約
 
-設計判断 (2026-05-08, 相談時の合意): 2階層ペナルティ構造
+2階層ペナルティ構造:
   (a) solver-level 失敗 (PSA/Mem CAPEX 1e8, リサイクル暴走, 未収束):
       数値結果が信頼できないので effective_TAC = penalty.solver_failure_okuyen で
       ハード打ち切り。
@@ -55,12 +55,11 @@ class FlowsheetResult:
     economics_synth: Optional[Economics] = None    # 実 HEN 構成適用後の Economics
     hen_result:      Optional[object]    = None    # synthesize_hen の HENResult
     # ---- 診断用: 1 パス中に捕捉された warning (run_one_pass の集約) ----
-    # 設計判断 (2026-05-18): silent fallback 検出のため、warnings.simplefilter("ignore")
-    # を catch_warnings(record=True) に置換した。本フィールドで BO ログから fallback
-    # 発火を追跡可能。空リストなら全装置が warning なく動作。
+    # silent fallback 検出のため warning を catch_warnings(record=True) で捕捉する。
+    # 本フィールドで BO ログから fallback 発火を追跡可能。空リストなら全装置が warning なく動作。
     warnings_captured: list = None                 # _CapturedWarning のリスト
-    # ---- 観測ラベル (2026-05-22 L1 強化) ----
-    # 設計判断: failure_reason は人間可読の長文字列だが、live ログ・CSV groupby 用に
+    # ---- 観測ラベル ----
+    # failure_reason は人間可読の長文字列だが、live ログ・CSV groupby 用に
     # 「どの段階で詰まったか」を categorical 1 列で持つ。値:
     #   'success'                    : feasible 完走
     #   'r1' / 'r_rx' / 'r2'
@@ -93,33 +92,23 @@ _COLUMN_RECOVERY_SPECS = {
 }
 
 
-# 設計判断 (2026-05-20): PSA/Mem trace bypass の閾値超過分を BO objective に伝える
-# 連続 penalty 係数 [億円/年・per fraction-超過]。
-#  目的: 旧 (warning only) では BO は「PSA に C3H6 を多量に流す」設計を無自覚に選好し、
-#        BO ベスト trial (例: #32) が rigorous 再評価で死ぬ原因になっていた。
-#
-# 設計判断 (2026-05-21): 5000 → 1000 に引き下げ。
-#  経緯: 旧 5000 は「proxy_penalty (rigorous で発火) のスケールに合わせる」と決められた
-#        値だが、(a) proxy_penalty の rigorous leak 部分を 2026-05-21 にスキップ化した
-#        (二重計上回避) ため、本 penalty が単独で「C3 漏れコスト」を担うようになり、
-#        (b) 1pp 超過で 50 億円は実コスト (PSA 増床数億 + C3 売り損 数億 = 10-20 億)
-#        に対し 5-10 倍過大。warm-start trial 247 で TAC 167 領域の良設計が 86 億の
-#        bypass で infeas 化していた (main_20260521_092409 #0,#2,#3 が TAC 250-280)。
-#  新値: 1000 億円/fraction → 1pp 超過で 10 億、5pp で 50 億。spec 違反 (1pp で 100 億)
-#        より弱く、実コスト (10-20 億) に近い水準。
+# PSA/Mem trace bypass の閾値超過分を BO objective に伝える連続 penalty 係数
+# [億円/年・per fraction-超過]。これがないと BO は「PSA に C3H6 を多量に流す」設計を
+# 無自覚に選好し、BO ベスト trial が rigorous 再評価で死ぬ原因になる。
+#  1000 億円/fraction → 1pp 超過で 10 億、5pp で 50 億。spec 違反 (1pp で 100 億)
+#  より弱く、実コスト (PSA 増床 + C3 売り損 = 10-20 億) に近い水準。
 _TRACE_BYPASS_PENALTY_COEF_OKUYEN = 1000.0
 
 
-# 設計判断 (2026-05-22 forensic, 施策 1c): solver-level failure の TAC を連続化。
-# 旧版は pen.solver_failure_okuyen (= 10000 億円) 固定 → silent infeas 同士の TAC が
+# solver-level failure の TAC を連続化する。固定値だと silent infeas 同士の TAC が
 # 同値になり、TPE は infeas 内序列を constraint_func の violation sum だけに頼る。
 # 本連続化で「shortfall 総和が小さい infeas (=feas に近い可能性)」は低い TAC、
-# 「大量 shortfall (=明確に違反)」は高い TAC で順位付け。
-# TPE は constraint_func と TAC の両方を見て feas 方向を学習する想定。
+# 「大量 shortfall (=明確に違反)」は高い TAC で順位付けし、TPE は constraint_func と
+# TAC の両方を見て feas 方向を学習できる。
 #
 # マップ: silent_base + raw_total × coef、上限 solver_failure_okuyen
-# silent_base = 0.5 × solver_failure (= 5000 億) で「silent infeas は中間 TAC」を表現
-# coef は raw_total ≈ 25 で上限 hit するよう調整 (= shortfall 多いほど早く 10000 へ)
+# silent_base = 0.5 × solver_failure で「silent infeas は中間 TAC」を表現
+# coef は raw_total ≈ 25 で上限 hit するよう調整 (= shortfall 多いほど早く上限へ)
 _SILENT_BASE_FRAC          = 0.5    # silent infeas の TAC = solver_failure × この比率
 _SHORTFALL_TAC_COEF_OKUYEN = 200.0  # raw_total 1 単位あたりの TAC 加算
 
@@ -137,7 +126,7 @@ _SHORTFALL_KEYS_FOR_TAC = (
 
 def _compute_solver_fail_TAC(solver_failure_ceiling: float,
                               one_pass: Optional[dict]) -> float:
-    """solver-level failure の連続化 TAC を計算する (施策 1c)。
+    """solver-level failure の連続化 TAC を計算する。
 
     one_pass が None (= solve_flowsheet 例外経路) なら ceiling 固定。
     """
@@ -190,16 +179,16 @@ def evaluate(
     """
     pen = config.penalty
 
-    # 設計判断 (2026-05-10): solve_flowsheet が ValueError 等の例外を投げる場合
-    # (例: Dist1 N=N_min 完全 infeasible で下流の expansion_valve が流量ゼロ受領)、
-    # BO 用途では penalty 返却が望ましい。catch して solver_failure として扱う。
+    # solve_flowsheet が ValueError 等の例外を投げる場合 (例: Dist1 完全 infeasible で
+    # 下流の expansion_valve が流量ゼロ受領)、BO 用途では penalty 返却が望ましい。
+    # catch して solver_failure として扱う。
     try:
         solver_result = solve_flowsheet(
             design, config, verbose=verbose,
             F_C3H8_override=F_C3H8_override,
         )
     except Exception as e:
-        # 観測ラベル (2026-05-22): 例外メッセージから装置名を best-effort で抽出。
+        # 観測ラベル: 例外メッセージから装置名を best-effort で抽出。
         # 既知パターン: "[Dist1] ...", "PSA: ...", "membrane ...", "Comp2/Dist2 ..."
         exc_msg = f"{type(e).__name__}: {e}"
         unit_guess = _guess_unit_from_exception(exc_msg)
@@ -211,13 +200,12 @@ def evaluate(
             failure_unit=f"exception:{unit_guess}",
         )
 
-    # ---- (a) solver-level 失敗 → ハード打ち切り (施策 1c で TAC 連続化) ----
-    # 設計判断: 結果の数値が信頼できない場合 (発散・暴走・未収束) は失敗扱い。
-    # 旧版は固定 9999/10000 億円。本版は one_pass の shortfall 総和に応じて
-    # silent_base (= 5000) 〜 ceiling (= 10000) の幅で連続化、TPE が infeas 内序列を
-    # 学習しやすくする (詳細は _compute_solver_fail_TAC 参照)。
-    # 観測ラベル (2026-05-22): penalty_hit の場合は run_one_pass が埋めた first_failed_unit
-    # を優先使用 (= 'r_psa' / 'r_mem' / 'r_rx' / 'r1' / 'r2' / 'r3' / 'timeout' を区別)。
+    # ---- (a) solver-level 失敗 → ハード打ち切り (TAC 連続化) ----
+    # 結果の数値が信頼できない場合 (発散・暴走・未収束) は失敗扱い。
+    # one_pass の shortfall 総和に応じて silent_base 〜 ceiling の幅で TAC を連続化し、
+    # TPE が infeas 内序列を学習しやすくする (詳細は _compute_solver_fail_TAC 参照)。
+    # penalty_hit の場合は run_one_pass が埋めた first_failed_unit を優先使用
+    # (= 'r_psa' / 'r_mem' / 'r_rx' / 'r1' / 'r2' / 'r3' / 'timeout' を区別)。
     s = solver_result.inner_status
     one_pass_dict = solver_result.one_pass or {}
     solver_fail_TAC = _compute_solver_fail_TAC(pen.solver_failure_okuyen, one_pass_dict)
@@ -254,13 +242,12 @@ def evaluate(
         )
 
     # ---- (a') strict recovery check (BO で rigorous 使用時の追加検査) ----
-    # 設計判断 (2026-05-10): exp1 outer-loop 収束後の最終状態で各塔 recovery を
-    # 確認する。recycle iter の transient state では誤発動するので、ここで
-    # 全体収束後にだけ検査する。non-spec 解 → solver_failure penalty。
-    #
-    # 設計判断 (2026-05-18): feed_LK <= 1e-3 kmol/h (≒ 0 流量) の塔は recovery 検査を
-    # スキップする。但し silent スキップだと「実は分離できていない塔が pass」する
-    # 可能性があるため、import warnings で記録する (BO log の追跡用)。
+    # outer-loop 収束後の最終状態で各塔 recovery を確認する。recycle iter の
+    # transient state では誤発動するので、全体収束後にだけ検査する。
+    # non-spec 解 → solver_failure penalty。
+    # feed_LK <= 1e-3 kmol/h (≒ 0 流量) の塔は recovery 検査をスキップするが、
+    # silent スキップだと「実は分離できていない塔が pass」する可能性があるため
+    # warnings で記録する (BO log の追跡用)。
     import warnings as _warnings
     if strict_recovery_check:
         for col_key, spec in _COLUMN_RECOVERY_SPECS.items():
@@ -318,7 +305,7 @@ def evaluate(
     specs = check_specs(solver_result.one_pass, config)
 
     # ---- (b) spec 違反 → ソフトペナルティ ----
-    # 設計判断: 全 spec 違反量を %pt スケールに揃えてあるため、係数を1つで管理。
+    # 全 spec 違反量を %pt スケールに揃えてあるため、係数を1つで管理。
     #   penalty = 違反のあった spec ごとに base を加算 + 全違反 %pt の合計に coef を掛ける
     # 違反 0 のときは加算 0 で本来の TAC のみ。違反があるほど線形に増える勾配を持つ。
     failures = []
@@ -342,9 +329,8 @@ def evaluate(
         total_violation_pp += specs.h2_violation_pp
         n_violations += 1
     if not specs.production_pass:
-        # 設計判断 (2026-05-21): 旧版は下限フォーマット固定でメッセージ生成していたため、
-        # 上限超過時に「生産量 1252 < 1176」のような数値矛盾表示になっていた
-        # (main_20260521_160951 で発見)。direction で分岐して正確に表示する。
+        # direction で分岐して正確に表示する (上限超過時に「生産量 1252 < 1176」の
+        # ような数値矛盾表示にならないように)。
         if specs.production_direction == 'low':
             threshold_low_kmolh = specs.target_kmol_h * (1.0 - config.spec.production_min_relative)
             failures.append(
@@ -369,20 +355,18 @@ def evaluate(
         total_violation_pp += specs.production_violation_pp
         n_violations += 1
 
-    # 設計判断 (2026-05-21): adaptive penalty scale。
-    # 序盤は係数を弱めて探索を広げ、終盤は強化して infeasible 領域から強制退出。
-    # 詳細は optimization/penalty_scale.py。
+    # adaptive penalty scale。序盤は係数を弱めて探索を広げ、終盤は強化して
+    # infeasible 領域から強制退出させる。詳細は optimization/penalty_scale.py。
     from optimization.penalty_scale import get_scale as _pscale
     _scale = _pscale()
     soft_penalty = (n_violations * pen.spec_base_okuyen * _scale
                     + total_violation_pp * pen.spec_coef_okuyen * _scale)
 
-    # ---- (b') rigorous プロキシ罰則 (2026-05-19 Phase A) ----
+    # ---- (b') rigorous プロキシ罰則 ----
     # 各蒸留塔の equipment.proxy_penalty_okuyen を合算して soft_penalty にマージ。
     # FUG が「narrow margin / C3 漏れ過大」と判定した設計に対する追加コスト。
     # 詳細は src/distillation_core.py の _compute_proxy_penalty。
-    # 設計判断: BO objective が「FUG では feasible でも rigorous で詰む領域」を
-    # 自動的に避けるように誘導する (ユーザー指示: 「FUG があんまりよろしくない」)。
+    # BO objective が「FUG では feasible でも rigorous で詰む領域」を自動的に避けるように誘導する。
     proxy_penalty_total = 0.0
     proxy_reasons: list[str] = []
     for col_key in ('r1', 'r2', 'r3'):
@@ -402,32 +386,24 @@ def evaluate(
             f"rigorous プロキシ罰則 +{scaled_proxy:.1f} 億円/年 ({' | '.join(proxy_reasons)})"
         )
 
-    # ---- (b'') PSA/Mem trace bypass 連続 penalty (2026-05-20) ----
+    # ---- (b'') PSA/Mem trace bypass 連続 penalty ----
     # run_one_pass の _apply_trace_bypass が検出した「閾値超過分」を effective_TAC に
     # 加算。proxy_penalty は rigorous でしか発火しないため BO (FUG) では見えなかった
     # 「Dist2 が C3H6 を PSA に漏らす設計」を BO の探索段階で penalty として伝達する。
     #
-    # 設計判断 (2026-05-22 改良 2): trace_bypass は failures.append しない (= is_feasible
-    # を False にしない)。経済影響は連続罰金で十分カバー (1pp 超過 ≈ +10 億円)。
-    # 旧版は罰金 + binary feasibility 失敗の二重打撃で、main_20260522_094436 で
-    # TPE が trace bypass borderline (TAC=1028 等) に張り付いた結果、当該クラスタが
-    # top-k 評価対象から弾かれる構造になっていた。罰金だけ残し feasibility は許容。
-    # PSA モデル精度劣化リスクは罰金で吸収する (1pp 超過 = 10 億円 ≈ PSA 増床コスト相当)。
+    # trace_bypass は failures.append しない (= is_feasible を False にしない)。
+    # 経済影響は連続罰金で十分カバー (1pp 超過 ≈ +10 億円 ≈ PSA 増床コスト相当)。
+    # 罰金 + binary feasibility 失敗の二重打撃を避け、罰金だけ残し feasibility は許容する。
     one_pass_dict = solver_result.one_pass or {}
     psa_excess = one_pass_dict.get('trace_bypass_psa_excess', 0.0) or 0.0
     mem_excess = one_pass_dict.get('trace_bypass_mem_excess', 0.0) or 0.0
     trace_bypass_excess_total = psa_excess + mem_excess
     if trace_bypass_excess_total > 0:
-        # 設計判断 (2026-05-27 forensic, final_154103 vs _220920 比較):
-        # trace_bypass を penalty_scale の緩和ランプ (序盤 0.2) から切り離す。
-        # 根拠: 220920 のベスト #129 は素 TAC=1122.34 (前回ベスト #210 の 1122.75 より良い)
-        #   だが PSA trace_bypass 超過 0.0073 を抱え、trial#129 (scale≈1.2) では penalty が
-        #   8.9 億止まりで「feasible best」に化けた → 報告 effective_TAC が 1131 に悪化し、
-        #   2 run 間の 8 億の差は丸ごとこの penalty の副作用だった。同 run の top20 中 5 件が
-        #   崖 (bypass) 設計。trace_bypass は「spec を序盤緩める」性質ではなく、PSA design
-        #   モデルが C3 を 1% 超扱えない=モデル妥当性の壁 (run_one_pass._TRACE_BYPASS_FRAC)
-        #   なので、探索序盤でも割引すべきでない。max(_scale, 1.0) で設計意図 (10 億/pp) を
-        #   下限保証しつつ終盤の強化 (×3) は維持。報告側の保険は final.py の clean 優先選択。
+        # trace_bypass を penalty_scale の緩和ランプ (序盤割引) から切り離す。
+        # trace_bypass は「spec を序盤緩める」性質ではなく、PSA design モデルが
+        # C3 を 1% 超扱えない = モデル妥当性の壁 (run_one_pass._TRACE_BYPASS_FRAC) なので、
+        # 探索序盤でも割引すべきでない。max(_scale, 1.0) で設計意図 (10 億/pp) を
+        # 下限保証しつつ終盤の強化は維持する。
         bypass_scale = max(_scale, 1.0)
         bypass_penalty = trace_bypass_excess_total * _TRACE_BYPASS_PENALTY_COEF_OKUYEN * bypass_scale
         soft_penalty += bypass_penalty
@@ -436,9 +412,9 @@ def evaluate(
         # TPE constraints_func に流す (objective.py)。
 
     # ---- HI (post-processing) ----
-    # 設計判断 (2026-05-09): apply_hi=True のときのみ pinch targeting を実行し、
-    # HI 後の OPEX/TAC/Profit を別 Economics として保持する。BO ループでは
-    # apply_hi=False (高速)、top-k 候補に対してのみ apply_hi=True で再評価する。
+    # apply_hi=True のときのみ pinch targeting を実行し、HI 後の OPEX/TAC/Profit を
+    # 別 Economics として保持する。BO ループでは apply_hi=False (高速)、
+    # top-k 候補に対してのみ apply_hi=True で再評価する。
     economics_hi = None
     hi_result    = None
     if apply_hi:
@@ -460,10 +436,9 @@ def evaluate(
             depreciation_years=DEPRECIATION_YEARS,
         )
 
-    # ---- Stage 2 (HEN Synthesis) は不採用 (2026-05-31 ユーザー決定: HI のみ) ----
-    # 設計判断: ヒートインテグレーションは Stage 1 (pinch targeting) のみで評価し，
-    # 実 HEN ネットワーク合成 (Stage 2) は行わない。HEN 合成モジュール
-    # (旧 optimization/hen_synthesis.py) は削除した。apply_stage2 引数は後方互換のため
+    # ---- Stage 2 (HEN Synthesis) は不採用 (HI のみ) ----
+    # ヒートインテグレーションは Stage 1 (pinch targeting) のみで評価し，
+    # 実 HEN ネットワーク合成 (Stage 2) は行わない。apply_stage2 引数は後方互換のため
     # 残すが無効で，economics_synth は常に None (effective_TAC は HI のみの economics_hi を採用)。
     economics_synth = None
     hen_result      = None
@@ -476,19 +451,17 @@ def evaluate(
         eff_econ = economics_hi
     else:
         eff_econ = economics
-    # 設計判断 (2026-05-21): 純 TAC 最小化に変更 (旧: TAC - revenue + penalty)。
-    # ユーザー指示「赤字はいい、TAC を最小化したい」に従い、revenue 項を除去。
-    # production 制約は spec の下限ペナルティで担保される (n_violations × spec_base +
-    # violation_pp × spec_coef × scale)。revenue を BO 評価から外すことで、
-    # 「装置小型化 → TAC ↓」の方向に純粋にバイアスがかかり、production 下限を満たす
-    # 最も安い設計に収束する想定。
+    # 純 TAC 最小化 (revenue 項は含めない)。production 制約は spec の下限ペナルティで
+    # 担保される (n_violations × spec_base + violation_pp × spec_coef × scale)。
+    # revenue を BO 評価から外すことで「装置小型化 → TAC ↓」の方向に純粋にバイアスがかかり、
+    # production 下限を満たす最も安い設計に収束する。
     effective_TAC = eff_econ.TAC + soft_penalty
 
     # run_one_pass で捕捉した warning を取り出す (silent fallback 追跡用)
     one_pass = solver_result.one_pass or {}
     warnings_captured = one_pass.get('warnings_captured', []) or []
 
-    # 観測ラベル (2026-05-22): solver は完走したので spec 違反の種別を確定する。
+    # 観測ラベル: solver は完走したので spec 違反の種別を確定する。
     #   - 全 spec pass → 'success'
     #   - 違反あり → 主要違反 1 件で代表 (優先度: production > c3h6_purity > h2_purity)。
     #     複数違反時はカウントは別途 user_attrs に出すので、ここでは「最初に当てる方向」だけ。
@@ -507,8 +480,7 @@ def evaluate(
         failure_unit = 'spec_h2_purity'
     else:
         # proxy / trace_bypass のみで failures が立つことはあるが、これらは soft で
-        # is_feasible に影響しない (runner.py 内設計判断 2026-05-22 改良 2)。
-        # ガード: ここに来たら spec 以外の何か。
+        # is_feasible に影響しない。ガード: ここに来たら spec 以外の何か。
         failure_unit = 'spec_other'
 
     return FlowsheetResult(

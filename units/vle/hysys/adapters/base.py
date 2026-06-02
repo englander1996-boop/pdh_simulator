@@ -17,10 +17,10 @@ from units.vle.hysys.adapters.components import (
 from units.vle.hysys.adapters.types import ColumnResult
 
 
-# フィード圧力 = 塔圧 + 50 kPa という 3塔共通の規約 (lhs_column*.py より)。
+# フィード圧力 = 塔圧 + 50 kPa という 3塔共通の規約。
 FEED_PRESSURE_MARGIN_KPA = 50.0
 
-# HYSYS の "Empty" sentinel value。Solver が未走 / 未収束のとき返る (exp_A_structural.py より)。
+# HYSYS の "Empty" sentinel value。Solver が未走 / 未収束のとき返る。
 HYSYS_EMPTY_VALUE = -32767.0
 _EMPTY_TOL = 1.0
 
@@ -42,7 +42,7 @@ def write_pressure_spr1(ss, col_p_kpa: float) -> None:
 def write_feed_flow_kgmolh(ss, feed_stream, flow_kgmolh: float) -> None:
     """SPR-1 A3 に kgmole/h、feed.MolarFlow に kgmole/s (= /3600) で書込み。
 
-    column1, column2 の規約。column3 は kgmol/s で書く別関数を使う。
+    column1, column2 用。column3 は kgmol/s で書く別関数を使う。
     """
     ss.Cell("A3").CellValue = float(flow_kgmolh)
     feed_stream.MolarFlow.Value = float(flow_kgmolh) / 3600.0
@@ -51,7 +51,7 @@ def write_feed_flow_kgmolh(ss, feed_stream, flow_kgmolh: float) -> None:
 def write_feed_flow_kgmols(ss, feed_stream, flow_kgmols: float) -> None:
     """SPR-1 A3 にも kgmol/s 直書き、feed.MolarFlow にも同値。
 
-    column3 の規約 (run_single_column3.py)。
+    column3 用。
     """
     ss.Cell("A3").CellValue = float(flow_kgmols)
     feed_stream.MolarFlow.Value = float(flow_kgmols)
@@ -146,7 +146,7 @@ def fill_outputs(
     Solver が走らずに empty value (-32767) を返している場合は HysysEmptyOutputError を投げる。
     例外は呼び出し側で処理する想定 (raise する)。
     """
-    # 設計判断 (2026-05-22): まず top_stream.Temperature が empty でないかを確認。
+    # まず top_stream.Temperature が empty でないかを確認。
     # HYSYS は Solver 未走でも例外を出さず、参照すると EMPTY_VALUE (-32767) を返す。
     # これを feasible として扱うと下流の utility 選択で T=-32767°C で死ぬ。
     top_T = top_stream.Temperature.Value

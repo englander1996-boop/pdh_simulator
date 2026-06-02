@@ -1,30 +1,28 @@
 r"""
-sub/sub2.py (旧 final.py) — (SM, rigorous, SM) バックエンドでの PDH 全変数 制約付き BO (マルチコア並列)
+sub/sub2.py — (SM, rigorous, SM) バックエンドでの PDH 全変数 制約付き BO (マルチコア並列)
 
-【2026-05-29 退避】旧 final.py を sub/sub2.py へ移動。現行 BO の本丸は ../main.py (旧 special, HYSYS+SM)。
-本ファイルは並列対応アーカイブ (parallel kind='sub2')。exp4 / exp_tin_sweep / exp_dist2_pressure /
-exp_recost_359 は本ファイル(sub2)を import して感度解析に使う。
+並列対応アーカイブ (parallel kind='sub2')。現行 BO の本丸は ../main.py (HYSYS+SM)。
+exp4 / exp_tin_sweep / exp_dist2_pressure / exp_recost_359 は本ファイル(sub2)を import して
+感度解析に使う。
 
-main.py(旧 special.py; sm, hysys, sm) のフォーク。**Dist2 を HYSYS → rigorous に置換**することで
-全塔が pure Python になり、HYSYS の単一 COM 制約から解放されて **マルチプロセス並列**
-(N_WORKERS>1) が可能になる。Dist1/Dist3 は学習済み SM(GPR)、Dist2 は in-house rigorous
-(Wang-Henke)。Stage2(HEN 合成)を **全 trial で実行**(main(旧special) と同じ apply_stage2=True)
-するので、BO の目的関数が「本物のプラント TAC」= top-k 再評価とほぼ一致する。
+main.py (sm, hysys, sm) のフォーク。**Dist2 を HYSYS → rigorous に置換**することで全塔が
+pure Python になり、HYSYS の単一 COM 制約から解放されて **マルチプロセス並列** (N_WORKERS>1)
+が可能になる。Dist1/Dist3 は学習済み SM(GPR)、Dist2 は in-house rigorous (Wang-Henke)。
+Stage2(HEN 合成)を **全 trial で実行** (apply_stage2=True) するので、BO の目的関数が
+「本物のプラント TAC」= top-k 再評価とほぼ一致する。
 
-なぜこの構成 (2026-05-27, ユーザー決定):
-  - main(旧special; sm,hysys,sm): 精度◎だが HYSYS COM で並列不可・遅い。
-  - sub1(旧main; fug,rig,fug→top-k rig): 並列可だが BO ループの Dist1/Dist3 が fug(低精度)、
+構成の比較:
+  - main (sm,hysys,sm): 精度◎だが HYSYS COM で並列不可・遅い。
+  - sub1 (fug,rig,fug→top-k rig): 並列可だが BO ループの Dist1/Dist3 が fug(低精度)、
     Stage2 は top-k のみ。BO↔再評価に乖離。
-  - 本ファイル sub2(旧final; sm,rig,sm)+Stage2 全 trial: SM が Dist1/Dist3 を HYSYS 精度・fug 速度で置換、
+  - 本ファイル sub2 (sm,rig,sm)+Stage2 全 trial: SM が Dist1/Dist3 を HYSYS 精度・fug 速度で置換、
     Dist2 は精度保護のため rigorous 据え置き、全部 pure Python ゆえ 6 worker 並列可。
-    → main(旧special) の精度構造 × sub1(旧main) の並列性 × Stage2 を毎回。
+    → main の精度構造 × sub1 の並列性 × Stage2 を毎回。
 
-Dist1 SM レンジ事情 (2026-05-27):
-  SM column1 は N=30-60 で学習。sub1(旧main) の Dist1 (N=20-30) はレンジ非適合だったが、
-  本ファイルは main(旧special) 同様 col1_n_stages=(30,60) を採用し SM 学習域に合わせる。
-  「sub1(旧main) の Dist1 が上限 30 に張り付く(fug 精度も微妙)」観測への対処でもある。
+Dist1 SM レンジ事情:
+  SM column1 は N=30-60 で学習。本ファイルは col1_n_stages=(30,60) を採用し SM 学習域に合わせる。
 
-21 変数 (special と同一、ただし Dist2 ブロックを rigorous 用に組み替え):
+21 変数 (Dist2 ブロックは rigorous 用に組み替え):
   反応器(4): T_in_K, z_cat_m, t_cyc_min, D_reactor_m
   PSA(3)   : D_psa_col_m, L_psa_bed_m, desorption_target
   膜(2)    : P_H_Pa, A_mem_m2
@@ -50,11 +48,8 @@ import datetime
 import contextlib
 import io
 
-# 設計判断 (2026-05-27): per-trial 時間予算 200s。
-# 根拠: main run 実測で 1 trial 中央値 84s/p90 128s/max 139s (Stage2 無し、@120s で 23% timeout)。
-# final は Stage2(HEN) を全 trial 実行し +~30s/trial → median~115s/max~170s。120s だと過半が
-# timeout するため 200s に引上げ (max~170s をカバー、timeout 率を main 並み <~20% に)。exp4 実測の
-# 重い点 171s も収容。tol は 1% 維持 (真値−0.3%、他の不確実性より桁違いに小: 膜単価仮置き/Dist3 vessel 外挿)。
+# per-trial 時間予算 200s。Stage2(HEN) を全 trial 実行すると median~115s/max~170s かかり、
+# 短いと過半が timeout する。200s で max~170s をカバーし timeout 率を <~20% に抑える。
 os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '200')
 
 try:
@@ -62,7 +57,7 @@ try:
 except Exception:
     pass
 
-# sub/ へ退避済み。repo root は 1 階層上 (旧 final.py は repo 直下だった)。
+# repo root は 1 階層上。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import optuna
@@ -83,15 +78,14 @@ from simulation import display_full_results, show_input_snapshot
 # ===========================================================================
 # § 1. BO 設定
 # ===========================================================================
-N_TRIALS    = 360            # main 並列 run 準拠 (6 worker × 60)。全21変数。
+N_TRIALS    = 360            # 6 worker × 60。全21変数。
 N_STARTUP   = 50             # QMC Sobol 広域カバレッジ (共有 study 総完了数で TPE 切替)
 SEED        = 42
 N_JOBS      = 1              # スレッド並列は penalty_scale global のため不可。並列は N_WORKERS。
-# 設計判断 (2026-05-27): final は全塔 pure Python (SM + rigorous、HYSYS 不使用) なので
-# マルチプロセス並列が可能。本機 i5-13400 の P-core 数に合わせ 6。各 worker 単スレッドで
-# penalty_scale/GIL 問題なし、constant_liar=True で冗長サンプリング抑制 (parallel.py)。
-# QMC startup フェーズは Sobol が結果非依存ゆえ並列で品質ゼロ劣化。TPE フェーズの
-# 同時数 6 が async バッチ=staleness の安全圏上端。1 で単一プロセス。
+# 全塔 pure Python (SM + rigorous、HYSYS 不使用) なのでマルチプロセス並列が可能。各 worker
+# 単スレッドで penalty_scale/GIL 問題なし、constant_liar=True で冗長サンプリング抑制 (parallel.py)。
+# QMC startup フェーズは Sobol が結果非依存ゆえ並列で品質ゼロ劣化。TPE フェーズの同時数 6 が
+# async バッチ=staleness の安全圏上端。1 で単一プロセス。
 N_WORKERS   = 6
 N_TOPK      = 3              # 詳細レポートを出す上位候補数
 
@@ -111,36 +105,33 @@ HI_DT_MIN_K  = 10.0
 # § 3. 探索範囲 — 21 変数  形式: (low, high, scale, type)
 # ===========================================================================
 SEARCH_SPACE = {
-    # ----- 反応器 (Swing) — special 準拠 -----
+    # ----- 反応器 (Swing) -----
     "T_in_K":              (880.0,  940.0,  'linear', 'float'),
     "z_cat_m":             (15.0,   40.0,   'linear', 'float'),
     "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),
     "D_reactor_m":         (7.0,    10.0,   'linear', 'float'),
 
-    # ----- PSA — special 準拠 -----
+    # ----- PSA -----
     "D_psa_col_m":         (2.9,    5.0,    'linear', 'float'),
     "L_psa_bed_m":         (22.0,   30.0,   'linear', 'float'),
     "desorption_target":   (0.22,   0.40,   'linear', 'float'),
 
-    # ----- 膜 — special 準拠 -----
+    # ----- 膜 -----
     "P_H_Pa":              (7.5e5,  9.5e5,  'linear', 'float'),
     "A_mem_m2":            (5.0e4,  3.0e5,  'log',    'float'),
 
-    # ----- 原料 (外側ループ skip、override) — special 準拠 -----
-    # 設計判断 (2026-05-27): special の (1500,1750) は HYSYS+SM の低収率(~72%)regime 用。
-    # final は Dist2 が rigorous で収率挙動が変わる可能性があるため、初回は special 値を
-    # 踏襲し、run 後に生産量バンド (1129-1248) 達成状況を見て調整する。
+    # ----- 原料 (外側ループ skip、override) -----
+    # Dist2 が rigorous で収率挙動が変わりうるため、生産量バンド (1129-1248) 達成状況を見て調整する。
     "F_C3H8_fresh_kmol_h": (1500.0, 1750.0, 'linear', 'float'),
 
     # ----- Dist1 (SM model1: N30-60/P1600-2200/feed_stage10-39/CF0.9-0.999) -----
     "col1_p_kpa":          (1600.0, 2000.0, 'linear', 'float'),
-    "col1_n_stages":       (30,     60,     'linear', 'int'  ),   # SM 学習域 (main の 20-30 はレンジ外)
+    "col1_n_stages":       (30,     60,     'linear', 'int'  ),   # SM 学習域
     "col1_feed_stage":     (22,     28,     'linear', 'int'  ),
     "col1_comp_frac_2":    (0.90,   0.999,  'linear', 'float'),
 
-    # ----- Dist2 (rigorous 脱エタン塔) — main の rigorous 実績域 -----
-    # 設計判断 (2026-05-27): special の HYSYS 用域 (P500-700/N44-80/feed_ratio) ではなく
-    # main の rigorous 用域を採用 (rigorous は N20-40 で収束、recovery spec で分離を直接制御)。
+    # ----- Dist2 (rigorous 脱エタン塔) -----
+    # rigorous 用域 (rigorous は N20-40 で収束、recovery spec で分離を直接制御)。
     # feed 段は Kirkbride 自動 (N_feed=1 placeholder)。
     "col2_p_kpa":          (500.0,  800.0,  'linear', 'float'),  # 5-8 bar (膜 P_H 未満を維持)
     "col2_n_stages":       (20,     40,     'linear', 'int'  ),
@@ -148,7 +139,7 @@ SEARCH_SPACE = {
     "col2_rec_LK_top":     (0.95,   0.999,  'linear', 'float'),  # C2H6 → top
     "col2_rec_HK_bot":     (0.998,  0.9995, 'linear', 'float'),  # C3H8 → bot
 
-    # ----- Dist3 (SM model3: N69-200/P1600-2200, spec なし) — special 準拠 -----
+    # ----- Dist3 (SM model3: N69-200/P1600-2200, spec なし) -----
     "col3_p_kpa":          (1600.0, 1900.0, 'linear', 'float'),
     "col3_n_stages":       (115,    160,    'linear', 'int'  ),
     "col3_feed_ratio":     (0.60,   0.90,   'linear', 'float'),
@@ -168,8 +159,8 @@ OUTPUT_DIR = 'outputs'
 
 import dataclasses as _dc
 _CONFIG = load_operating_config()
-# 決定A (2026-05-25, special 継承): SM Dist3 は 99.5 mol%=99.497 wt% 固定。
-# mol↔wt 差 0.003pp を吸収するため purity 閾値を 99.45 wt% に緩和 (SM の実力を尊重)。
+# SM Dist3 は 99.5 mol%=99.497 wt% 固定。mol↔wt 差 0.003pp を吸収するため
+# purity 閾値を 99.45 wt% に緩和。
 _CONFIG = _dc.replace(_CONFIG, spec=_dc.replace(_CONFIG.spec, c3h6_min_wtfrac=0.9945))
 
 _N_FEED_PLACEHOLDER = 1   # rigorous/sm は core 側で Kirkbride 推奨を自動採用、本値は無視

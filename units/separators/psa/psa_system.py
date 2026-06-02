@@ -254,13 +254,13 @@ class PSAFixedParams:
     # !仮置き — 後日検証・調整すること
     use_css_approximation:         bool  = True  # CSS 簡易補正フラグ (保守的過大推算)
     desorption_time_safety_factor: float = 1.2   # 脱着時間安全係数 (KFa 不確実性対策)
-    # ---- 床圧力損失 (Ergun) — 2026-05-31 PSA設計レビュー対応 ----
+    # ---- 床圧力損失 (Ergun) ----
     # !仮置き — 確定値は活性炭ベンダーデータで更新。u_0 上限 (_U0_MAX=1.0m/s) は ODE 安定の
     #   数値ガードに留め、実機の現実的な空塔速度 (~0.3-0.4m/s) は本 ΔP 制約で物理的に縛る。
     d_p_m:        float = 0.003    # !仮置き 活性炭粒径 [m] (3mm 成形炭)
     sphericity:   float = 0.9      # !仮置き 形状係数 [-]
     mu_gas_pa_s:  float = 1.0e-5   # !仮置き H2 リッチガス混合粘度 [Pa·s] (25°C)
-    dP_max_bar:   float = 0.3      # !仮置き 床 ΔP 上限 [bar] (レビュー目安 0.1-0.3)。超過で infeasible 化
+    dP_max_bar:   float = 0.3      # !仮置き 床 ΔP 上限 [bar] (目安 0.1-0.3)。超過で infeasible 化
 
 
 # ---------------------------------------------------------------------------
@@ -286,9 +286,7 @@ class PSAEquipmentData:
     H2_loss_purge_kmolh:           float = float('nan')  # パージ損失 [kmol/h]
     # 吸着材交換 OPEX !仮置き (ADSORBENT_LIFETIME_YEARS に依存)
     OPEX_adsorbent_okuyen_per_year: float = float('nan')  # 吸着材年間交換費 [億円/年]
-    # ---- penalty 診断 (2026-05-21 追加、BO の TPE constraints_func 用) ----
-    # 設計判断: silent _penalty_result() 経路が BO に「方向のシグナル」を渡せず
-    # 全 trial が無方向で死ぬ問題を解消するための診断フィールド。
+    # ---- penalty 診断 (BO の TPE constraints_func 用) ----
     # penalty 発火時に「どの条件で死んだか」「actual 値」を保持し、run_one_pass が
     # log10(MIN/actual) 等の連続 shortfall を計算して TPE に渡せるようにする。
     # 通常完走時は penalty_reason='' のままで識別する (CAPEX_total < threshold で判定)。
@@ -333,11 +331,8 @@ def _penalty_result(
     u_0_actual : float
         実空塔速度 [m/s]。u_0_above_max 経路でのみ意味を持つ。
 
-    設計判断 (2026-05-21): 旧版は引数なしの silent penalty で、BO は「どこを突けば
-    feasible に出るか」のシグナルを得られず stuck していた (main_20260521_131507
-    で 300/300 trial 全滅)。本版は理由ラベル + 実値を equipment に格納して
-    run_one_pass で psa_t_abs_shortfall を計算 → TPE constraints_func で
-    「t_abs MIN への接近度」を学習させる。
+    理由ラベル + 実値を equipment に格納して run_one_pass で psa_t_abs_shortfall を
+    計算 → TPE constraints_func で「t_abs MIN への接近度」を学習させる。
     """
     zero = {k: 0.0 for k in ['A', 'B', 'C', 'D', 'E', 'F']}
     eq = PSAEquipmentData(
@@ -625,10 +620,10 @@ def simulate_psa_system(
         )
         return _penalty_result(reason='u_0_above_max', u_0_actual=u_0)
 
-    # ---- 床圧力損失 (Ergun) チェック (2026-05-31 PSA設計レビュー対応) ----
-    # 設計判断: u_0 上限 (_U0_MAX=1.0m/s) は ODE 安定の数値ガードに留め，実機の現実的な
-    #   空塔速度は床 ΔP の物理制約で縛る (高 u_0 / 長床 / 小粒径 ほど ΔP 増)。閾値超過で
-    #   infeasible 化し，run_one_pass で psa_dp_shortfall を連続シグナル化 (反応器 ΔP と同型)。
+    # ---- 床圧力損失 (Ergun) チェック ----
+    # u_0 上限 (_U0_MAX=1.0m/s) は ODE 安定の数値ガードに留め，実機の現実的な空塔速度は
+    #   床 ΔP の物理制約で縛る (高 u_0 / 長床 / 小粒径 ほど ΔP 増)。閾値超過で infeasible 化し，
+    #   run_one_pass で psa_dp_shortfall を連続シグナル化 (反応器 ΔP と同型)。
     C_total = feed.P_in / (Z * R * fixed.T_abs)                  # [mol/m³] 全濃度
     F_eos = {k: feed.F_in.get(k, 0.0) for k in _EOS_KEYS}
     Ftot_eos = sum(F_eos.values())
@@ -663,9 +658,9 @@ def simulate_psa_system(
     a_lang = np.array([PSA_LANGMUIR_PARAMS[k]['a']   for k in _ADS_ORDER])  # [m³/mol]
     kfa    = np.array([PSA_KFA[k]                    for k in _ADS_ORDER])  # [1/s]
 
-    # 吸着材データ感度 (2026-05-31 PSA設計レビュー対応): q_s/a/KFa/ρ_b を env で上書き可
-    #   (既定 1.0 = 挙動不変)。Langmuir 定数・KFa・嵩密度はいずれも !仮置き でベンダーデータ未確定の
-    #   ため，exp/exp_psa_sensitivity.py で係数を振って塔数・H2 回収率・TAC の頑健性を評価する。
+    # 吸着材データ感度: q_s/a/KFa/ρ_b を env で上書き可 (既定 1.0 = 挙動不変)。
+    #   Langmuir 定数・KFa・嵩密度はいずれも !仮置き でベンダーデータ未確定のため，
+    #   exp/exp_psa_sensitivity.py で係数を振って塔数・H2 回収率・TAC の頑健性を評価する。
     q_s    = q_s    * float(os.environ.get('PDH_PSA_QS_FACTOR',  '1.0'))
     a_lang = a_lang * float(os.environ.get('PDH_PSA_A_FACTOR',   '1.0'))
     kfa    = kfa    * float(os.environ.get('PDH_PSA_KFA_FACTOR', '1.0'))
@@ -679,10 +674,9 @@ def simulate_psa_system(
         q_star_CH4     = q_s[0] * a_lang[0] * C_feed_ads[0] / denom_css
         scaling_ratio  = (rho_b_eff / fixed.eps) * (q_star_CH4 / C_feed_ads[0])
         if scaling_ratio < 10.0:
-            # 設計判断 (2026-05-18): CSS 近似の妥当性が低下した状態でも計算は続行する
-            # (penalty 化は U-決のため一旦警告強化のみ)。t_abs が線形スケーリングから
-            # 乖離するため、N_total_columns が過小評価され CAPEX が偽の最小値に
-            # なる可能性が高い。BO 最適解がこの領域に偏ったら U-決で penalty 化要。
+            # CSS 近似の妥当性が低下した状態でも計算は続行する (警告のみ)。t_abs が線形
+            # スケーリングから乖離するため、N_total_columns が過小評価され CAPEX が偽の
+            # 最小値になる可能性が高い。BO 最適解がこの領域に偏ったら penalty 化を検討。
             warnings.warn(
                 f"CSSスケーリング精度低下リスク: scaling_ratio={scaling_ratio:.1f} < 10.0"
                 f" (D_col={D_col:.2f}m, L_bed={L_bed:.2f}m, P_in={feed.P_in/1e5:.2f}bar,"
@@ -723,8 +717,7 @@ def simulate_psa_system(
 
     # CSS補正後 t_abs が極小の場合: scale 発散防止のためペナルティを返す
     if t_abs < _T_ABS_MIN:
-        # 設計判断 (2026-05-21): 旧版は silent return で BO が「どこへ逃げれば良いか」
-        # 学習できなかった。warning + 連続 shortfall (run_one_pass で計算) で TPE に
+        # warning + 連続 shortfall (run_one_pass で計算) で TPE に
         # 「あと何倍 L/D を増やせば feasible に出るか」のシグナルを渡す。
         warnings.warn(
             f"PSA penalty: t_abs={t_abs:.1f}s (CSS 補正後) < _T_ABS_MIN={_T_ABS_MIN}s"
@@ -749,17 +742,9 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 4. 脱着時間
     # -------------------------------------------------------------------------
-    # PSAレビュー #3 (2026-06-01): 脱着時間は「CSS 補正後 t_abs 時点」の空間平均負荷で計算する。
-    #   旧実装は清浄床破過時刻 t_abs_clean の負荷 (q_final) を使っており、サイクルで使う
-    #   t_abs と参照時刻が不一致だった。t_abs における空間平均負荷を時系列から線形補間する
-    #   (use_css_approximation=False のとき t_abs=t_abs_clean=sol_t[-1] なので従来と一致)。
-    # ── 影響検証の記録 ──────────────────────────────────────────────────
-    #   本修正の前後を独立スモーク(C_feed=[43,~0,38] mol/m³, u_0=0.3, L_bed=5m,
-    #   Langmuir/KFa は本モデル値)で比較した結果、t_des の差は β=0.20/0.35/0.50 で
-    #   約 +1〜5%(147→149, 93→97, 61→64 s)、必要塔数 N_total の差は +1〜2 基に留まった。
-    #   方向は q(t_abs) の方が t_des がわずかに長く=塔数やや多め(より保守側)。すなわち
-    #   本修正は参照時刻の整合をとる低リスク・低影響の改善であることを確認した。
-    # ───────────────────────────────────────────────────────────────────
+    # 脱着時間は「CSS 補正後 t_abs 時点」の空間平均負荷で計算する。サイクルで使う t_abs と
+    #   参照時刻を一致させるため、t_abs における空間平均負荷を時系列から線形補間する
+    #   (use_css_approximation=False のとき t_abs=t_abs_clean=sol_t[-1] なので清浄床負荷と一致)。
     q_avg = np.array([float(np.interp(t_abs, sol_t, q_avg_t[i])) for i in range(_N_ADS)])
     t_des_raw = _calc_desorption_time(q_avg, kfa, design.desorption_target)
     # 安全係数: KFa が仮置き値であり推算誤差が大きいため設計マージンを確保する
@@ -768,7 +753,7 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 5. サイクル構成・塔数
     # -------------------------------------------------------------------------
-    # 設計判断 (2026-05-09): N_abs_parallel = 1 で固定 (= 2塔最小スイング構成)。
+    # N_abs_parallel = 1 で固定 (= 2塔最小スイング構成)。
     # 理由: 本実装は cycle 内の均圧・再加圧ステップを陽にモデル化していないため、
     #       塔数を増やしても H2 回収率や CAPEX/塔は変わらず、単に CAPEX が線形増加
     #       するだけ。BO の最適化変数に昇格させると自明に最小値が選ばれて探索予算
@@ -905,11 +890,11 @@ def simulate_psa_system(
     # -------------------------------------------------------------------------
     # 8. CAPEX
     # -------------------------------------------------------------------------
-    # 設計判断 (2026-05-31 PSA設計レビュー対応): PSA 塔体は calc_reactor_capex_okuyen を流用する
-    #   が，同関数は内部で K_SWING=1.2 を乗じる。PSA は圧力スイング操作で高速切替バルブ・均圧/
-    #   パージライン・マニホールドを要するため，この 1.2 を「PSA パッケージ係数」(バルブ・配管・
-    #   制御系の上乗せ) として再解釈し，そのまま採用する。新たな係数を別途掛けると二重計上になる
-    #   ため掛けない。実機詳細設計ではベンダーのパッケージ見積りで更新すること。
+    # PSA 塔体は calc_reactor_capex_okuyen を流用するが，同関数は内部で K_SWING=1.2 を乗じる。
+    #   PSA は圧力スイング操作で高速切替バルブ・均圧/パージライン・マニホールドを要するため，
+    #   この 1.2 を「PSA パッケージ係数」(バルブ・配管・制御系の上乗せ) として再解釈し，そのまま
+    #   採用する。新たな係数を別途掛けると二重計上になるため掛けない。実機詳細設計ではベンダーの
+    #   パッケージ見積りで更新すること。
     capex_vessels = calc_reactor_capex_okuyen(
         V_col, feed.P_in, D_col, N_total_columns
     )

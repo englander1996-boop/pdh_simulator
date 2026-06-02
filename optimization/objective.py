@@ -65,7 +65,7 @@ def make_objective(
     _schedule = penalty_schedule if penalty_schedule is not None else default_schedule
 
     def objective(trial) -> float:
-        # 設計判断 (2026-05-21): trial 開始時に penalty scale を更新。
+        # trial 開始時に penalty scale を更新する (adaptive penalty schedule)。
         # 序盤 (0-30%): scale=0.3 で探索広げる
         # 中盤 (30-70%): scale=1.0 標準
         # 終盤 (70-100%): scale=3.0 で infeas 強制退出
@@ -97,9 +97,8 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
     """Trial.user_attrs に診断情報を格納。Reporting で CSV カラムとして抽出できる。"""
     trial.set_user_attr('failure_reason', result.failure_reason)
     trial.set_user_attr('is_feasible', result.is_feasible)
-    # 設計判断 (2026-05-22 L1 観測強化): failure_unit (categorical) を保存。
-    # callbacks.py が live 表示・tally に使う。CSV groupby 用にも便利。
-    # 値の定義は flowsheet/runner.py の FlowsheetResult 内コメント参照。
+    # failure_unit (categorical) を保存。callbacks.py が live 表示・tally に使う。
+    # CSV groupby 用にも便利。値の定義は flowsheet/runner.py の FlowsheetResult 内コメント参照。
     fu = getattr(result, 'failure_unit', '') or ''
     if fu:
         trial.set_user_attr('failure_unit', fu)
@@ -125,12 +124,9 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         trial.set_user_attr('h2_purity_molfrac',  result.specs.h2_purity_molfrac)
         trial.set_user_attr('production_kmol_h',  result.specs.production_kmol_h)
         trial.set_user_attr('target_kmol_h',      result.specs.target_kmol_h)
-        # 設計判断 (2026-05-21): production violation の方向を TPE に伝える。
-        # 旧版は production_violation_pp 単一値で under/over を区別できず、TPE が
-        # F_fresh を上下どちらに動かせば良いか学べなかった (main_20260521_160951
-        # でソフト fail 6 件中 3 件 over・3 件 under の混在で TPE 混乱)。
-        # 別シグナルで提供することで TPE が「under は F_fresh ↑」「over は F_fresh ↓」
-        # を独立に学習可能になる。
+        # production violation の方向を TPE に伝える。under/over を別シグナルで提供する
+        # ことで、TPE が「under は F_fresh ↑」「over は F_fresh ↓」を独立に学習できる
+        # (単一値では up/down どちらに動かすべきか学べない)。
         trial.set_user_attr('production_direction', result.specs.production_direction)
         if result.specs.production_under_pp > 0:
             trial.set_user_attr('production_under_pp', float(result.specs.production_under_pp))
@@ -151,12 +147,12 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
         if total_proxy > 0:
             trial.set_user_attr('proxy_penalty_total_okuyen', total_proxy)
 
-        # 設計判断 (2026-05-20): 蒸留塔 infeasibility の連続シグナルを user_attrs に格納。
-        # run_one_pass の _build_penalty_after_column が dist{1,2,3}_{N,dT}_shortfall を
-        # 一括計算済み。constraints_func (study.py) でこれを TPE に渡す。
-        # 正常完走時は 0.0、infeasible 時は連続値 (FUG: N 不足比、Rigorous: log(dT/tol))。
+        # 蒸留塔 infeasibility の連続シグナルを user_attrs に格納。run_one_pass の
+        # _build_penalty_after_column が dist{1,2,3}_{N,dT}_shortfall を一括計算済み。
+        # constraints_func (study.py) でこれを TPE に渡す。正常完走時は 0.0、infeasible
+        # 時は連続値 (FUG: N 不足比、Rigorous: log(dT/tol))。
         op = result.solver.one_pass
-        # 'cond' = HYSYS Dist2 cold-top (凝縮器ΔT不成立) の連続シグナル (2026-05-28 追加)。
+        # 'cond' = HYSYS Dist2 cold-top (凝縮器ΔT不成立) の連続シグナル。
         for col_idx in ('1', '2', '3'):
             for kind in ('N', 'dT', 'cond'):
                 key = f'dist{col_idx}_{kind}_shortfall'
@@ -164,53 +160,47 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
                 if v > 0:
                     trial.set_user_attr(key, float(v))
 
-        # 設計判断 (2026-05-21): PSA silent penalty 経路の連続シグナル。
-        # psa_system.py で _T_ABS_MIN/_U0_MAX 等を理由ラベル付きで返す改修と対応。
-        # run_one_pass._compute_psa_shortfall が以下 3 キーを一括計算済み。
+        # PSA silent penalty 経路の連続シグナル。psa_system.py が _T_ABS_MIN/_U0_MAX 等を
+        # 理由ラベル付きで返し、run_one_pass._compute_psa_shortfall がキーを一括計算済み。
         for psa_key in ('psa_t_abs_shortfall', 'psa_u_0_shortfall', 'psa_feed_shortfall', 'psa_dp_shortfall'):
             v = op.get(psa_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(psa_key, float(v))
 
-        # 設計判断 (2026-05-21): Reactor SV silent penalty も同パターンで連続シグナル化。
-        # swing.py の SV 範囲外チェックで penalty_reason='sv_out_of_range' を埋め、
-        # run_one_pass._compute_reactor_shortfall が log10 比で reactor_sv_shortfall を生成。
+        # Reactor SV silent penalty も同パターンで連続シグナル化。swing.py の SV 範囲外
+        # チェックで penalty_reason='sv_out_of_range' を埋め、run_one_pass._compute_reactor_shortfall
+        # が log10 比で reactor_sv_shortfall を生成。
         for rx_key in ('reactor_sv_shortfall', 'reactor_dp_shortfall', 'reactor_other_shortfall'):
             v = op.get(rx_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(rx_key, float(v))
 
-        # 設計判断 (2026-05-22): Mem silent penalty 経路を連続シグナル化。
-        # membrane_system.py の 16 個の _penalty_result() に penalty_reason ラベルを付け、
-        # run_one_pass._compute_mem_shortfall が ph/bp/phase/other の 4 種に分類。
-        # 旧 BO ログ (main_20260522_005631) では 240/300 trial が無方向で死んでおり、
-        # うち 176 件は shortfall attr が一切無い完全 silent だった。本シグナルで
-        # 「P_H 不足」「Dist3 圧力不足」「Dist2 圧力過大 (露点高)」を独立に学習可能化。
+        # Mem silent penalty 経路を連続シグナル化。membrane_system.py の _penalty_result()
+        # に penalty_reason ラベルを付け、run_one_pass._compute_mem_shortfall が
+        # ph/bp/phase/other の 4 種に分類。これにより「P_H 不足」「Dist3 圧力不足」
+        # 「Dist2 圧力過大 (露点高)」を独立に学習可能化する。
         for mem_key in ('mem_ph_shortfall', 'mem_bp_shortfall',
                         'mem_phase_shortfall', 'mem_other_shortfall'):
             v = op.get(mem_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(mem_key, float(v))
 
-        # 設計判断 (2026-05-22 改良 2): trace_bypass の excess を連続シグナル化。
-        # main_20260522_094436 で TPE が trace bypass borderline (TAC=1028 等) に
-        # 16 trial 中 8 件はまり込んだ → user_attr に出してなくて binary 「is_feasible=False」
-        # としてしか TPE が認識できなかった。connect to constraints_func で TPE が
-        # 「あとどれだけ漏れを減らせば良いか」の連続勾配を持てるように。
+        # trace_bypass の excess を連続シグナル化。binary な is_feasible=False だけでは
+        # TPE が trace bypass borderline に滞留するため、constraints_func 経由で
+        # 「あとどれだけ漏れを減らせば良いか」の連続勾配を持たせる。
         # 単位: 閾値 (=1%) 超過分の fraction (例: 0.013 = 1.3pp 超過 = 0.3pp over)
         for tb_key in ('trace_bypass_psa_excess', 'trace_bypass_mem_excess'):
             v = op.get(tb_key, 0.0) or 0.0
             if v > 0:
                 trial.set_user_attr(tb_key, float(v))
 
-        # 設計判断 (2026-05-22 L1 観測強化): 装置別の penalty_reason (categorical 文字列) と
-        # key actual 値を user_attr に保存。failure_unit (= "どの装置で詰まったか") に対し、
-        # こちらは「その装置内のどのラベルか」「実値はいくつか」のサブ情報。
-        # 例: failure_unit='r_mem' に対し mem_penalty_reason='bp_le_cold_out',
-        # mem_T_bp_perm_actual_K=305.2, mem_T_cold_out_actual_K=313.0。
-        # callbacks.py が「Mem.bp_le_cold_out (T_bp=305<313)」のような live 表示に使う。
-        # run_one_pass の _extract_unit_diagnostics が one_pass dict に書き込み済み。
-        # 0 / '' は default 値なので保存スキップ (CSV を肥大化させない)。
+        # 装置別の penalty_reason (categorical 文字列) と key actual 値を user_attr に保存。
+        # failure_unit (= "どの装置で詰まったか") に対し、こちらは「その装置内のどのラベルか」
+        # 「実値はいくつか」のサブ情報。例: failure_unit='r_mem' に対し
+        # mem_penalty_reason='bp_le_cold_out', mem_T_bp_perm_actual_K=305.2,
+        # mem_T_cold_out_actual_K=313.0。callbacks.py が「Mem.bp_le_cold_out (T_bp=305<313)」
+        # のような live 表示に使う。run_one_pass の _extract_unit_diagnostics が one_pass dict
+        # に書き込み済み。0 / '' は default 値なので保存スキップ (CSV を肥大化させない)。
         # str 系
         for str_key in ('first_failed_unit',
                         'reactor_penalty_reason', 'psa_penalty_reason', 'mem_penalty_reason',
@@ -233,10 +223,9 @@ def _store_diagnostics(trial, result: FlowsheetResult) -> None:
             if v > 0:
                 trial.set_user_attr(num_key, float(v))
 
-    # 設計判断 (2026-05-22 L1 観測強化): warning ソース別カウント。
-    # run_one_pass が _capture_warnings 経由で全 warning を集約済み (silent fallback
-    # 検出用)。1 trial の warning 総数 + source 別カウントを保存し、「Dist2 で
-    # 5 warning が出てる trial が増えている」のようなパターンを CSV で追える形に。
+    # warning ソース別カウント。run_one_pass が _capture_warnings 経由で全 warning を
+    # 集約済み (silent fallback 検出用)。1 trial の warning 総数 + source 別カウントを保存し、
+    # 「Dist2 で 5 warning が出てる trial が増えている」のようなパターンを CSV で追える形に。
     wc = result.warnings_captured or []
     if wc:
         trial.set_user_attr('warnings_count_total', len(wc))

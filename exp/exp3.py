@@ -2,17 +2,13 @@ r"""
 exp3.py — リサイクルあり PDH プロセス全体フロー シミュレーション (HYSYS + SM バックエンド)
 
 exp1.py の HYSYS 版。蒸留塔は塔ごとにバックエンドを選択:
-  - Dist1 / Dist3 : SM (学習済み GPR サロゲート、2026-05-25 導入)。HYSYS 解とほぼ一致を検証済み。
+  - Dist1 / Dist3 : SM (学習済み GPR サロゲート)。HYSYS 解とほぼ一致を検証済み。
   - Dist2         : HYSYS COM (SM 化できなかったため HYSYS 継続)。
 それ以外 (反応器・PSA・膜・リサイクル合流) は exp1 と同じく既存実装で動かす。
+  SM 化で HYSYS 塔が Dist2 のみになり、Dist2 は開きっぱなしで warm 再解になるが、
+  force-cold (PDH_HYSYS_FORCE_COLD=1) 版と結果完全一致で経路依存なし。
 
-高速化の経緯 (2026-05-25):
-  290s (全塔 HYSYS) → 159s (Dist1 メモ化 + swap_case sleep 短縮) → 26s (Dist1/Dist3 SM 化)。
-  SM 化で HYSYS 塔が Dist2 のみになり HSC swap が消滅。Dist2 は開きっぱなしで warm 再解に
-  なるが、force-cold (PDH_HYSYS_FORCE_COLD=1) 版と結果完全一致で経路依存なしを実証済み。
-
-設計判断 (2026-05-22):
-  HYSYS の探索変数は exp1 (FUG/rigorous) と異なる:
+HYSYS の探索変数は exp1 (FUG/rigorous) と異なる:
     - exp1   : ColumnTunables.reflux_ratio / recovery_LK_top / recovery_HK_bot
     - exp3   : ColumnTunables.hysys_spec_value (column1=Comp Fraction-2,
                                                 column2=Reflux Ratio,
@@ -32,8 +28,8 @@ exp1.py の HYSYS 版。蒸留塔は塔ごとにバックエンドを選択:
 import os
 import sys
 
-# 設計判断 (2026-05-22): HYSYS は 1 塔あたり ~15秒、3塔 × リサイクル iter で
-# 既定の 60s 予算では 2 iter で打ち切られる。HYSYS バックエンド向けに 30分予算に拡大。
+# HYSYS は 1 塔あたり ~15秒、3塔 × リサイクル iter で 60s 予算では 2 iter で打ち切られる。
+# HYSYS バックエンド向けに 30分予算に拡大。
 os.environ.setdefault('PDH_TRIAL_TIME_BUDGET_SEC', '1800')
 os.environ.setdefault('PDH_PER_UNIT_LOG', '1')   # 各 iter で penalty 発火ユニットを stderr へ
 
@@ -59,15 +55,13 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 #  実験で振る設計変数 (ここを書き換えて再実行)
 # ===========================================================================
 
-# 設計判断 (2026-06-01): main.py (HYSYS+SM 全22変数 BO, 反応器=radial) の BO best =
-#   trial #194 の最適化済み 22 変数をそのまま投入。
+# main.py (HYSYS+SM 全22変数 BO, 反応器=radial) の BO best の最適化済み 22 変数をそのまま投入。
 #   出典 outputs/main_20260601_150117/best.json
 #   (BO 記録 effective_TAC=1056.26 億円/年、feasible=True、
 #    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈78.4%)。
-#   ユーザーが exp3 でフル詳細出力を見て手動検証するため。旧テンプレ値 (special #294
-#   系、軸流 SwingDesign) は git 履歴で復元可能。
-# 注意1: main は反応器=径方向流 (radial)。exp3 も SwingDesign → RadialDesignVars に
-#   変更し、反応器変数を (T_in, t_cyc, D_inner, bed_thickness, H) に差し替えた。
+#   exp3 でフル詳細出力を見て手動検証するため。
+# 注意1: main は反応器=径方向流 (radial)。exp3 も RadialDesignVars を使い、
+#   反応器変数を (T_in, t_cyc, D_inner, bed_thickness, H) とする。
 # 注意2: main では col2/col3 の feed を「比率」で suggest し _feed_stage_from_ratio で
 #   絶対段に変換している。exp3 は絶対段を直接指定するため、変換後の値を記載:
 #     Dist2: feed_ratio 0.404858 × N76 → FEED_STAGE_dist2 = 31  (clamp[2,74])
@@ -117,9 +111,9 @@ F_C3H8_fresh_kmol_h = 1523.2706
 #  HI オプション (exp1 と同じ)
 # ===========================================================================
 APPLY_HI     = True
-# 設計判断 (2026-05-29 ユーザー決定): Stage2(HEN greedy) を外し HI(targeting) のみで評価。
-# 理由は main.py の同コメント参照: HI(=Q_H_min/Q_C_min=MER) が OPEX 本体を正確に捉え、Stage2 が
-# 足す回収網 CAPEX は ΔTmin 固定では ~一定オフセットで実害小。exp3 を main と同基準に揃える。
+# Stage2(HEN greedy) を外し HI(targeting) のみで評価。HI(=Q_H_min/Q_C_min=MER) が OPEX 本体を
+# 正確に捉え、Stage2 が足す回収網 CAPEX は ΔTmin 固定では ~一定オフセットで実害小。
+# exp3 を main と同基準に揃える (詳細は main.py の同コメント参照)。
 APPLY_STAGE2 = False
 HI_DT_MIN_K  = 10.0
 
@@ -153,8 +147,7 @@ design = FlowsheetDesignVars(
         P_col=P_dist1_kPa * 1000.0,
         N_stages=N_dist1, N_feed=1,
         reflux_ratio=2.0,                       # dummy (SM/HYSYS 経路では未使用)
-        # 設計判断 (2026-05-25): Dist1 を SM (学習済み GPR) に置換。
-        # In_CompFraction2 = hysys_spec_value を流用。HYSYS 解とほぼ完全一致を検証済み。
+        # Dist1 = SM (学習済み GPR)。In_CompFraction2 = hysys_spec_value を流用。
         solver_method='sm',
         hysys_spec_value=COMP_FRAC_2_dist1,
         hysys_feed_stage=FEED_STAGE_dist1,
@@ -171,13 +164,11 @@ design = FlowsheetDesignVars(
         P_col=P_dist3_kPa * 1000.0,
         N_stages=N_dist3, N_feed=1,
         reflux_ratio=12.0,                      # dummy
-        # 設計判断 (2026-05-25): Dist3 を SM (学習済み GPR) に置換 (速度の本命)。
-        # model3 は spec 入力なし → 分配(回収率)は SM 予測をそのまま設計値として採用
-        # (ユーザー決定)。製品純度 99.5% は満たす。hysys_spec_value は SM では未使用。
+        # Dist3 = SM (学習済み GPR)。model3 は spec 入力なし → 分配(回収率)は SM 予測をそのまま
+        # 設計値として採用。製品純度 99.5% は満たす。hysys_spec_value は SM では未使用。
         solver_method='sm',
-        # 設計判断 (2026-05-22): adapter で 0-1 範囲なら recovery_LK_top (動的 Draw Rate
-        # 計算)、1.0 超なら絶対量 (kgmol/s) として扱う。
-        # DRAW_RATE_dist3_kmolh が 0.99 (純度モード) なら /3600 せずそのまま渡す。
+        # adapter は 0-1 範囲なら recovery_LK_top (動的 Draw Rate 計算)、1.0 超なら絶対量 (kgmol/s)
+        # として扱う。DRAW_RATE_dist3_kmolh が 0.99 (純度モード) なら /3600 せずそのまま渡す。
         hysys_spec_value=(DRAW_RATE_dist3_kmolh
                           if 0 < DRAW_RATE_dist3_kmolh <= 1.0
                           else DRAW_RATE_dist3_kmolh / 3600.0),
@@ -189,14 +180,10 @@ design = FlowsheetDesignVars(
 # ===========================================================================
 #  実行 + 結果表示 (exp1 と共通の run_exp ラッパ)
 # ===========================================================================
-#  設計判断 (2026-05-25): Wegstein 減衰 (q_min=-5→-2) も検討したが、振動抑制で
-#  反復は 10→9 に減るものの収束経路が変わり 1% 許容球内の別点に着地して結果が
-#  わずかに動く (生産量 1248→1258) 割に効果が限定的だった。結果中立な高速化
-#  (Dist1 メモ化 + swap_case 待ち時間削減) を優先し、減衰は不採用とした。
 import dataclasses as _dc
 config = load_operating_config()
-# 決定A (2026-05-25): SM Dist3 は 99.5 mol%=99.497 wt% 固定。mol↔wt 差 0.003pp を吸収するため
-# purity 閾値を 99.45 wt% に緩和 (main.py:253 と同一。BO と exp3 の feasible 判定を揃える)。
+# SM Dist3 は 99.5 mol%=99.497 wt% 固定。mol↔wt 差 0.003pp を吸収するため purity 閾値を
+# 99.45 wt% に緩和 (main.py と同一。BO と exp3 の feasible 判定を揃える)。
 # これがないと exp3 だけ 0.995 で判定し、99.497 wt% が ✗ になって BO 結果と食い違う。
 config = _dc.replace(config, spec=_dc.replace(config.spec, c3h6_min_wtfrac=0.9945))
 

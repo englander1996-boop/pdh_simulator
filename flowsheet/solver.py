@@ -8,12 +8,9 @@ solver.py 1 ファイルに閉じ込めている。
 設計NG (PSA/Mem CAPEX ペナルティ, リサイクル暴走) は SystemExit せず
 SolverResult に状態として返す。最適化器側で penalty として扱えるようにするため。
 
-設計判断 (2026-05-08, 相談時の合意):
-  - 内側 TOL: 絶対値 → 相対値。スケール独立にしてノイズ追跡を回避。
-    実測で内側 200 反復のうち後半 120 反復が ノイズ追跡だった。相対 0.1% に
-    緩めて反復数を 1/3 〜 1/4 に短縮する見込み。
-  - 外側 TOL: 両側絶対 → 片側相対。contest 仕様は「target 以上」で overshoot OK。
-    片側化で外側反復を 4回 → 2-3 回に短縮見込み。
+設計方針:
+  - 内側 TOL: 相対値を使う。スケール独立にしてノイズ追跡を回避。
+  - 外側 TOL: 片側相対。contest 仕様は「target 以上」で overshoot OK。
   - solver は流量の収束だけ判定し、製品品質 (純度) は flowsheet/specs.py で
     独立に評価する。
 """
@@ -131,13 +128,13 @@ def run_recycle_convergence(
             T_mem     =init.T_mem,
         )
 
-    # 設計判断: 加速法は config/operating.toml で選択 (Wegstein 推奨)。
-    # 設計判断 (2026-05-27): env PDH_RECYCLE_ACCEL で上書き可 (ベンチ用、'anderson' 等)。
+    # 加速法は config/operating.toml で選択 (Wegstein 推奨)。
+    # env PDH_RECYCLE_ACCEL で上書き可 (ベンチ用、'anderson' 等)。
     # 内部状態 (履歴) を持つため、新しい外側 iter ごとに reset() する必要がある。
     import os as _os_accel
     accelerator = make_accelerator(_os_accel.environ.get('PDH_RECYCLE_ACCEL', s.method), s)
     accelerator.reset()
-    # 設計判断 (2026-05-27): env PDH_RECYCLE_TOL で recycle 相対許容を上書き可 (ベンチ用)。
+    # env PDH_RECYCLE_TOL で recycle 相対許容を上書き可 (ベンチ用)。
     _tol_rel = float(_os_accel.environ.get('PDH_RECYCLE_TOL', s.tol_relative))
 
     if verbose:
@@ -155,10 +152,9 @@ def run_recycle_convergence(
     diff        = 0.0
     it          = 0
 
-    # 設計判断 (2026-05-21): per-trial time budget。BO ログ分析で「production_short
-    # で 7 trial が 5h (run 全体の 80%) を占有」が判明。原因は rigorous Dist2 が重く、
-    # max_iter=100 まで recycle iter が回って production 未達で終わるケース。
-    # 60s で early abort して BO に「この領域は too slow = avoid」を伝える方が効率良い。
+    # per-trial time budget。rigorous Dist2 が重く max_iter まで recycle iter が
+    # 回って production 未達で終わるケースを、early abort して BO に
+    # 「この領域は too slow = avoid」を伝える方が効率良い。
     import os, time
     _TIME_BUDGET_SEC = float(os.environ.get('PDH_TRIAL_TIME_BUDGET_SEC', '60'))
     _t_iter_start = time.time()
@@ -176,7 +172,7 @@ def run_recycle_convergence(
                     'r1', design,
                     fresh=None, pump1=None, r1=None,
                 )
-            # 観測ラベル (2026-05-22): timeout は r1 失敗ではないので上書き。
+            # 観測ラベル: timeout は r1 失敗ではないので上書き。
             # _build_penalty_after_column はキー名から 'r1' を入れてしまうため。
             if isinstance(results, dict):
                 results['first_failed_unit'] = 'timeout'
@@ -190,7 +186,6 @@ def run_recycle_convergence(
 
         # 蒸留塔 (r1/r2/r3) の CAPEX も sentinel 値 (_PENALTY=1e9) を取り得る:
         # FUG Gilliland infeasible や Wang-Henke 収束失敗で _penalty_result が返ったとき。
-        # 2026-05-20 追加: run_one_pass 側で塔 penalty 早期検出を入れたため、ここで
         # 塔 CAPEX を penalty_hit に含めると Dist3-only 失敗 (PSA/Mem は正常) でも
         # 正しく solver-level failure として扱える。
         def _col_capex(key: str) -> float:
@@ -202,16 +197,14 @@ def run_recycle_convergence(
             _col_capex('r1') >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
             _col_capex('r2') >= PENALTY_CAPEX_THRESHOLD_OKUYEN or
             _col_capex('r3') >= PENALTY_CAPEX_THRESHOLD_OKUYEN):
-            # 設計判断 (2026-05-17): swing reactor の SV check 違反等で
-            # Reactor_CAPEX = 1e9 (_PENALTY_CAPEX) になるケースも penalty_hit と扱う。
-            # 旧版は PSA/Mem のみ check していたため、reactor 起因 penalty が下流の
-            # compressor で「P_in=0」例外を引き起こしてた。
+            # swing reactor の SV check 違反等で Reactor_CAPEX = 1e9 (_PENALTY_CAPEX)
+            # になるケースも penalty_hit と扱う (下流 compressor の「P_in=0」例外回避)。
             if verbose:
                 print(f"  {it:4d} | --- Reactor/PSA/Mem/Dist ペナルティ発火 → 設計変数の見直しが必要 ---")
             penalty_hit = True
             break
 
-        # 設計判断: 相対 TOL 計算で小流量に対し過度に厳しくならないよう floor を入れる。
+        # 相対 TOL 計算で小流量に対し過度に厳しくならないよう floor を入れる。
         #   denominator = max(|tear|, tol_floor_kmol_h)
         # tear=7500 → floor 効かず通常の相対精度、tear=30 → floor が効いて緩める。
         floor = s.tol_floor_kmol_h
@@ -247,7 +240,7 @@ def run_recycle_convergence(
                 print(f"  → 内側収束 (Δ_rel={diff*100:.4f}% < TOL_rel={_tol_rel*100:.3f}%)")
             break
 
-        # 設計判断: TearAccelerator (SS or Wegstein) に次反復の更新を委譲。
+        # TearAccelerator (SS or Wegstein) に次反復の更新を委譲。
         # state を flat dict にパックして渡し、結果を unpack して次の反復へ。
         flat_current  = _pack_state(state.tear_dist3,        state.tear_mem,
                                      state.T_d3,             state.T_mem)
@@ -259,7 +252,7 @@ def run_recycle_convergence(
     if verbose and not (converged or penalty_hit or guard_hit):
         print(f"  → 内側未収束 ({s.max_iter} 回打ち切り、最終状態で集計)")
 
-    # 設計判断 (2026-05-21): timeout_hit は penalty_hit に集約 (runner.py への伝達)。
+    # timeout_hit は penalty_hit に集約 (runner.py への伝達)。
     # 失敗理由は failure_reason 経由で別扱いするため、ここでは bool フラグだけ統合する。
     return results, InnerStatus(
         converged=converged, penalty_hit=(penalty_hit or timeout_hit),
@@ -324,9 +317,9 @@ def solve_flowsheet(
         if verbose:
             print(f"\n[F_fresh override] Fresh C3H8={F_C3H8_feed:.2f}, C4H10={F_C4H10_feed:.2f} "
                   f"kmol/h (外側ループ skip)")
-        # 設計判断 (2026-05-14): 初期 tear stream は yield_assumed=0.9 ベースの F_fresh
-        # (= target/0.9 ≈ 1320) で計算。実 F_fresh をそのまま scale すると、高い F_fresh
-        # で初期 tear が過大 → iter 1 で Mem A 過大 → PSA/Mem CAPEX ペナルティ発火。
+        # 初期 tear stream は yield_assumed ベースの F_fresh (= target/yield) で計算。
+        # 実 F_fresh をそのまま scale すると、高い F_fresh で初期 tear が過大 →
+        # iter 1 で Mem A 過大 → PSA/Mem CAPEX ペナルティ発火する。
         # 外側ループ初期化挙動と整合させるため、初期 tear は target ベースで固定 scale。
         F_C3H8_init_for_tear = target_kmol_h / f.yield_assumed
         init_tear = _initial_tear(F_C3H8_init_for_tear, config)
@@ -369,7 +362,7 @@ def solve_flowsheet(
         error           = actual_product - target_kmol_h
         effective_yield = actual_product / F_C3H8_feed if F_C3H8_feed > 0 else 0.0
 
-        # 設計判断: 片側収束基準。shortfall = max(0, target - actual)。
+        # 片側収束基準。shortfall = max(0, target - actual)。
         # overshoot は許容 (contest 仕様で「target 以上」のため)。
         # Fresh 調整ループは target に張り付く挙動なので、片側でも不必要な反復は
         # 起きず、undershoot 領域のみ厳密に潰すことになる。

@@ -7,7 +7,7 @@ BO 終了後の Optuna study から (params, is_feasible) を抽出し、Random 
   - 特徴量重要度ランキング
   - 2D 散布図 (上位 2 特徴量で feasible/infeasible を色分け)
 
-設計判断:
+方針:
   - スクリーニング先行 (L2) や制約付き BO (L3) の input として利用想定。
   - sklearn が未インストールでも import を遅延 (ImportError は呼び出し時)。
   - 「feasible」の定義は target_type で切替:
@@ -24,10 +24,9 @@ from typing import Dict, List, Optional, Tuple
 import optuna
 
 
-# 設計判断 (2026-05-18): SOLVER_FAILURE_THRESHOLD は config.penalty.solver_failure_okuyen
-# から導出する。閾値 = penalty 値 - 1.0 で「ペナルティ確定」値より僅かに小さい値を取り、
-# float 比較で取りこぼしを防ぐ。旧版は 9999 で hardcode していたが、operating.toml の
-# 値変更時に同期忘れリスクがあったため lazy load 化。
+# SOLVER_FAILURE_THRESHOLD は config.penalty.solver_failure_okuyen から導出する。
+# 閾値 = penalty 値 - 1.0 で「ペナルティ確定」値より僅かに小さい値を取り、float 比較で
+# 取りこぼしを防ぐ。operating.toml の値変更時の同期忘れを避けるため lazy load 化。
 def _get_solver_failure_threshold() -> float:
     """operating.toml の penalty.solver_failure_okuyen から閾値を計算する (lazy)。"""
     from config.load import load_operating_config

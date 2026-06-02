@@ -1,8 +1,8 @@
 """
 flowsheet.evaluate() を cProfile でプロファイリングし、関数別累積時間を出力する。
 
-設計判断 (2026-05-08): 収束高速化施策 (Wegstein, run_one_pass の分割キャッシュ等) を
-実装する前に「真のボトルネックがどこにあるか」を確認するためのツール。
+収束高速化施策 (Wegstein, run_one_pass の分割キャッシュ等) を検討する際に
+「真のボトルネックがどこにあるか」を確認するためのツール。
 ボトルネックが tear 反復 (= solver) でなく PSA/Mem の内部反復にあるなら、
 tear 法をどう変えても効かない。
 
@@ -10,7 +10,7 @@ tear 法をどう変えても効かない。
     python tools/profile_flowsheet.py
     python tools/profile_flowsheet.py --top 30 --output profile.txt
 
-設計変数は exp/exp1.py と同じ値を使う (リファクタ後の挙動を測定するため)。
+設計変数は exp/exp1.py と同じ値を使う。
 """
 
 import argparse
@@ -31,7 +31,7 @@ from units.separators.membrane.membrane_system import MemDesignVars
 
 
 def _exp1_design() -> FlowsheetDesignVars:
-    """exp/exp1.py の設計変数と同じ値。リファクタ前後の比較用に固定。"""
+    """exp/exp1.py の設計変数と同じ値 (固定)。"""
     return FlowsheetDesignVars(
         swing=SwingDesign(T_in=900.0, z_cat=15.0, t_cyc=15.0, D=5.0),
         psa  =PSADesignVars(D_col=3.0, L_bed=20.0, desorption_target=0.35),
