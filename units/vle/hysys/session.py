@@ -27,6 +27,7 @@ import datetime
 import os
 import threading
 import time
+import warnings
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -577,10 +578,23 @@ class HysysSession:
 
         try:
             self._app = win32.Dispatch("HYSYS.Application")
-            self._app.Visible = bool(self.visible)
         except Exception as e:
             self._safe_cleanup()
             raise HysysConnectionError(f"HYSYS 起動失敗: {e}") from e
+
+        # 設計判断 (2026-06-02): .Visible setter は一部 PC の Aspen HYSYS V14 で
+        # com_error 0xC00D271E ("例外が発生しました") を投げる (環境依存。家用 PC で
+        # 100% 再現、学校 PC では成功)。Dispatch / .Name / SimulationCases など他 API は
+        # その PC でも正常動作するので、HYSYS 自体は使える。COM automation は既定で
+        # headless 起動するため Visible 設定は計算に必須でない。よってここでの失敗は
+        # 致命扱いにせず警告に留め、セッションを継続する (旧版はこの 1 行で全評価が
+        # penalty 落ちしていた)。
+        try:
+            self._app.Visible = bool(self.visible)
+        except Exception as e:
+            warnings.warn(
+                f"HYSYS .Visible={self.visible} の設定に失敗 (無視して継続): {e}"
+            )
 
         if not self.hsc_path.exists():
             self._safe_cleanup()
