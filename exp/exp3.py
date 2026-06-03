@@ -56,58 +56,58 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # main.py (HYSYS+SM 全22変数 BO, 反応器=radial) の BO best の最適化済み 22 変数をそのまま投入。
-#   出典 outputs/main_20260601_150117/best.json
-#   (BO 記録 effective_TAC=1056.26 億円/年、feasible=True、
-#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈78.4%)。
+#   出典 outputs/main_20260602_211643/best.json
+#   (BO 記録 effective_TAC=1051.01 億円/年、feasible=True、
+#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈81.8%)。
 #   exp3 でフル詳細出力を見て手動検証するため。
 # 注意1: main は反応器=径方向流 (radial)。exp3 も RadialDesignVars を使い、
 #   反応器変数を (T_in, t_cyc, D_inner, bed_thickness, H) とする。
-# 注意2: main では col2/col3 の feed を「比率」で suggest し _feed_stage_from_ratio で
-#   絶対段に変換している。exp3 は絶対段を直接指定するため、変換後の値を記載:
-#     Dist2: feed_ratio 0.404858 × N76 → FEED_STAGE_dist2 = 31  (clamp[2,74])
-#     Dist3: feed_ratio 0.715645 × N126 → FEED_STAGE_dist3 = 90 (clamp[70,124])
+# 注意2: col2/col3 のフィード段は最適化変数ではない。最適化変数は「フィード比率」
+#   (col2_feed_ratio / col3_feed_ratio) であり、絶対段は _feed_stage_from_ratio で導出する。
+#   exp3 でも比率をそのまま入力し、main._build_design と同一の関数で絶対段へ変換する
+#   (手動変換による丸めずれを避ける)。col1 のみフィード段が直接の最適化変数。
 
 # === 反応器 (径方向流 Radial) ===================================================
-# 値は best.json (trial #194) のフル精度をそのまま転記する。
+# 値は best.json (trial #116) のフル精度をそのまま転記する。
 # リサイクル収束は TOL_rel=1% で打ち切るため入力を丸めると着地点がずれ TAC が ~0.2%
-# 変わる。main と同一の TAC (1056.3 億円/年) を再現するにはフル精度で揃える必要がある。
-T_in_K          = 918.7135314334864
-t_cyc_min       = 21.081245055348106
-D_inner_m       = 8.94045537493799
-bed_thickness_m = 0.4570993916329413
-H_m             = 22.865994637767088
+# 変わる。main と同一の TAC (1051.0 億円/年) を再現するにはフル精度で揃える必要がある。
+T_in_K          = 921.3467765642974
+t_cyc_min       = 15.424572794698665
+D_inner_m       = 9.839206749025925
+bed_thickness_m = 0.3635009492779798
+H_m             = 28.201654400769183
 
 # === PSA =====================================================================
-D_psa_col_m       = 3.4359719196643015
-L_psa_bed_m       = 24.42788089800957
-desorption_target = 0.33679458208134483
+D_psa_col_m       = 4.567979381141377
+L_psa_bed_m       = 25.861581842182808
+desorption_target = 0.36008727941327906
 
 # === 膜分離 ===================================================================
-P_H_Pa     = 872674.5856403935
+P_H_Pa     = 947314.0062802287
 P_L_Pa     = 1.0e5
-A_mem_m2   = 152402.3856093067
+A_mem_m2   = 194464.65919201606
 
 # === Dist1 (脱ブタン塔) SM ===================================================
-P_dist1_kPa            = 1875.3566511885247
+P_dist1_kPa            = 1905.6292984544334
 N_dist1                = 35
-FEED_STAGE_dist1       = 24
-COMP_FRAC_2_dist1      = 0.9969400333233922
+FEED_STAGE_dist1       = 28       # col1_feed_stage: 最適化変数 (フィード段を直接探索)
+COMP_FRAC_2_dist1      = 0.9522455583710194
 
 # === Dist2 (脱エタン塔) HYSYS ===============================================
-# P_dist2=855.6 kPa < P_H=872.7 kPa (Mem の ph_le_pfeed 回避を満たす)。
-P_dist2_kPa            = 855.6305811947385
-N_dist2                = 76
-FEED_STAGE_dist2       = 31       # main: feed_ratio 0.404858 × N76 → 31 (clamp[2,74])
-REFLUX_RATIO_dist2     = 11.065961155534136
+# P_dist2=820.1 kPa < P_H=947.3 kPa (Mem の ph_le_pfeed 回避を満たす)。
+P_dist2_kPa            = 820.1320516089683
+N_dist2                = 70
+FEED_RATIO_dist2       = 0.5226048029803944  # col2_feed_ratio: 最適化変数。下で絶対段へ変換
+REFLUX_RATIO_dist2     = 11.900152863999894
 
 # === Dist3 (C3 スプリッタ) SM ===============================================
-P_dist3_kPa            = 1700.6151854419068
-N_dist3                = 126
-FEED_STAGE_dist3       = 90       # main: feed_ratio 0.715645 × N126 → 90 (clamp[70,124])
+P_dist3_kPa            = 1689.5218569336737
+N_dist3                = 115
+FEED_RATIO_dist3       = 0.8902407765256906  # col3_feed_ratio: 最適化変数。絶対段は組み立て側で導出
 DRAW_RATE_dist3_kmolh  = 0.99     # SM では未使用 (Dist3 は spec なし)
 
 # === Fresh LPG ==============================================================
-F_C3H8_fresh_kmol_h = 1523.2706258898152
+F_C3H8_fresh_kmol_h = 1459.826375614666
 
 
 # ===========================================================================
@@ -134,6 +134,13 @@ SAVE_OUTPUT = True
 #  hysys 経路では reflux_ratio (PDH 側) と recovery_LK_top/recovery_HK_bot は
 #  参照されないので dummy 値で OK。HYSYS の主スペックは hysys_spec_value で渡す。
 #  draw_rate は HYSYS では kgmol/s 単位で書込むため kmolh → kgmol/s に変換。
+#  col2/col3 のフィード段は最適化変数のフィード比率から導出する (main._build_design と同一)。
+def _feed_stage_from_ratio(ratio, n, lo, hi):
+    fs = int(round(ratio * n)); hi_eff = min(hi, n - 2); lo_eff = min(lo, hi_eff)
+    return max(lo_eff, min(fs, hi_eff))
+FEED_STAGE_dist2 = _feed_stage_from_ratio(FEED_RATIO_dist2, N_dist2, 2, 9999)
+FEED_STAGE_dist3 = _feed_stage_from_ratio(FEED_RATIO_dist3, N_dist3, 70, 180)
+
 design = FlowsheetDesignVars(
     swing=RadialDesignVars(
         T_in=T_in_K, t_cyc=t_cyc_min, D_inner=D_inner_m,

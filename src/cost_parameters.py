@@ -67,12 +67,15 @@ CEPCI_CURRENT: float = 800.0    # !仮置き 推定値 2026年
                                 # 影響: COOLING_WATER, AIR_COOLING, PROPYLENE/ETHYLENE_REFRIG_*,
                                 #   LP/MP/HP_STEAM 等が escalation factor (CEPCI/544) で連動。
 
-# スイング操作ペナルティ係数: K_SWING = 1.2
+# スイング操作ペナルティ係数: K_SWING (標準 1.5)
 # Bare Module Cost法の F_BM は連続定常操作を前提としており、スイング操作固有のコストを含まない。
 # 本プロセスは600℃高温下で数十分ごとに流路を切り替えるため、高温用自動切替バルブ群・
 # 配管マニホールド・安全インターロック機構が追加で必要となる。
-# これらを保守的に見積もり、反応器の総建設費に K_SWING = 1.2 を乗じる。
-K_SWING: float = 1.2
+# Catofin型は多基(数十基)スイングで弁数・マニホールド・計装が容器本体より支配的になりうるため、
+# 旧 1.2 は楽観的。標準を 1.5 とし、感度解析で 1.2(楽観)/1.5(標準)/2.0(保守) を振る。
+# env PDH_K_SWING で上書き可。
+import os as _os
+K_SWING: float = float(_os.environ.get('PDH_K_SWING', '1.5'))
 
 # ---------------------------------------------------------------------------
 # 経済パラメータ
