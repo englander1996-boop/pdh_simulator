@@ -37,6 +37,9 @@ from units.reactors.radial_flow import (
     RadialDesignVars, simulate_radial_flow_reactor_system,
     simulate_radial_multibed_reactor_system,
 )
+from units.reactors.catofin import (
+    CatofinDesignVars, simulate_catofin_reactor_system,
+)
 from units.separators.psa.psa_system import (
     PSAFeedStream, PSAFixedParams, simulate_psa_system,
 )
@@ -830,7 +833,14 @@ def run_one_pass(
     # RadialDesignVars(径方向流) が入っていれば径方向流を実行。型でディスパッチ
     # するため既存の軸流コンストラクタは無改修で動く。両者とも (DesignVars, FeedStream,
     # FixedParams) → SimulationResult の同一インターフェースで、出力 dataclass も共有。
-    if isinstance(design.swing, RadialDesignVars):
+    if isinstance(design.swing, CatofinDesignVars):
+        # Catofin 型 浅床・大断面・多基並列スイング (units/reactors/catofin.py)。
+        #   1基 F_total/N_online を軸流 ODE で解き出口を N_online 倍。浅床で Ergun ΔP を下げ、
+        #   N_online で空塔速度を確保する。深床軸流が 0.5bar で不成立だった問題を浅床+多基で回避。
+        # fixed は渡さない → catofin._catofin_fixed() (u_design_min=0.15, K_internals=2.0) を使う。
+        # SwingFixed() を渡すと SV_min=0.5/dP_margin=1.4 で Catofin 設定が上書きされるので不可。
+        r_rx = simulate_catofin_reactor_system(design.swing, swing_feed)
+    elif isinstance(design.swing, RadialDesignVars):
         # Oleflex 型 多段 (径方向流断熱床 N 段直列 + 段間再加熱)。
         #   既定 3 段 (実機 UOP Oleflex の 3〜4 基直列に対応)。
         #   単段では PDH 吸熱で床が降温し per-pass 転化率 ~30% で頭打ち → プロパン巨大 recycle →

@@ -60,6 +60,7 @@ from flowsheet import FlowsheetDesignVars, evaluate, FlowsheetResult
 from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
 from units.reactors.radial_flow import RadialDesignVars
+from units.reactors.catofin import CatofinDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 
@@ -126,9 +127,23 @@ HI_DT_MIN_K  = 10.0
 #              現探索域 z_cat 15-40m が全 infeasible になる (= 比較用に残置)。
 #   詳細: monitor/reactor_pressure_drop_and_geometry.ipynb, units/reactors/SPEC_swing.md
 # ===========================================================================
-REACTOR_KIND = 'radial'   # 'radial' | 'axial'
+#   'catofin' = 浅床・大断面・多基並列スイング (units/reactors/catofin.py)。商用 Catofin 準拠。
+#              深床軸流の圧損問題を「浅床(L_bed≤1m)+多基並列(N_online)」で回避。本既定。
+#              捨てたのは"軸流"でなく"深床"。径方向流は内部品/分配/再生温度の不確かさで撤去。
+REACTOR_KIND = 'catofin'   # 'catofin'(既定) | 'radial' | 'axial'
 
 _REACTOR_SPACE = {
+    # Catofin 型 浅床軸流スイング (既定)。浅床+多基並列で 0.5bar 低圧の圧損を成立させる。
+    'catofin': {
+        "T_in_K":              (880.0,  940.0,  'linear', 'float'),
+        "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),  # 反応フェーズ時間
+        "D_reactor_m":         (6.0,    12.0,   'linear', 'float'),  # 1基あたり内径
+        # L_bed と N_online は同時最適化が肝: 低速化(N↑)で余った床ΔP予算を床長(L↑)に戻せる。
+        # 低速・多基だけに振らず、L_bed を伸ばして基数を抑える解も BO に探させる。
+        "L_bed_m":             (0.3,    1.0,    'linear', 'float'),  # 浅床厚み (上限1.0=深床化防止)
+        "N_online":            (6,      25,     'linear', 'int'  ),  # 並列基数 (低速・大断面のため拡大)
+        "d_p_mm":              (2.0,    6.0,    'linear', 'float'),  # 触媒粒径 (ΔP↓↔粒内拡散η↓)
+    },
     # 軸流深床 (旧、圧損で 0.5bar では成立しない。比較・回帰用)
     'axial': {
         "T_in_K":              (880.0,  940.0,  'linear', 'float'),
@@ -186,7 +201,11 @@ SEARCH_SPACE = {
     # 低 P 側は Dist2 塔頂が cold-top (H2 希釈で -104℃ 級、エチレン-100℃ で凝縮不能) になりやすく
     #   feasible 0 の最多要因。col2_p↑ が塔頂を暖める方向。HSC は 950kPa まで実走確認済。
     #   col2_p > 膜 P_H のケースは膜前 JT let-down (run_one_pass) で P_H へ減圧して吸収する。
-    "col2_p_kpa":          (500.0,  950.0,  'linear', 'float'),  # 浅冷化のため上限開放 (let-down で P_H 超も可)
+    # Catofin 低C2フィードでは Dist2 が分岐収束し、warm 物理解(塔頂-85〜-87℃)が安定するのは
+    #   col2_p ≈ 740-800kPa の帯 (probe 確認: 全 N=70-80 で feasible)。P≥830 で時々 cold 分岐
+    #   (-128/-150℃)に飛ぶため上限を 820 に絞る。※radial の "高P=暖かい" とは逆 (低C2のため)。
+    #   反応器は 0.5bar 固定で col2_p と競合しない (Dist2 feed はどのみち圧縮)。
+    "col2_p_kpa":          (740.0,  820.0,  'linear', 'float'),
     # Dist2 塔頂温度は N で強く決まり (N44→-125℃, N60→-101℃, N80→-98℃)、低 N は塔頂が冷えすぎて
     #   -100℃ エチレン冷媒でも凝縮不能 (cold-top)。feasible 帯は高 N 側 (N≥~70 で -98℃ 級)。
     #   HSC は 80 段まで (hysys_cases/column2)。
@@ -259,7 +278,12 @@ def _build_design(p: dict) -> FlowsheetDesignVars:
     p3_kpa = float(p['col3_p_kpa'])
     # 反応器: REACTOR_KIND に応じて軸流 (SwingDesign) / 径方向流 (RadialDesignVars) を構築。
     # run_one_pass が型でディスパッチする。
-    if REACTOR_KIND == 'radial':
+    if REACTOR_KIND == 'catofin':
+        reactor = CatofinDesignVars(T_in=p['T_in_K'], t_cyc=p['t_cyc_min'],
+                                    D=p['D_reactor_m'], L_bed=p['L_bed_m'],
+                                    N_online=int(p['N_online']),
+                                    d_p=float(p['d_p_mm']) / 1000.0)
+    elif REACTOR_KIND == 'radial':
         reactor = RadialDesignVars(T_in=p['T_in_K'], t_cyc=p['t_cyc_min'],
                                    D_inner=p['D_inner_m'], bed_thickness=p['bed_thickness_m'],
                                    H=p['H_m'])

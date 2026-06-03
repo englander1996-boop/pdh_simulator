@@ -419,9 +419,25 @@ def _reaction_enthalpies(T: float) -> np.ndarray:
     return np.array([dH1, dH2, dH3])
 
 
+def _effectiveness_factor(phi: float) -> float:
+    """球状粒子・一次反応の有効係数 η = (3/φ²)(φ·coth φ − 1)。
+
+    φ = Thiele 数 = R_p·√(k_app/D_eff)。φ→0 (小粒子/遅い反応) で η→1、
+    φ→∞ (大粒子/速い反応) で η→3/φ (粒子表面付近のみ反応)。粒内拡散による
+    実効反応速度の低下を表す (Catofin の d_p 最適化で必須)。
+    """
+    if phi < 1.0e-3:
+        return 1.0
+    if phi > 50.0:
+        return 3.0 / phi
+    coth = 1.0 / math.tanh(phi)
+    return (3.0 / (phi * phi)) * (phi * coth - 1.0)
+
+
 def _ode_axial(z: float, y: np.ndarray,
                a: float, A_cross: float, eps: float,
                eps_bed: float, d_p: float, sphericity: float, N_parallel: int,
+               t_floor_K=None, phi_cat: float = 1.0, d_eff=None,
                ) -> np.ndarray:
     """軸方向(z)の常微分方程式。
 
@@ -494,18 +510,41 @@ def _ode_axial(z: float, y: np.ndarray,
 
     rates = np.array([r1, r2, r3])  # [mol/m³_cat/s]
 
-    # 物質収支: dF_i/dz = (1-eps) * A * Σ stoich[i,j] * r[j]  [mol/(s·m)]
-    dFdz = (1.0 - eps) * A_cross * (_STOICH @ rates)
+    # ---- 粒内拡散 有効係数 η (d_eff 指定時のみ; Catofin の d_p 最適化用) ----
+    # d_p↑ で Ergun ΔP↓ だが、η↓ (粒子内部に反応物が届かず実効速度低下)。これを入れないと
+    # BO が "ΔP だけ下がってタダ飯" で最大粒径を選ぶので、d_p 変数化には η が必須。
+    # 反応別: r1,r2 (プロパン消費) は C3H8 基準 η_A、r3 (エチレン水素化) は C2H4 基準 η3。
+    # 擬一次 k_app = r_cons/C で Thiele 数を作る (体積基準は設計用近似、厳密ペレットモデルでない)。
+    if d_eff is not None and d_eff > 0.0:
+        R_p = 0.5 * d_p
+        C_A = max(P['A'] / (_R_GAS * T_local), 1e-30)   # [mol/m³]
+        kapp_A = max(r1 + r2, 0.0) / C_A                # [1/s] プロパン消費の擬一次
+        eta_A = _effectiveness_factor(R_p * math.sqrt(kapp_A / d_eff))
+        C_D = max(P['D'] / (_R_GAS * T_local), 1e-30)
+        kapp_D = max(r3, 0.0) / C_D
+        eta_3 = _effectiveness_factor(R_p * math.sqrt(kapp_D / d_eff))
+        rates = np.array([r1 * eta_A, r2 * eta_A, r3 * eta_3])
 
-    # エネルギー収支（断熱）: dT/dz = -((1-eps) * A * Σ ΔH_j * r_j) / Σ F_i * Cp_i
+    # 物質収支: dF_i/dz = phi_cat * (1-eps) * A * Σ stoich[i,j] * r[j]  [mol/(s·m)]
+    #   phi_cat: 有効触媒分率 (<1 のとき床の一部が HGM/蓄熱材で触媒でない → 反応量が減る)。
+    #   既定 1.0 (= 軸流 swing は無変更)。Catofin は φ_cat<1 で HGM 占有を反映。
+    dFdz = phi_cat * (1.0 - eps) * A_cross * (_STOICH @ rates)
+
+    # エネルギー収支（断熱 + HGM 補償）: dT/dz = -((1-eps) * A * Σ ΔH_j * r_j) / Σ F_i * Cp_i
     cp_dict = calc_Cp(T_local)
     sum_FCp = sum(max(float(F[i]), 0.0) * cp_dict[comp] for i, comp in enumerate(_COMPS))
     if sum_FCp <= 0:
         dTdz = 0.0
     else:
         dH = _reaction_enthalpies(T_local)
-        Q_rxn = float((1.0 - eps) * A_cross * np.dot(dH, rates))  # [J/(m·s)]
+        Q_rxn = float(phi_cat * (1.0 - eps) * A_cross * np.dot(dH, rates))  # [J/(m·s)]
         dTdz = -Q_rxn / sum_FCp                                     # [K/m]
+        # HGM/再生蓄熱の等価熱補償 (Catofin)。床温が下限 t_floor_K (= T_in - ΔT_max) 以下に
+        # 下がろうとしたら、HGM が反応吸熱を相殺して床温を維持する (dT/dz=0 にクランプ)。
+        # 供給した熱量 Q_HGM は呼出側でエネルギー収支 (Σh_out - Σh_in) から後計算して
+        # OPEX(再生/燃料) に計上する (= "無料の熱" にしない)。t_floor_K=None で無効=完全断熱。
+        if t_floor_K is not None and T_local <= float(t_floor_K) and dTdz < 0.0:
+            dTdz = 0.0
 
     # ---- 圧力損失 (Ergun 式) ----
     # 0.5 bar 低圧・高温・大流量固定床では圧損が無視できないため軸方向 ODE に連成。
@@ -537,7 +576,8 @@ def _ode_axial(z: float, y: np.ndarray,
 
 def _simulate_one_time(design: DesignVars, feed: FeedStream,
                        fixed: FixedParams, t_min: float,
-                       N_parallel: int) -> tuple:
+                       N_parallel: int, t_floor_K=None, phi_cat: float = 1.0,
+                       d_eff=None) -> tuple:
     """時刻 t_min [min] における空間積分を実施。
 
     Returns (F_out [mol/s], T_out [K], P_out [Pa])。圧力は Ergun 圧損で減衰した
@@ -558,6 +598,7 @@ def _simulate_one_time(design: DesignVars, feed: FeedStream,
             fun=lambda z, y: _ode_axial(
                 z, y, a, A_cross, fixed.eps,
                 fixed.eps_bed, fixed.d_p_m, fixed.sphericity, N_parallel,
+                t_floor_K=t_floor_K, phi_cat=phi_cat, d_eff=d_eff,
             ),
             t_span=(0.0, design.z_cat),
             y0=y0,

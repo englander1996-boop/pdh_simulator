@@ -11,6 +11,7 @@ from typing import Union
 
 from units.reactors.swing import DesignVars as SwingDesign
 from units.reactors.radial_flow import RadialDesignVars
+from units.reactors.catofin import CatofinDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 from src.distillation_core import ColumnTunables
@@ -30,7 +31,7 @@ class FlowsheetDesignVars:
     `swing` のまま (= 既存の軸流コンストラクタを無改修で維持)。両者とも T_in/t_cyc を持ち、
     runner の HI (design.swing.T_in) はどちらでも動く。
     """
-    swing: Union[SwingDesign, RadialDesignVars]
+    swing: Union[SwingDesign, RadialDesignVars, CatofinDesignVars]
     psa:   PSADesignVars
     mem:   MemDesignVars
     dist1: ColumnTunables       # 脱ブタン塔
