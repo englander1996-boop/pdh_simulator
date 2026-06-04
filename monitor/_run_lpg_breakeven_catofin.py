@@ -126,8 +126,8 @@ print(f"  現行製造原単価     : {econ_hi.unit_jpy_per_t/1000:.1f} 円/kg")
 # ---- 図1: 価格 vs 利益 ----
 fig1, ax = plt.subplots(figsize=(7.0, 4.6))
 ax.axhline(0, color='black', lw=0.8)
-ax.fill_between(prices, profits, 0, where=(profits > 0), facecolor='none', hatch='////', edgecolor='0.45', linewidth=0.0)
-ax.fill_between(prices, profits, 0, where=(profits < 0), facecolor='0.88', edgecolor='none')
+ax.fill_between(prices, profits, 0, where=(profits > 0), facecolor='#bfe3bf', edgecolor='none')
+ax.fill_between(prices, profits, 0, where=(profits < 0), facecolor='#f3c6c6', edgecolor='none')
 ax.plot(prices, profits, lw=2.2, color='black')
 ax.axvline(price_be, color='black', ls='--', lw=1.4); ax.axvline(BASE_PRICE, color='black', ls=':', lw=1.6)
 ax.plot(BASE_PRICE, econ_hi.profit, 'o', color='black', ms=7, zorder=5)
@@ -136,8 +136,8 @@ ax.annotate(f'損益分岐 {price_be:.1f} 円/kg', xy=(price_be, 0), xytext=(pri
 ax.annotate(f'現行 {BASE_PRICE:.0f} 円/kg\n{econ_hi.profit:.0f} 億円/年', xy=(BASE_PRICE, econ_hi.profit),
             xytext=(BASE_PRICE + 7, econ_hi.profit - 110), ha='left', color='black', fontsize=10,
             arrowprops=dict(arrowstyle='->', color='black'))
-ax.text(46, max(profits) * 0.26, '黒字', color='black', fontsize=13, fontweight='bold')
-ax.text(123, min(profits) * 0.72, '赤字', color='black', fontsize=13, fontweight='bold')
+ax.text(46, max(profits) * 0.26, '黒字', color='#2e7d32', fontsize=13, fontweight='bold')
+ax.text(123, min(profits) * 0.72, '赤字', color='#c0392b', fontsize=13, fontweight='bold')
 ax.set_xlabel('LPG 原料単価 [円/kg]', fontsize=12); ax.set_ylabel('年間利益 Profit [億円/年]', fontsize=12)
 ax.set_title('LPG 原料価格と年間利益(最適設計を固定)', fontsize=12); ax.set_xlim(prices[0], prices[-1])
 fig1.tight_layout()

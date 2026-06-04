@@ -134,6 +134,22 @@ def simulate_catofin_reactor_system(
     if F_total_in <= 0:
         return _penalty_result(reason='input_invalid')
 
+    # ---- 1基あたり触媒量上限 (コンテスト §3-3: 最大 200 m³/基) ----
+    # 深床許可 (L_bed≤5m) で V_cat/基 が 200m³ を超えうるため、ODE 前に早期厳守する。
+    #   旧軸流 swing は V_cat_max_per_vessel で並列分割していたが、catofin は N_online を
+    #   自由変数化した際にこの上限を落としていた。再導入して非現実な巨大単基を排除する。
+    #   超過は _compute_reactor_shortfall の else 経由で reactor_other_shortfall=1.0 となり、
+    #   BO に「この反応器幾何は不可」と伝わる (D↓/L_bed↓ 方向)。
+    _A_cross_chk = math.pi / 4.0 * design.D ** 2
+    _V_cat_chk = _A_cross_chk * design.L_bed * (1.0 - fixed.eps)
+    if _V_cat_chk > fixed.V_cat_max_per_vessel:
+        warnings.warn(
+            f"catofin: V_cat/基={_V_cat_chk:.1f} m³ > 上限 "
+            f"{fixed.V_cat_max_per_vessel:.0f} m³ "
+            f"(D={design.D:.2f}m, L_bed={design.L_bed:.2f}m) — infeasible",
+            UserWarning, stacklevel=2)
+        return _penalty_result(reason='vcat_above_max')
+
     # ---- per-vessel フィード (流量を N_online で分割) ----
     feed_1 = FeedStream(
         F_in={c: feed.F_in.get(c, 0.0) / N for c in feed.F_in},
@@ -229,9 +245,25 @@ def simulate_catofin_reactor_system(
     Q_hgm_GJh = max(Q_hgm_W, 0.0) * 3600.0 / 1e9
     Q_preheat_GJh += Q_hgm_GJh
 
-    # ---- 装置・基数・CAPEX ----
-    N_swing_sets = math.ceil(fixed.t_regen / design.t_cyc) + 1
-    N_total = N * N_swing_sets
+    # ---- 装置・基数 (共有プール フリート・サイジング) ----
+    # 各反応器は固定床のまま (触媒は動かない=移動床ではない)、t_cyc 反応 → t_off オフライン
+    # (再生+パージ+切替+再加熱) を位相をずらして循環する。定常で N_online 基を常時オンラインに
+    # 保つ総数は時間占有率から:
+    #   N_total = ceil( N_online × (t_cyc + t_off) / t_cyc ) = ceil( N_online × (1 + t_off/t_cyc) )
+    # 旧「ブロック複製式」 N_online × (ceil(t_regen/t_cyc)+1) は N_online 基を1ブロックとして
+    # 一斉切替する保守近似で、per-set の切り上げを ×N_online 増幅し過大計上していた
+    # (例: N_online=24, t_cyc=14, t_off=30 → 旧96 基)。実機は1基/小グループ単位で位相を
+    # ずらせるので、切り上げは総数に対し最後に1回だけ。
+    #
+    # ★t_off = t_cyc を採用 (balanced cycle): 実機 Catofin は反応と再生をほぼ同尺
+    #   (各~10-15min) でバランスさせるため、t_off (再生+パージ+切替+再加熱) ≈ t_cyc と置く。
+    #   → fleet 倍率 = 1 + t_off/t_cyc = 2.0 (t_cyc の値によらず)、N_total = 2 × N_online。
+    #   旧 !仮置き t_regen=30min は反応の2倍超で倍率3.14 となり台数を過大にしていた。
+    #   (fixed.t_regen は swing/radial 用に残置、catofin では未使用。)
+    _t_off = design.t_cyc                          # balanced: 再生≈反応 (実機 Catofin)
+    _fleet_mult = 1.0 + _t_off / design.t_cyc      # = 2.0
+    N_total = math.ceil(N * _fleet_mult)
+    N_swing_sets = math.ceil(_fleet_mult)          # = 2 (表示用: (反応+休止)/反応 倍率)
     V_cat_pervessel = A_cross * design.L_bed * (1.0 - fixed.eps)   # 1基床体積 [m³]
     V_vessel_pervessel = A_cross * design.L_bed                    # 1基容器体積 [m³]
     catalyst_weight_total = V_cat_pervessel * N_total * fixed.rho_b  # [kg]
