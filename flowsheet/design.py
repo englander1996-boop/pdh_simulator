@@ -24,12 +24,15 @@ class FlowsheetDesignVars:
     蒸留塔の物理セマンティクス (LK/HK/回収率/K_method/q) は塔別ラッパで固定し、
     本バンドルでは BO で振る P/N/R の組のみを保持する (ColumnTunables)。
 
-    反応器モデル (2026-05-30): `swing` フィールドには 2 種の反応器設計変数を入れられる:
-      - SwingDesign(T_in, z_cat, t_cyc, D)              … 軸流固定床 (units/reactors/swing.py)
+    反応器モデル: `swing` フィールドには 3 種の反応器設計変数を入れられる:
+      - CatofinDesignVars(T_in, t_cyc, D, L_bed, N_online, d_p) … Catofin 浅床・多基並列スイング
+        (units/reactors/catofin.py) ← 既定
       - RadialDesignVars(T_in, t_cyc, D_inner, bed_thickness, H) … 径方向流 (units/reactors/radial_flow.py)
+        ※ 棄却 (内部品/分配/再生温度の不確かさ)、比較用に残置
+      - SwingDesign(T_in, z_cat, t_cyc, D)              … 軸流固定床 (units/reactors/swing.py、旧・比較用)
     run_one_pass が型でディスパッチして対応する反応器を実行する。フィールド名は後方互換のため
-    `swing` のまま (= 既存の軸流コンストラクタを無改修で維持)。両者とも T_in/t_cyc を持ち、
-    runner の HI (design.swing.T_in) はどちらでも動く。
+    `swing` のまま (= 既存の軸流コンストラクタを無改修で維持)。3 種とも T_in/t_cyc を持ち、
+    runner の HI (design.swing.T_in) はどれでも動く。
     """
     swing: Union[SwingDesign, RadialDesignVars, CatofinDesignVars]
     psa:   PSADesignVars

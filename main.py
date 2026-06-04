@@ -2,7 +2,7 @@ r"""
 main.py — HYSYS + SM バックエンドでの PDH プロセス全変数最適化 (制約付き Optuna BO)
 
 exp3.py を評価関数として、**全設計変数**(反応器・PSA・膜・原料 + 蒸留塔 3 つ。反応器は
-REACTOR_KIND で軸流21変数/径方向流22変数を切替、既定=径方向流22)を
+REACTOR_KIND で Catofin23変数/径方向流22変数/軸流21変数を切替、既定=Catofin23)を
 Bayesian Optimization で探索する。**BO を実行する本丸ファイル**。
 
 BO インフラ: QMC→TPE 2相サンプラ・constraints_func(連続制約)・penalty_scale・
@@ -12,9 +12,10 @@ BO インフラ: QMC→TPE 2相サンプラ・constraints_func(連続制約)・p
   純度は SM Dist3 が 99.5 mol%=99.497 wt% 固定 → spec を 99.45 wt% に緩和。
   塔本体 CAPEX は provider 側で FUG と同式で計算(N/還流が CAPEX に効く)。
 
-変数 (反応器は REACTOR_KIND で軸流/径方向流を切替。既定=radial):
-  反応器(軸流 4)    : T_in_K, z_cat_m, t_cyc_min, D_reactor_m
-  反応器(径方向流 5): T_in_K, t_cyc_min, D_inner_m, bed_thickness_m, H_m   (← 既定)
+変数 (反応器は REACTOR_KIND で Catofin/径方向流/軸流を切替。既定=catofin):
+  反応器(Catofin 6): T_in_K, t_cyc_min, D_reactor_m, L_bed_m, N_online, d_p_mm   (← 既定)
+  反応器(径方向流 5): T_in_K, t_cyc_min, D_inner_m, bed_thickness_m, H_m   (棄却、比較用に残置)
+  反応器(軸流 4)    : T_in_K, z_cat_m, t_cyc_min, D_reactor_m              (旧、比較用に残置)
   PSA(3)   : D_psa_col_m, L_psa_bed_m, desorption_target
   膜(2)    : P_H_Pa, A_mem_m2   (P_L=1atm 固定、mem.P_dist=Dist3圧 同期)
   原料(1)  : F_C3H8_fresh_kmol_h
@@ -135,7 +136,13 @@ REACTOR_KIND = 'catofin'   # 'catofin'(既定) | 'radial' | 'axial'
 _REACTOR_SPACE = {
     # Catofin 型 浅床軸流スイング (既定)。浅床+多基並列で 0.5bar 低圧の圧損を成立させる。
     'catofin': {
-        "T_in_K":              (880.0,  940.0,  'linear', 'float'),
+        # T_in 下限を 930 に引上げ (旧 880)。catofin の per-pass 転化は低く、低 T_in では
+        # クラッキング由来の C2 (CH4/C2H6/C2H4) 副生が乏しい (<3.5%) → 脱エタン塔 (Dist2) の
+        # 塔頂が H2 偏重で −97〜−105℃ に冷え、エチレン冷媒 −100℃ で凝縮不能 (cold-top)。
+        # T_in≥928 で C2≳4% になり塔頂 ≥−93℃ で凝縮可。930 で −88℃級の余裕を確保。
+        # (検証: tools/_diag_feasible_search.py / _probe_dist2_levers_c2lean.py。低 R/低 N/高 col2_p
+        #  では C2-lean フィードを暖められず、C2 生成=高 T_in が唯一の有効レバーと確認。)
+        "T_in_K":              (930.0,  940.0,  'linear', 'float'),
         "t_cyc_min":           (12.0,   25.0,   'linear', 'float'),  # 反応フェーズ時間
         "D_reactor_m":         (6.0,    12.0,   'linear', 'float'),  # 1基あたり内径
         # L_bed と N_online は同時最適化が肝: 低速化(N↑)で余った床ΔP予算を床長(L↑)に戻せる。
@@ -205,7 +212,10 @@ SEARCH_SPACE = {
     #   col2_p ≈ 740-800kPa の帯 (probe 確認: 全 N=70-80 で feasible)。P≥830 で時々 cold 分岐
     #   (-128/-150℃)に飛ぶため上限を 820 に絞る。※radial の "高P=暖かい" とは逆 (低C2のため)。
     #   反応器は 0.5bar 固定で col2_p と競合しない (Dist2 feed はどのみち圧縮)。
-    "col2_p_kpa":          (740.0,  820.0,  'linear', 'float'),
+    # 下限を 770 に引上げ (旧 740)。T_in=930 (下限) では col2_p≤750 だと依然 cold-top
+    #   (検証: _diag_feasible_search.py で 930/750=不可・930/820=可・935/780=可・940/760=可)。
+    #   低 T_in × 低 col2_p の死に隅を削る。塔頂を暖める方向 (高 col2_p) に寄せる。
+    "col2_p_kpa":          (770.0,  820.0,  'linear', 'float'),
     # Dist2 塔頂温度は N で強く決まり (N44→-125℃, N60→-101℃, N80→-98℃)、低 N は塔頂が冷えすぎて
     #   -100℃ エチレン冷媒でも凝縮不能 (cold-top)。feasible 帯は高 N 側 (N≥~70 で -98℃ 級)。
     #   HSC は 80 段まで (hysys_cases/column2)。
@@ -271,7 +281,7 @@ def _suggest_params(trial: optuna.trial.Trial) -> dict:
 
 
 def _build_design(p: dict) -> FlowsheetDesignVars:
-    """params dict (径方向流 22 / 軸流 21 変数) から FlowsheetDesignVars を構築。trial 非依存 (best 再評価でも使用)。"""
+    """params dict (Catofin 23 / 径方向流 22 / 軸流 21 変数) から FlowsheetDesignVars を構築。trial 非依存 (best 再評価でも使用)。"""
     n1 = int(p['col1_n_stages']); fs1 = int(p['col1_feed_stage'])
     n2 = int(p['col2_n_stages']); fs2 = _feed_stage_from_ratio(p['col2_feed_ratio'], n2, *_FEED_STAGE_ABS['col2'])
     n3 = int(p['col3_n_stages']); fs3 = _feed_stage_from_ratio(p['col3_feed_ratio'], n3, *_FEED_STAGE_ABS['col3'])
@@ -444,10 +454,14 @@ def _make_main_callback(n_total: int):
         line0 = f"[#{trial.number:03d}] {badge}  TAC={val_s}{delta_s}{reason_s}  {dur:5.1f}s"
 
         p = trial.params
-        if 'z_cat_m' in p:   # 軸流
+        if 'z_cat_m' in p:        # 軸流 (旧)
             rx = (f"Rx(axial): T={p.get('T_in_K',0):.0f}K z={p.get('z_cat_m',0):.1f} "
                   f"t={p.get('t_cyc_min',0):.1f} D={p.get('D_reactor_m',0):.2f}")
-        else:                # 径方向流
+        elif 'N_online' in p:     # Catofin 浅床・多基並列 (既定)
+            rx = (f"Rx(catofin): T={p.get('T_in_K',0):.0f}K t={p.get('t_cyc_min',0):.1f} "
+                  f"D={p.get('D_reactor_m',0):.2f} L_bed={p.get('L_bed_m',0):.2f} "
+                  f"N={p.get('N_online',0)} dp={p.get('d_p_mm',0):.1f}mm")
+        else:                     # 径方向流 (棄却、比較用)
             rx = (f"Rx(radial): T={p.get('T_in_K',0):.0f}K t={p.get('t_cyc_min',0):.1f} "
                   f"Di={p.get('D_inner_m',0):.1f} dr={p.get('bed_thickness_m',0):.2f} H={p.get('H_m',0):.1f}")
         v0 = (f"{rx} | PSA: D={p.get('D_psa_col_m',0):.2f} L={p.get('L_psa_bed_m',0):.1f} "

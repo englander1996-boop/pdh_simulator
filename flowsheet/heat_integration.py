@@ -816,22 +816,33 @@ def pinch_analysis(
     N_HE   = _calc_N_HE_min(n_hot, n_cold, n_hu, n_cu, has_pinch)
 
     # 8. feasible 判定（簡易）
+    #    判定は GCC (shifted 温度) 上で行う。utility も stream としてシフトされるので、
+    #      加熱 utility: supply - ΔTmin/2 ≥ max(GCC_shifted)
+    #      冷却 utility: supply + ΔTmin/2 ≤ min(GCC_shifted)
+    #    で「届く」かを判定する (= _assign_utilities_to_tiers の T_eff_shifted cut と同一基準)。
+    #    ※ 旧実装は GCC が既に ±ΔTmin/2 シフト済みなのに更に full ΔTmin を課して二重計上し、
+    #      Dist2 塔頂(-85℃)をエチレン(-100℃, 実接近15K>ΔTmin)で凝縮できる設計を誤って冷却
+    #      infeasible と表示していた。コスト側 (_assign_utilities_to_tiers + _normalize) は
+    #      正しい cut + 残差をエチレンへ計上しており TAC は不変。本修正は表示判定のみを正す。
     feasible = True
     msg = ""
     if heating_tiers is not None and Q_H_min > 1e-9:
         # 最高温 tier でも届かない場合は infeasible
-        T_cold_max = max(p[0] for p in gcc) + 0.5 * dT_min_K
-        if not any(t.supply_T_K - dT_min_K >= T_cold_max for t in heating_tiers):
+        max_gcc_shifted = max(p[0] for p in gcc)
+        if not any(t.supply_T_K - 0.5 * dT_min_K >= max_gcc_shifted - 1e-9
+                   for t in heating_tiers):
             feasible = False
-            msg = f"加熱: 最高温 tier でも T_cold_max={T_cold_max-273.15:.1f}°C に届かない"
+            T_cold_max_act = max_gcc_shifted - 0.5 * dT_min_K   # 実温度に戻して表示
+            msg = f"加熱: 最高温 tier でも T_cold_max={T_cold_max_act-273.15:.1f}°C に届かない"
     if cooling_tiers is not None and Q_C_min > 1e-9:
         # 最低温 tier でも届かない場合は infeasible
-        # (= 全 hot 最低温度より、最低 supply_T_K + dT_min が高い)
-        T_hot_min = min(p[0] for p in gcc) - 0.5 * dT_min_K
-        if not any(t.supply_T_K + dT_min_K <= T_hot_min for t in cooling_tiers):
+        min_gcc_shifted = min(p[0] for p in gcc)
+        if not any(t.supply_T_K + 0.5 * dT_min_K <= min_gcc_shifted + 1e-9
+                   for t in cooling_tiers):
             feasible = False
+            T_hot_min_act = min_gcc_shifted + 0.5 * dT_min_K    # 実温度に戻して表示
             extra = (f"冷却: 最低温 tier でも T_hot_min="
-                     f"{T_hot_min-273.15:.1f}°C に届かない")
+                     f"{T_hot_min_act-273.15:.1f}°C に届かない")
             msg = msg + " | " + extra if msg else extra
 
     return HIResult(

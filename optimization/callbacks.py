@@ -212,12 +212,18 @@ def _fmt_vars(params: dict, user_attrs: dict | None = None) -> list[str]:
     """
     g = params.get
 
-    # 反応器: 軸流 (z_cat_m/D_reactor_m) か 径方向流 (D_inner_m/bed_thickness_m/H_m) かを
-    # params のキーで判定して表示を切替。
+    # 反応器: 軸流 (z_cat_m/D_reactor_m) / Catofin (N_online/L_bed_m) / 径方向流
+    # (D_inner_m/bed_thickness_m/H_m) を params のキーで判定して表示を切替。既定は Catofin。
     if 'z_cat_m' in params:
         rx = (
             f"Reactor(axial): T={g('T_in_K', 0):.0f}K z={g('z_cat_m', 0):.1f}m "
             f"t={g('t_cyc_min', 0):.1f}min D={g('D_reactor_m', 0):.2f}m"
+        )
+    elif 'N_online' in params:
+        rx = (
+            f"Reactor(catofin): T={g('T_in_K', 0):.0f}K t={g('t_cyc_min', 0):.1f}min "
+            f"D={g('D_reactor_m', 0):.2f}m L_bed={g('L_bed_m', 0):.2f}m "
+            f"N={g('N_online', 0)} dp={g('d_p_mm', 0):.1f}mm"
         )
     else:
         rx = (
