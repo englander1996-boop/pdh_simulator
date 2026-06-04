@@ -45,7 +45,7 @@ from config.load import load_operating_config
 from flowsheet import FlowsheetDesignVars, evaluate
 from src.distillation_core import ColumnTunables
 from units.reactors.swing import DesignVars as SwingDesign
-from units.reactors.radial_flow import RadialDesignVars
+from units.reactors.catofin import CatofinDesignVars
 from units.separators.psa.psa_system import PSADesignVars
 from units.separators.membrane.membrane_system import MemDesignVars
 from simulation import display_full_results, hdr, show_input_snapshot, run_exp
@@ -55,59 +55,61 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 #  実験で振る設計変数 (ここを書き換えて再実行)
 # ===========================================================================
 
-# main.py (HYSYS+SM 全22変数 BO, 反応器=radial) の BO best の最適化済み 22 変数をそのまま投入。
-#   出典 outputs/main_20260602_211643/best.json
-#   (BO 記録 effective_TAC=1051.01 億円/年、feasible=True、
-#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈81.8%)。
+# main.py (HYSYS+SM 全23変数 BO, 反応器=catofin) の BO best の最適化済み 23 変数をそのまま投入。
+#   出典 outputs/main_20260604_014318/best.json (trial #227)
+#   (BO 記録 effective_TAC=1092.70 億円/年 (=HI後TAC)、feasible=True、
+#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈81.9%)。
 #   exp3 でフル詳細出力を見て手動検証するため。
-# 注意1: main は反応器=径方向流 (radial)。exp3 も RadialDesignVars を使い、
-#   反応器変数を (T_in, t_cyc, D_inner, bed_thickness, H) とする。
+# 注意1: main は反応器=Catofin型 浅床・多基並列スイング (catofin)。exp3 も CatofinDesignVars を使い、
+#   反応器変数を (T_in, t_cyc, D, L_bed, N_online, d_p) とする。d_p は mm→m に変換して渡す
+#   (main._build_design と同一: d_p=d_p_mm/1000.0)。
 # 注意2: col2/col3 のフィード段は最適化変数ではない。最適化変数は「フィード比率」
 #   (col2_feed_ratio / col3_feed_ratio) であり、絶対段は _feed_stage_from_ratio で導出する。
 #   exp3 でも比率をそのまま入力し、main._build_design と同一の関数で絶対段へ変換する
 #   (手動変換による丸めずれを避ける)。col1 のみフィード段が直接の最適化変数。
 
-# === 反応器 (径方向流 Radial) ===================================================
-# 値は best.json (trial #116) のフル精度をそのまま転記する。
+# === 反応器 (Catofin 浅床・多基並列スイング) =====================================
+# 値は best.json (trial #227) のフル精度をそのまま転記する。
 # リサイクル収束は TOL_rel=1% で打ち切るため入力を丸めると着地点がずれ TAC が ~0.2%
-# 変わる。main と同一の TAC (1051.0 億円/年) を再現するにはフル精度で揃える必要がある。
-T_in_K          = 921.3467765642974
-t_cyc_min       = 15.424572794698665
-D_inner_m       = 9.839206749025925
-bed_thickness_m = 0.3635009492779798
-H_m             = 28.201654400769183
+# 変わる。main と同一の TAC (1092.70 億円/年) を再現するにはフル精度で揃える必要がある。
+T_in_K          = 931.1271045663474
+t_cyc_min       = 13.990031788932104
+D_reactor_m     = 6.771407547160768
+L_bed_m         = 0.95630263904489
+N_online        = 24
+d_p_mm          = 3.1556808652056993
 
 # === PSA =====================================================================
-D_psa_col_m       = 4.567979381141377
-L_psa_bed_m       = 25.861581842182808
-desorption_target = 0.36008727941327906
+D_psa_col_m       = 4.047993058871873
+L_psa_bed_m       = 23.70535583806561
+desorption_target = 0.3083444011630537
 
 # === 膜分離 ===================================================================
-P_H_Pa     = 947314.0062802287
+P_H_Pa     = 808200.3827126131
 P_L_Pa     = 1.0e5
-A_mem_m2   = 194464.65919201606
+A_mem_m2   = 198926.22868898342
 
 # === Dist1 (脱ブタン塔) SM ===================================================
-P_dist1_kPa            = 1905.6292984544334
-N_dist1                = 35
-FEED_STAGE_dist1       = 28       # col1_feed_stage: 最適化変数 (フィード段を直接探索)
-COMP_FRAC_2_dist1      = 0.9522455583710194
+P_dist1_kPa            = 1813.587593024316
+N_dist1                = 52
+FEED_STAGE_dist1       = 22       # col1_feed_stage: 最適化変数 (フィード段を直接探索)
+COMP_FRAC_2_dist1      = 0.941279208915399
 
 # === Dist2 (脱エタン塔) HYSYS ===============================================
-# P_dist2=820.1 kPa < P_H=947.3 kPa (Mem の ph_le_pfeed 回避を満たす)。
-P_dist2_kPa            = 820.1320516089683
-N_dist2                = 70
-FEED_RATIO_dist2       = 0.5226048029803944  # col2_feed_ratio: 最適化変数。下で絶対段へ変換
-REFLUX_RATIO_dist2     = 11.900152863999894
+# P_dist2=780.9 kPa < P_H=808.2 kPa (Mem の ph_le_pfeed 回避を満たす)。
+P_dist2_kPa            = 780.873482108908
+N_dist2                = 69
+FEED_RATIO_dist2       = 0.4711982509052778  # col2_feed_ratio: 最適化変数。下で絶対段へ変換
+REFLUX_RATIO_dist2     = 10.166370748366086
 
 # === Dist3 (C3 スプリッタ) SM ===============================================
-P_dist3_kPa            = 1689.5218569336737
-N_dist3                = 115
-FEED_RATIO_dist3       = 0.8902407765256906  # col3_feed_ratio: 最適化変数。絶対段は組み立て側で導出
+P_dist3_kPa            = 1747.7616553132661
+N_dist3                = 142
+FEED_RATIO_dist3       = 0.7616740161372767  # col3_feed_ratio: 最適化変数。絶対段は組み立て側で導出
 DRAW_RATE_dist3_kmolh  = 0.99     # SM では未使用 (Dist3 は spec なし)
 
 # === Fresh LPG ==============================================================
-F_C3H8_fresh_kmol_h = 1459.826375614666
+F_C3H8_fresh_kmol_h = 1457.2873803653865
 
 
 # ===========================================================================
@@ -142,9 +144,9 @@ FEED_STAGE_dist2 = _feed_stage_from_ratio(FEED_RATIO_dist2, N_dist2, 2, 9999)
 FEED_STAGE_dist3 = _feed_stage_from_ratio(FEED_RATIO_dist3, N_dist3, 70, 180)
 
 design = FlowsheetDesignVars(
-    swing=RadialDesignVars(
-        T_in=T_in_K, t_cyc=t_cyc_min, D_inner=D_inner_m,
-        bed_thickness=bed_thickness_m, H=H_m,
+    swing=CatofinDesignVars(
+        T_in=T_in_K, t_cyc=t_cyc_min, D=D_reactor_m,
+        L_bed=L_bed_m, N_online=int(N_online), d_p=d_p_mm / 1000.0,
     ),
     psa=PSADesignVars(
         D_col=D_psa_col_m, L_bed=L_psa_bed_m,

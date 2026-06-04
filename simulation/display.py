@@ -50,12 +50,13 @@ def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
     print("=" * 72)
     print()
     sw = design.swing
-    # 反応器モデルの種別で表示を分岐 (径方向流対応)。
-    # 径方向流 (RadialDesignVars) は z_cat/D を持たず D_inner/bed_thickness/H を持つ。
+    # 反応器モデルの種別で表示を分岐 (Catofin=既定 / 径方向流 / 軸流 の 3 種)。
+    # Catofin は N_online、径方向流は bed_thickness を持つ (どちらも無ければ軸流)。
     if hasattr(sw, 'N_online'):
         print("[反応器 (Catofin 浅床軸流スイング)]")
         print(f"  T_in = {sw.T_in} K, t_cyc = {sw.t_cyc} min, "
-              f"D = {sw.D} m, L_bed = {sw.L_bed} m, N_online = {sw.N_online} 基 (並列)")
+              f"D = {sw.D} m, L_bed = {sw.L_bed} m, N_online = {sw.N_online} 基 (並列), "
+              f"d_p = {sw.d_p * 1000:.3f} mm")
     elif hasattr(sw, 'bed_thickness'):
         print("[反応器 (Radial flow 径方向流)]")
         print(f"  T_in = {sw.T_in} K, t_cyc = {sw.t_cyc} min, "
