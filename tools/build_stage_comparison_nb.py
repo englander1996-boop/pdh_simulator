@@ -1,16 +1,20 @@
-"""monitor/stage_comparison.ipynb を生成するビルダー (HYSYS 不要)。
+"""monitor/stage_comparison.ipynb を生成するビルダー (catofin 版, 2026-06-04 改訂, HYSYS 不要)。
 
-物語 (ユーザー要望: 径方向流になる前=単段断熱床から始める):
-  §0 反応器設計の変遷の物語
-  §1 出発点: 単段断熱固定床 (径方向流以前) — 転化率が断熱平衡に頭打ち
-  §2 圧損で軸流深床→径方向流へピボット (簡潔)。但し単段の転化率天井は幾何でなく熱力学なので不変
-  §3 単段の低転化が系全体を破綻させる (リサイクル希釈→膜回収率↓→C3スプリッタ不成立)
-  §4 解決 = 多段化 (段間再加熱、Oleflex 型)
-  §5 段数比較 1/2/3/4 段 (累積転化率↑・選択率↓・コスト↑)
-  §6 なぜ3段か — 総合収率≈単通選択率(リサイクル)、系成立に必要な最小段数、4段は利得なく不利
-  §7 結論
+旧版は「径方向流の何段か(直列段+段間再加熱)」の物語だったが、現採用の Catofin は
+直列段を持たない(浅床・多基『並列』スイング + HGM 等価熱補償)。よって本ノートを
+「反応器形式の選択 — 軸流深床 / radial 多段 / Catofin 浅床多基 を同一入口で比較し、なぜ Catofin か」
+に再構築する。
 
-実行: python tools/build_stage_comparison_nb.py  (生成後に nbconvert --execute で出力を埋める)
+物語:
+  §1 設計問題と3候補形式
+  §2 単段の軸流深床は 0.5bar で圧損破綻(出発点の問題)
+  §3 2つの解の比較: radial 多段(直列+段間再加熱) vs Catofin 浅床多基(並列+HGM)
+  §4 なぜ Catofin か — 高選択率(=総収率)+ 単純さ。radial は内部品/分配/再生温度の不確かさで撤去
+  §5 Catofin の設計レバー: N_online(並列基数)= 圧損/転化の主レバー、L_bed = 転化レバー
+  §6 結論
+
+実行: python tools/build_stage_comparison_nb.py
+      python -m jupyter nbconvert --to notebook --execute --inplace monitor/stage_comparison.ipynb
 """
 import os
 import nbformat as nbf
@@ -20,212 +24,161 @@ cells = []
 md = lambda s: cells.append(nbf.v4.new_markdown_cell(s))
 co = lambda s: cells.append(nbf.v4.new_code_cell(s))
 
-md(r"""# なぜ反応器を 3 段にしたか — 単段の限界から多段化までの物語
+md(r"""# 反応器形式の選択 — なぜ Catofin 浅床・多基並列か
 
-本ノートは反応器設計の変遷を**順を追って**示す。出発点は\\
-**径方向流になる前の「単段の断熱固定床」**であり、そこから現在の **径方向流 3 段(段間再加熱)** に
-至る理由を、段数 1/2/3/4 の比較で定量的に説明する。
+本ノートは反応器**形式**の選択を、同一の反応器入口で3候補を実走比較して説明する。
 
-物語の筋:
+- **軸流深床**(出発点): 0.5 bar 低圧で Ergun 圧損が破綻(`reactor_pressure_drop_and_geometry.ipynb`)。
+- **radial 多段**(径方向流断熱床を直列+段間再加熱, UOP Oleflex 型): 圧損は解けるが、段数を増やすと
+  転化率↑の代わりに**選択率(=総収率)↓**、かつ直列の内部品/分配板/再生温度分布の不確かさが大きい。
+- **Catofin 浅床・多基並列**(現採用, Lummus Catofin 型): 浅床で圧損、並列基数で流速、**HGM 等価熱補償**で
+  床温を維持。**低per-pass転化でも高選択率(=高総収率)**を保ち、直列段が不要で単純。
 
-1. **出発点(§1)**: 当初の反応器は単段の断熱固定床。強吸熱 PDH では単通転化率が**断熱平衡に頭打ち**。
-2. **圧損ピボット(§2)**: 0.5 bar 低圧で軸流深床は圧力損失で不成立 → **径方向流**へ。
-   ただし**単段の転化率天井(~28%)は体積でも圧損でもなく『平衡』で決まる**。体積を増やせば天井に届くが超えられない
-   (この天井は圧損を考えない当初版にも同じく在った=温度低下は隠れていなかった)。
-3. **系の破綻(§3)**: 単段の低転化はリサイクルを巨大化し、膜分離フィードを希釈して系全体を不成立にする。
-4. **解決(§4)**: 実機 UOP Oleflex に倣い **多段化(段間再加熱)** で各段の平衡をリセットし累積転化率を上げる。
-5. **段数決定(§5,§6)**: 1/2/3/4 段を比較。**総合収率は単通選択率で律速**されるため、段数を増やすほど
-   転化率は上がるが選択率(=総合収率)は下がる。系が成立する**最小段数 = 3** が最適。
-
-> 反応器は `units/reactors/radial_flow.py` (純 Python, scipy ODE)。HYSYS 不要。\\
-> 数値は説明用の代表設計点。確定値は再最適化後に更新する【確認中】。
+> 鍵: **総収率 ≈ 単通選択率**(リサイクルが未反応プロパンを消尽)。だから「単通転化率を上げて選択率を
+> 犠牲にする」より「**選択率を保ち、不足分はリサイクル**」が総収率で有利。Catofin はこれに合致する。
+>
+> 反応器は純 Python (scipy ODE)。HYSYS 不要。数値は BO best (trial #227) の反応器入口。
 """)
 
-co(r"""import os, sys, math
+co(r"""import os, sys, math, warnings
 import numpy as np, pandas as pd, matplotlib.pyplot as plt
 
 ROOT = os.path.abspath('..')
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from units.reactors.radial_flow import (
-    RadialDesignVars, simulate_radial_flow_reactor_system,
-    simulate_radial_multibed_reactor_system,
-)
-from units.reactors.swing import FeedStream, FixedParams
+from units.reactors.swing import (DesignVars as AxialDesign, FeedStream, FixedParams,
+                                  simulate_swing_reactor_system)
+from units.reactors.radial_flow import RadialDesignVars, simulate_radial_multibed_reactor_system
+from units.reactors.catofin import CatofinDesignVars, simulate_catofin_reactor_system
 
-fixed = FixedParams()
-# 純プロパン基準 (レポート Table 4-4 と整合)。確定設計点の数値は再最適化後【確認中】。
-feed  = FeedStream(F_in={'A': 6400.0, 'B': 0.0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0},
-                   T_feed=314.15, P_in=50000.0)
-T_IN  = 939.0
-# 各段共通の径方向流ジオメトリ (1-4 段が全て圧損可行な代表値)
-design = RadialDesignVars(T_in=T_IN, t_cyc=17.0, D_inner=9.0, bed_thickness=0.5, H=30.0)
+# BO best #227 (catofin) の反応器入口: C3H8 70% + C3H6 リサイクル 30% (H2/C2 は除去済)
+FEED = FeedStream(F_in={'A': 3811.6, 'B': 1635.7, 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
+                  T_feed=305.03, P_in=50000.)
+def metrics(r):
+    e, p = r.equipment, r.performance
+    return dict(X=p.Conversion, S=p.Selectivity, dP=min(e.dP_over_P_actual*100, 999),
+                Ntot=e.N_reactors_total, cat=e.Catalyst_Weight_Total/1000,
+                pen=e.penalty_reason or 'OK')
+print('reactor inlet:', sum(FEED.F_in.values()), 'kmol/h  (C3H6 分率 30%)  P=0.5bar')""")
 
-print(f'純プロパン基準, T_in={T_IN:.0f}K, P=0.5bar')
-print(f'径方向流ジオメトリ(各段共通): D_inner=9m  Δr=0.5m  H=30m  t_cyc=17min')
-print('※数値は説明用の代表設計点、確定は再最適化後【確認中】')""")
+md(r"""## §1+§2. 出発点 — 単段の軸流深床は 0.5 bar で圧損破綻
 
-md(r"""## §1. 出発点 — 単段の断熱固定床(径方向流以前)
+PDH は 0.5 bar 低圧運転(平衡転化率のため不可欠)。現実的な 3mm 触媒では、軸流の**深い**充填層は
+Ergun 圧損が入口圧の数十%〜全損に達し**成立しない**(詳細は圧損ノート)。まずこれを確認する。
+""")
 
-反応器設計は当初、**単段の断熱固定床**として検討された。プロパン脱水素は強い吸熱反応
-($\Delta H_{r1}\approx+124$ kJ/mol)であり、断熱床ではガスが流れ方向に自己冷却して**出口温度の
-平衡に張り付く**ため、**単通転化率が断熱平衡(~20–28%)で頭打ち**になる。
-これは触媒量(体積)を増やしても破れない熱力学的上限である(機構の詳細は
-`reactor_conversion_ceiling.ipynb`)。まず単段の到達点を確認する。""")
+co(r"""with warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    r_ax = simulate_swing_reactor_system(AxialDesign(T_in=931.13, z_cat=20., t_cyc=14., D=10.),
+                                         FEED, FixedParams(d_p_m=0.003))
+m = metrics(r_ax)
+print(f'軸流深床 z=20m d_p=3mm: dP/P={m["dP"]:.0f}%  penalty={m["pen"]}  → 成立しない')
+print('→ 圧力(=平衡)で妥協できないので、反応器の幾何で解く。候補は radial 多段 と Catofin 浅床多基。')""")
 
-co(r"""r1 = simulate_radial_flow_reactor_system(design, feed, fixed)
-print(f'単段(径方向流 断熱床): X={r1.performance.Conversion:.1f}%  '
-      f'S={r1.performance.Selectivity:.1f}%  T_out={r1.effluent.T_out_avg-273.15:.0f}C')
-print('→ 単段では転化率が断熱平衡に頭打ち。これが出発点の問題。')""")
+md(r"""## §3. 2つの解の比較 — radial 多段 vs Catofin 浅床多基(同一入口)
 
-md(r"""## §2. 圧損による径方向流ピボットと「単段の天井は体積では破れない」
-
-反応平衡を有利にするため反応器は絶対圧 $0.5\,\mathrm{bar}$ の低圧で運転する。現実的な触媒粒径($2\text{--}6\,\mathrm{mm}$)では
-**軸流深床は Ergun 圧損($\Delta P/P>10\%$)で不成立**となるため、薄い環状床を半径方向に通す径方向流へ転換した
-(詳細は `reactor_pressure_drop_and_geometry.ipynb`)。
-
-ここで本章の核心を明確にする。**単段断熱床の単通転化率は断熱平衡(~28\%前後)で頭打ちであり、これは
-体積でも圧力損失でもなく『平衡』で決まる**。触媒量(床厚 $\Delta r$)を増やせば天井(~28\%)には漸近するが、
-\textbf{それを超えることは原理的にできない}。そして\textbf{この~28\%の天井は圧損を考えない当初版にも同じく存在していた}
-——温度低下(断熱冷却)はエネルギー収支に最初から入っており、隠れていたわけではない。
-
-したがって、
-
-> **単段の転化率天井(~28\%)を超える唯一の方法は、各段で平衡をリセットする多段化(段間再加熱)である。**
-
-圧損は「単段が天井に届くか」には影響するが(高流量で厚床は ΔP 超過しうる)、\textbf{天井そのものを動かさない}。
-多段化は圧損対策ではなく、\textbf{平衡で決まる単段天井を超えるための手段}である。下で体積掃引により天井を確認する。""")
-
-co(r"""import math
-# 単段 径方向床の体積掃引: 床厚 Δr(=体積)を増やすと転化率は断熱平衡天井に漸近するが超えない
-print('単段 径方向床の体積掃引 (D_inner=9m, H=30m, 純プロパン):')
-print('  Δr[m]  V_cat[m3]   X[%]   ΔP/P[%]  penalty')
-for dr in (0.5, 1.0, 1.5, 2.0):
-    d = RadialDesignVars(T_in=T_IN, t_cyc=17.0, D_inner=9.0, bed_thickness=dr, H=30.0)
-    r = simulate_radial_flow_reactor_system(d, feed, fixed)
-    V = math.pi * ((4.5 + dr)**2 - 4.5**2) * 30.0 * 0.5
-    print(f'   {dr:.1f}   {V:7.0f}    {r.performance.Conversion:4.1f}    '
-          f'{r.equipment.dP_over_P_actual*100:4.1f}    {r.equipment.penalty_reason!r}')
-print()
-print('→ 体積(Δr)を増やしても単通転化率は断熱平衡天井(~28-30%)で頭打ち、超えられない。')
-print('  天井は体積でも圧損でもなく「平衡」で決まる(圧損なしの当初版でも同じ天井)。')
-print('  この天井を超える唯一の手段が、各段で平衡をリセットする多段化(段間再加熱)である。')""")
-
-md(r"""## §3. 単段の低転化が系全体を破綻させる
-
-単段の低い単通転化率は、反応器単体では健全に見えても**リサイクルを通すと下流を破綻させる**。
-未反応プロパンが巨大なリサイクル流となり、C3 分離前の**膜分離器フィードがプロパン主体(プロピレン
-モル分率 ~18%)まで希釈**される。希薄フィードでは膜のプロピレン回収率が ~30% に留まり、
-
-- (i) C3 スプリッタへの透過側フィード流量がサロゲートモデルの学習域下限を割り込んで**不成立**、
-- (ii) 回収されなかったプロピレンがリサイクルで反応器に戻り副生成分に転化して**総合収率が ~46% へ低下**。
-
-つまり単段では「転化率が低すぎて系が回らない」。これを単段では解決できない。
-**【確認中: 本節の全系数値(膜回収率・収率等)は再最適化後に更新】**""")
-
-md(r"""## §4. 解決 = 多段化(段間再加熱)
-
-実機の低圧 PDH(UOP Oleflex)は径方向流断熱反応器を **3〜4 基直列**に並べ、各反応器の間に
-**加熱炉(段間再加熱)**を置いて吸熱で冷えたガスを反応温度へ戻す。各段で平衡がリセットされ、
-**累積転化率**が上がる。本設計もこの構成を採り、同一ジオメトリの径方向流断熱床を $N$ 段直列に
-接続して各段入口を $T_{\mathrm{in}}$ まで再加熱する(再加熱熱量は加熱炉燃料費に計上)。
-
-数値計算は**時刻同期**で行う(時刻 $t$ ごとに全段を直列積分してから時間平均)。次に段数 $N=1,2,3,4$ を比較する。""")
+- **radial 多段**: 径方向流断熱床を $N$ 段直列、段間で反応温度へ再加熱(平衡リセット)。段数で累積転化率↑。
+- **Catofin**: 浅床を $N_{online}$ 基**並列**、HGM 等価熱補償で床温維持。床体積で転化率↑(`reactor_conversion_ceiling.ipynb`)。
+""")
 
 co(r"""rows = []
-for n in (1, 2, 3, 4):
-    r = simulate_radial_multibed_reactor_system(design, feed, fixed, n_beds=n)
-    p, q, e = r.performance, r.equipment, r.effluent
-    rows.append(dict(
-        stages=n,
-        X_cum_pct=round(p.Conversion, 1),
-        S_pct=round(p.Selectivity, 1),
-        overall_yield_approx_S=round(p.Selectivity, 1),   # 総合収率 ≈ 単通選択率 (リサイクル消尽)
-        dP_over_P_pct=round(q.dP_over_P_actual * 100, 1),
-        N_reactors=q.N_reactors_total,
-        catalyst_t=round(q.Catalyst_Weight_Total / 1000),
-        heater_GJ_h=round(e.Q_preheat),
-        penalty=q.penalty_reason,
-    ))
+with warnings.catch_warnings():
+    warnings.simplefilter('ignore')
+    for nbed in (1, 2, 3, 4):
+        r = simulate_radial_multibed_reactor_system(
+            RadialDesignVars(T_in=939., t_cyc=17., D_inner=9., bed_thickness=0.5, H=30.),
+            FEED, FixedParams(), n_beds=nbed)
+        m = metrics(r); rows.append(dict(form=f'radial {nbed}段', **m))
+    rc = simulate_catofin_reactor_system(
+        CatofinDesignVars(T_in=931.13, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156), FEED)
+    rows.append(dict(form='Catofin #227', **metrics(rc)))
 df = pd.DataFrame(rows)
-print(df.to_string(index=False))
+print(df[['form','X','S','dP','Ntot','cat','pen']].round(1).to_string(index=False))
 print()
-print('累積転化率は段数とともに上がる (各段で平衡リセット) が、高転化ほど副反応が進み選択率は下がる。')
-print('反応器数・触媒量・加熱炉燃料は段数にほぼ比例して増える。')""")
+print('観察: radial は段数↑で X↑ だが S↓ (高転化→クラッキング)。Catofin は X=38% で S=82.6% と高い。')
 
-md(r"""## §5. 段数 vs 性能・コストの可視化""")
+fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
+rad = df[df.form.str.startswith('radial')]
+ax[0].plot(rad.X, rad.S, 'o-', color='C0', label='radial 多段 (1->4)')
+for _, rw in rad.iterrows():
+    ax[0].annotate(rw.form.replace('radial ',''), (rw.X, rw.S), fontsize=8, xytext=(3,3), textcoords='offset points')
+cat = df[df.form=='Catofin #227'].iloc[0]
+ax[0].plot(cat.X, cat.S, 'r*', ms=18, label='Catofin #227')
+ax[0].set_xlabel('single-pass conversion X [%]'); ax[0].set_ylabel('selectivity S = overall yield [%]')
+ax[0].set_title('Catofin keeps higher S (=yield) at moderate X'); ax[0].legend(fontsize=9); ax[0].grid(alpha=0.3)
 
-co(r"""fig, ax = plt.subplots(1, 2, figsize=(14, 5))
-
-ax[0].plot(df.stages, df.X_cum_pct, 'o-', color='blue', lw=2, label='cumulative conversion X')
-ax[0].plot(df.stages, df.S_pct, 's-', color='crimson', lw=2, label='selectivity S (= overall yield)')
-ax[0].set_xlabel('number of stages N'); ax[0].set_ylabel('[%]'); ax[0].set_xticks([1,2,3,4])
-ax[0].set_title('More stages: X up, but S (= overall yield) DOWN')
-ax[0].legend(fontsize=9); ax[0].grid(True, alpha=0.3); ax[0].set_ylim(0, 100)
-ax[0].annotate('overall yield is limited by\nper-pass selectivity (recycle)',
-               (2.5, df.S_pct.iloc[2]), fontsize=8, color='crimson',
-               xytext=(0, -40), textcoords='offset points',
-               arrowprops=dict(arrowstyle='->', color='crimson'))
-
-ax2 = ax[1]
-ax2.plot(df.stages, df.N_reactors, 'D-', color='green', lw=2, label='# reactors')
-ax2.plot(df.stages, df.catalyst_t, '^--', color='saddlebrown', lw=2, label='catalyst [t]')
-ax2b = ax2.twinx()
-ax2b.plot(df.stages, df.heater_GJ_h, 'v:', color='orange', lw=2, label='heater duty [GJ/h]')
-ax2b.set_ylabel('interstage heater duty [GJ/h]', color='orange')
-ax2.set_xlabel('number of stages N'); ax2.set_ylabel('count / catalyst [t]'); ax2.set_xticks([1,2,3,4])
-ax2.set_title('Cost proxies rise ~linearly with stages')
-ax2.legend(fontsize=9, loc='upper left'); ax2.grid(True, alpha=0.3)
+ax[1].bar(df.form, df.S, color=['C0','C0','C0','C0','crimson'])
+ax[1].set_ylabel('selectivity S = overall yield [%]'); ax[1].set_ylim(60, 90)
+ax[1].axhline(cat.S, ls='--', color='crimson', alpha=0.6)
+ax[1].set_title('Overall yield (=S): Catofin > radial multibed'); ax[1].tick_params(axis='x', rotation=30)
 plt.tight_layout(); plt.show()""")
 
-md(r"""## §6. なぜ 3 段か — 決め手
+md(r"""## §4. なぜ Catofin か
 
-**鍵となる事実: リサイクル消尽運転では総合収率 ≈ 単通選択率**。\\
-プロパンは未反応でもリサイクルされ最終的に転化されるので、**炭素損失はクラッキング(選択率)で決まる**。
-つまり総合収率は単通転化率ではなく**単通選択率**で律速される。したがって:
+**総収率 ≈ 単通選択率**(未反応プロパンはリサイクルで消尽 → 炭素損失はクラッキング=選択率で決まる)。
+したがって設計目標は「単通転化率を最大化」ではなく「**選択率(=総収率)を保ちつつ系が成立する転化率を確保**」。
 
-- **段数を増やすほど選択率(=総合収率)は下がる** → 収率の観点では段数は**少ない方が良い**。
-- しかし**段数が少なすぎると単通転化率が低く、§3 のリサイクル希釈で系が不成立**になる。
+| 観点 | radial 多段 | **Catofin 浅床多基(採用)** |
+|---|---|---|
+| 圧損 (0.5bar) | 解ける(薄い環状床) | 解ける(浅床+多基) |
+| 単通転化率 | 段数で高くできる(3段 ~55%) | HGM+床体積で ~38% |
+| **選択率(=総収率)** | 高転化で**低下(3段 ~70%)** | **高く保てる(~82.6%)** ← 総収率で有利 |
+| 床温維持 | 段間**再加熱炉**(直列に必要) | **HGM 等価熱補償**(再加熱炉不要) |
+| 機構の不確かさ | 直列の内部品/分配板/再生温度分布が複雑 | 並列スイング、相対的に単純 |
 
-よって最適段数は「**系が成立する最小段数**」。3 段で C3 スプリッタ成立に十分な転化率が確保され、
-4 段にしても転化率が過剰になるだけで選択率(総合収率)はさらに下がり、反応器・触媒・加熱炉燃料・
-累積圧力損失が増える。3→4 段の増分を見る。""")
+- **Catofin は低per-pass転化(~38%)でも高選択率(~82.6%)を保つ** → 総収率で radial 多段(高転化・低選択率)に勝る。
+  不足分の転化はリサイクルが担う。
+- 段間再加熱の直列トレインが不要(HGM が床温維持)。
+- **radial は撤去**: 内部品/分配板/再生時の温度分布の不確かさが大きく、本設計のモデル精度では正当化しにくい。
+""")
 
-co(r"""inc = df.copy()
-inc['dX'] = inc.X_cum_pct.diff()
-inc['dS'] = inc.S_pct.diff()
-print(inc[['stages','X_cum_pct','S_pct','dX','dS','dP_over_P_pct','N_reactors','catalyst_t','heater_GJ_h']].to_string(index=False))
-print()
-d34 = df[df.stages==4].iloc[0]
-d33 = df[df.stages==3].iloc[0]
-print('3 → 4 段の比較:')
-print(f'  累積転化率 {d33.X_cum_pct:.1f}% → {d34.X_cum_pct:.1f}%  (+{d34.X_cum_pct-d33.X_cum_pct:.1f}pt)')
-print(f'  選択率(=総合収率) {d33.S_pct:.1f}% → {d34.S_pct:.1f}%  ({d34.S_pct-d33.S_pct:+.1f}pt)  ← 総合収率は下がる')
-print(f'  反応器数 {d33.N_reactors} → {d34.N_reactors} 基,  触媒 {d33.catalyst_t} → {d34.catalyst_t} t,  '
-      f'加熱炉 {d33.heater_GJ_h} → {d34.heater_GJ_h} GJ/h,  ΔP {d33.dP_over_P_pct:.1f}% → {d34.dP_over_P_pct:.1f}%')
-print()
-print('→ 4 段は転化率が上がるだけで総合収率(選択率)は下がり、コスト(反応器/触媒/燃料/圧損)が増える。')
-print('  3 段で既に系成立に十分 → TAC の観点から 3 段を採用。')
-print('  (注: 薄床の確定設計点では 4 段は累積 ΔP が 10% 上限を超えて不成立になる場合もある。)')""")
+md(r"""## §5. Catofin の設計レバー — 直列「段数」に代わるもの
 
-md(r"""## §7. 結論
+Catofin に直列段は無い。主レバーは **$N_{online}$(並列基数)** と **$L_{bed}$(浅床厚)**:
+- $N_{online}$: 大流量を分割 → 1基流速↓ → **圧損↓ かつ 滞留時間↑で転化率↑**(圧損と転化の両方を動かす主レバー)。
+- $L_{bed}$: 床体積 → 転化率(HGM が温度を保つので平衡頭打ちなし)。
+""")
 
-| 段数 | 累積転化率 | 選択率(≈総合収率) | コスト(反応器/触媒/燃料/ΔP) | 判定 |
-|---|---|---|---|---|
-| 1 | 低すぎ | 最高 | 最小 | **系が不成立**(リサイクル希釈) |
-| 2 | やや低 | 高 | 小 | 系が成立しにくい |
-| **3** | **十分** | **良好** | **中** | **採用**(系成立の最小段数) |
-| 4 | 過剰 | 低下 | 大 | 収率↓+コスト↑で不利 |
+co(r"""def run_cat(**kw):
+    d = dict(T_in=931.13, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156); d.update(kw)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        return metrics(simulate_catofin_reactor_system(CatofinDesignVars(**d), FEED))
 
-- **総合収率は単通選択率で律速**される(リサイクルが未反応プロパンを消尽)。よって段数は本来少ない方が
-  収率に有利だが、少なすぎると単通転化率が低く**リサイクル希釈で系が破綻**する。
-- **3 段は系が成立する最小段数**であり、C3 スプリッタ成立に十分な転化率を確保しつつ選択率(総合収率)
-  とコストを最良に保つ。4 段は転化率が過剰になるだけで総合収率は下がり、反応器・触媒・加熱炉燃料・
-  累積圧力損失が増えるため利得がない。
-- 実機 UOP Oleflex の 3〜4 基の下端にも対応する。**→ 3 段を採用**。
+print('N_online 掃引 (浅床多基の「基数」= 直列段数の代替):')
+Ns = [6, 8, 10, 14, 18, 24]; Xn, dPn = [], []
+for n in Ns:
+    m = run_cat(N_online=n); Xn.append(m['X']); dPn.append(m['dP'])
+    print(f'  N_online={n:>2}: X={m["X"]:4.1f}%  S={m["S"]:4.1f}%  dP/P={m["dP"]:4.1f}%  N_total={m["Ntot"]:>3}  {m["pen"]}')
 
-> 数値は説明用の代表設計点。確定値・最終的な段数感度は再最適化後に更新する【確認中】。
+fig, ax = plt.subplots(figsize=(7.5, 4.4))
+ax.plot(Ns, Xn, 'o-', color='blue', label='conversion X [%]')
+ax2 = ax.twinx(); ax2.plot(Ns, dPn, 's--', color='crimson', label='dP/P [%]')
+ax2.axhline(10, ls=':', color='crimson', alpha=0.6); ax.axvline(24, ls=':', color='gray')
+ax.text(24.2, min(Xn)+2, '#227 N=24', fontsize=8)
+ax.set_xlabel('N_online (parallel vessels)'); ax.set_ylabel('conversion X [%]', color='blue')
+ax2.set_ylabel('dP/P [%]', color='crimson')
+ax.set_title('Catofin lever: N_online sets both dP (down) and conversion (up)')
+ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
+print('\n→ N_online が小さいと圧損超過(N=6 で失敗)。基数を増やすと圧損が下がり転化率も上がる。')
+print('  #227 は N_online=24 で ΔP 余裕(3.5%)と必要転化率(38%, S=82.6%)を両立。')""")
+
+md(r"""## §6. 結論
+
+| 形式 | 圧損(0.5bar) | 単通X | 選択率(=総収率) | 機構 | 判定 |
+|---|---|---|---|---|---|
+| 軸流深床 | **破綻** | — | — | 単純 | 不成立 |
+| radial 多段(3段) | OK | 高(~55%) | **低(~70%)** | 直列+段間再加熱+内部品(不確か) | 撤去 |
+| **Catofin 浅床多基** | **OK** | 中(~38%) | **高(~82.6%)** | 並列スイング+HGM(再加熱炉不要) | **採用** |
+
+- **総収率 ≈ 選択率**なので、Catofin の「低per-pass転化・高選択率」は radial 多段の「高転化・低選択率」より
+  総収率で有利。不足転化はリサイクルが担う。
+- Catofin は段間再加熱の直列トレインが不要(HGM が床温維持)で、内部品/分配の不確かさも radial より小さい。
+- 設計レバーは直列「段数」でなく **$N_{online}$(並列基数, 圧損+転化の主レバー)** と $L_{bed}$(転化)。
+  #227 は $N_{online}=24$ で圧損余裕と必要転化率を両立。 **→ Catofin 浅床・多基並列を採用**。
+
+> 数値は #227 設計点。radial の段数比較は撤去理由の定量化として残す(履歴)。HGM 再生動特性はスコープ外。
 """)
 
 nb['cells'] = cells
@@ -233,9 +186,7 @@ nb.metadata.update({
     'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
     'language_info': {'name': 'python'},
 })
-
-out = os.path.join(os.path.dirname(__file__), '..', 'monitor', 'stage_comparison.ipynb')
-out = os.path.normpath(out)
+out = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'monitor', 'stage_comparison.ipynb'))
 with open(out, 'w', encoding='utf-8') as f:
     nbf.write(nb, f)
 print('wrote', out)
