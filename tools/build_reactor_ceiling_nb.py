@@ -1,12 +1,12 @@
 r"""monitor/reactor_conversion_ceiling.ipynb を生成する builder (catofin 版, 2026-06-04 改訂)。
 
-catofin(浅床・多基・HGM等価熱補償)での単通転化率(~38%)と選択率(~82%)が
+catofin(浅床・多基・HGM等価熱補償)での単通転化率(~41%)と選択率(~80%)が
 「シミュレータのバグではなく熱力学・反応速度論+HGM補償で必然」であることを厳密に示す。
   §1 反応ネットワークと速度式 / Arrhenius 定数 (反応器非依存)
   §2 純断熱の転化率天井 vs Catofin HGM補償 — HGM が床温を維持し天井を持ち上げる
   §3 選択率の上限 = 速度比 + 触媒失活 (S_max=k1/(k1+k2))
   §4 Catofin 設計レバー (L_bed/N_online/d_p): 転化率は床体積でスケール、選択率はほぼ一定
-  §5 シミュレータ実走検証 (#227: X=37.8%, S=82.6% + 炭素収支)
+  §5 シミュレータ実走検証 (#201: X=40.6%, S=80.1% + 炭素収支)
   §6 結論
 
 注: radial 時代は「断熱平衡で転化率が頭打ち、体積を増やしても無効」だったが、Catofin は HGM 等価熱補償で
@@ -21,18 +21,18 @@ cells = []
 def md(s): cells.append(new_markdown_cell(s))
 def code(s): cells.append(new_code_cell(s))
 
-md(r"""# 反応器の単通転化率(~38%)と選択率(~82%)は理論的必然か — 厳密検証 (Catofin)
+md(r"""# 反応器の単通転化率(~41%)と選択率(~80%)は理論的必然か — 厳密検証 (Catofin)
 
-**問い**: BO best (trial #227, **Catofin型 浅床・多基並列**) の反応器は **単通転化率 X≈38%・選択率 S≈82%**。
+**問い**: BO best (trial #201, **Catofin型 浅床・多基並列**) の反応器は **単通転化率 X≈41%・選択率 S≈80%**。
 これは熱力学・反応速度論からの構造的挙動か、それともシミュレータの不具合か。
 
 **結論(本notebookで厳密に示す)**:
 
 | 指標 | 値 | 性質 | 根拠 |
 |---|---|---|---|
-| 単通転化率 X | ~38% | **HGM補償 + 床体積で決まる**(純断熱平衡より高い) | HGM 等価熱補償が床温を $T_{in}-\Delta T_{max}$(=608°C)以上に維持 → 断熱冷却による平衡頭打ちを回避。転化率は床体積($L_{bed},N_{online}$)で伸びる |
-| 選択率 S | ~82% | **経済最適**(物理上限ではない) | 速度比 $k_1/(k_1+k_2)$ + 触媒失活で決まる。降温/短サイクルで↑可だが生産量↓/反応器数↑ |
-| 総収率 | ~82% ≈ S | リサイクルで総括転化率~99% | 収率天井=選択率の運転値 |
+| 単通転化率 X | ~41% | **HGM補償 + 床体積で決まる**(純断熱平衡より高い) | HGM 等価熱補償が床温を $T_{in}-\Delta T_{max}$(=612°C)以上に維持 → 断熱冷却による平衡頭打ちを回避。転化率は床体積($L_{bed},N_{online}$)で伸びる |
+| 選択率 S | ~80% | **経済最適**(物理上限ではない) | 速度比 $k_1/(k_1+k_2)$ + 触媒失活で決まる。降温/短サイクルで↑可だが生産量↓/反応器数↑ |
+| 総収率 | ~80% ≈ S | リサイクルで総括転化率~99% | 収率天井=選択率の運転値 |
 
 **radial 時代との本質的な違い**:
 - radial(断熱床)では「転化率は断熱平衡(~28%)で頭打ち、**体積を増やしても無効**」だった。
@@ -63,18 +63,18 @@ from src.config import THERMO_DATA, PDHConfig, R, T0
 
 th  = PDHThermo(); kin = PDHKinetics(); cfg = PDHConfig()
 
-# ---- BO best #227 (Catofin) の反応器入口 (reactor_inlet) ----
-# H2 は PSA, C2 は Dist2 で除去済 → 入口は C3H8(70%) + C3H6 リサイクル(30%) の C3 主体。
-A0, B0 = 3811.6, 1635.7
+# ---- BO best #201 (Catofin) の反応器入口 (reactor_inlet) ----
+# H2 は PSA, C2 は Dist2 で除去済 → 入口は C3H8(63%) + C3H6 リサイクル(37%) の C3 主体。
+A0, B0 = 3612.5, 2128.8
 F_IN = {'A': A0, 'B': B0, 'C': 0.0, 'D': 0.0, 'E': 0.0, 'F': 0.0}
-T_IN = 931.13                     # K (= 658 degC, 予熱炉出口 = 設計変数)
+T_IN = 935.15                     # K (= 662 degC, 予熱炉出口 = 設計変数)
 P    = 50000.0                    # Pa (0.5 bar)
-# Catofin 設計点 (#227)
-CAT  = dict(T_in=T_IN, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156)
+# Catofin 設計点 (#201)
+CAT  = dict(T_in=T_IN, t_cyc=14.005, D=10.763, L_bed=1.577, N_online=7, d_p=0.005843)
 DT_MAX = float(os.environ.get('PDH_CATOFIN_DTMAX', '50'))   # HGM が許す床温降下 [K]
 
 fixed = FixedParams()
-feed  = FeedStream(F_in=F_IN, T_feed=305.03, P_in=P)
+feed  = FeedStream(F_in=F_IN, T_feed=307.0, P_in=P)
 
 def run_cat(**kw):
     d = dict(CAT); d.update(kw)
@@ -125,8 +125,8 @@ ax[2].axvline(T_IN-273.15, color='gray', ls=':'); ax[2].set_xlabel('T [degC]'); 
 ax[2].set_title('r1 equilibrium constant K_eq(T)'); ax[2].legend(fontsize=8); ax[2].grid(True, alpha=0.3, which='both')
 plt.tight_layout(); plt.show()
 print('S_max=k1/(k1+k2): ' + '  '.join(
-    f'{t}C->{kin._k1(t+273.15)/(kin._k1(t+273.15)+kin._k2(t+273.15))*100:.0f}%' for t in [520,600,658,700,750]))
-print('→ 昇温で intrinsic 選択率天井が低下 (Ea2>>Ea1)。設計点 658C 近傍が S~82% の根拠。')
+    f'{t}C->{kin._k1(t+273.15)/(kin._k1(t+273.15)+kin._k2(t+273.15))*100:.0f}%' for t in [520,600,662,700,750]))
+print('→ 昇温で intrinsic 選択率天井が低下 (Ea2>>Ea1)。設計点 662C 近傍が S~80% の根拠。')
 """)
 
 md(r"""## §2. 純断熱の転化率天井 vs **Catofin HGM 補償**
@@ -134,7 +134,7 @@ md(r"""## §2. 純断熱の転化率天井 vs **Catofin HGM 補償**
 PDH は強吸熱($\Delta H_{r1}\approx+124$ kJ/mol)。**純断熱**ではガスが流れ方向に自己冷却して
 $r_1$ がその場の平衡で止まり、**転化率が頭打ち**になる(radial/軸流断熱床の問題、`reactor_pressure_drop_*` 参照)。
 
-**Catofin は HGM 等価熱補償**(再生蓄熱/酸化還元の熱)で床温を $T_{in}-\Delta T_{max}$(=608°C)以上に維持する。
+**Catofin は HGM 等価熱補償**(再生蓄熱/酸化還元の熱)で床温を $T_{in}-\Delta T_{max}$(=612°C)以上に維持する。
 床が冷えないので $K_{eq}$ が保たれ、**転化率は平衡頭打ちにならず床体積で伸びる**。
 下で「純断熱(直接 ODE, HGM 無)」と「Catofin(HGM 有, 床体積=$L_{bed}$ 掃引)」を比較する。
 """)
@@ -142,7 +142,7 @@ $r_1$ がその場の平衡で止まり、**転化率が頭打ち**になる(rad
 code(r"""# (1) 純断熱: swing 直接 ODE (HGM floor 無し) を深い床まで積分 → 平衡頭打ちを見る。
 #     大粒径(20mm)+大断面で ΔP を無視できる条件にし、断熱冷却の効果だけを分離する。
 a0 = calc_a(0.0, T_IN, P); D_demo = CAT['D']; A_cross = math.pi/4*D_demo**2
-_eps, _eps_bed, _phi, _dp_demo, _Np = 0.5, 0.40, 0.9, 0.020, 24
+_eps, _eps_bed, _phi, _dp_demo, _Np = 0.5, 0.40, 0.9, 0.020, 7
 F0 = np.array([F_IN[c]*1000.0/3600.0 for c in _COMPS])
 y0 = np.concatenate([F0, [T_IN], [P]])      # 状態 = [F(6), T, P]
 sol = solve_ivp(lambda z, y: _ode_axial(z, y, a0, A_cross, _eps, _eps_bed, _dp_demo, _phi, _Np),
@@ -155,7 +155,7 @@ for z in zz:
 Xad = np.array(Xad); Tad = np.array(Tad)
 
 # (2) Catofin (HGM 有): L_bed (床体積) を掃引 → 転化率がスケール
-lbs = [0.3, 0.5, 0.65, 0.8, 1.0]
+lbs = [0.5, 1.0, 1.577, 2.5, 3.0]
 Xcat = [run_cat(L_bed=lb)['X'] for lb in lbs]
 Scat = [run_cat(L_bed=lb)['S'] for lb in lbs]
 base = run_cat()
@@ -172,7 +172,7 @@ ax[0].legend(loc='lower right', fontsize=8); ax[0].grid(alpha=0.3)
 
 ax[1].plot(lbs, Xcat, 'o-', color='blue', lw=2, label='Catofin conversion X')
 ax[1].plot(lbs, Scat, 's-', color='crimson', lw=2, label='Catofin selectivity S')
-ax[1].axvline(CAT['L_bed'], color='gray', ls=':', label=f'#227 L_bed={CAT["L_bed"]:.2f}m')
+ax[1].axvline(CAT['L_bed'], color='gray', ls=':', label=f'#201 L_bed={CAT["L_bed"]:.2f}m')
 ax[1].set_xlabel('shallow-bed thickness L_bed [m]  (= per-vessel volume)')
 ax[1].set_ylabel('[%]'); ax[1].set_ylim(0, 100); ax[1].grid(alpha=0.3)
 ax[1].set_title('Catofin (HGM): X scales with bed volume (NOT eq-plateaued)'); ax[1].legend(fontsize=8)
@@ -180,13 +180,13 @@ plt.tight_layout(); plt.show()
 
 print(f'純断熱(HGM無, 直接ODE): z=30m で X={Xad[-1]:.1f}%, T={Tad[-1]:.0f}C  → 冷えて平衡頭打ち')
 print(f'Catofin(HGM有) L_bed 掃引: ' + '  '.join(f'{lb}m->X={x:.0f}%' for lb,x in zip(lbs,Xcat)))
-print(f'  → HGM が床温を {T_IN-273.15-DT_MAX:.0f}C 以上に維持 → 転化率は床体積でスケール (#227: X={base["X"]:.1f}%)')
+print(f'  → HGM が床温を {T_IN-273.15-DT_MAX:.0f}C 以上に維持 → 転化率は床体積でスケール (#201: X={base["X"]:.1f}%)')
 print(f'  S は床体積でほぼ不変 ({min(Scat):.0f}-{max(Scat):.0f}%) = 選択率は速度論/温度で決まり体積に依らない')
 """)
 
 md(r"""**読み方**: 左図 — 純断熱では床が冷えて(赤破線)転化率が平衡で頭打ち。Catofin の HGM は床温を緑線
-($T_{in}-\Delta T_{max}$=608°C)以上に維持する。右図 — その結果 Catofin の転化率は**床体積($L_{bed}$)でスケール**
-(17.8%→38.7%)し、平衡頭打ちにならない。選択率 S は体積でほぼ不変。
+($T_{in}-\Delta T_{max}$=612°C)以上に維持する。右図 — その結果 Catofin の転化率は**床体積($L_{bed}$)でスケール**
+(床体積に応じて単調増加)し、平衡頭打ちにならない。選択率 S は体積でほぼ不変。
 
 つまり Catofin では**「転化率を上げたければ床体積を増やせばよい」**(HGM が温度を保つ限り)。これは radial 断熱床の
 「体積を増やしても平衡で無効」とは逆。代償は HGM 補償熱(燃料 OPEX)と触媒量・反応器数。
@@ -210,17 +210,17 @@ fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
 ax[0].plot(sw.T_in_C, sw.X, 'o-', color='blue', label='Conversion X')
 ax[0].plot(sw.T_in_C, sw.S, 's-', color='crimson', label='Selectivity S')
 ax[0].plot(sw.T_in_C, sw.XS, '^--', color='green', label='single-pass yield X*S')
-ax[0].axvline(T_IN-273.15, color='gray', ls=':', label=f'#227 {T_IN-273.15:.0f}C')
+ax[0].axvline(T_IN-273.15, color='gray', ls=':', label=f'#201 {T_IN-273.15:.0f}C')
 ax[0].set_xlabel('T_in [degC]'); ax[0].set_ylabel('[%]'); ax[0].legend(fontsize=8); ax[0].grid(alpha=0.3)
 ax[0].set_title('Catofin: X-S trade-off vs T_in')
 ax[1].plot(sw.X, sw.S, 'o-', color='darkviolet')
-ax[1].plot(38.0, 82.6, 'r*', ms=16, label='#227 (37.8%, 82.6%)')
+ax[1].plot(40.6, 80.1, 'r*', ms=16, label='#201 (40.6%, 80.1%)')
 ax[1].set_xlabel('Conversion [%]'); ax[1].set_ylabel('Selectivity [%]'); ax[1].legend(fontsize=8); ax[1].grid(alpha=0.3)
 ax[1].set_title('Higher T_in -> higher X but lower S')
 plt.tight_layout(); plt.show()
 print(sw.round(1).to_string(index=False))
 print('→ 昇温で X↑/S↓ (Ea2>>Ea1)。範囲が狭い(930-940K)のは Dist2 の C2 必要量で T_in 下限が律速されるため')
-print('  (別ノート lpg/main の bounds)。S~82% は速度論で決まる経済最適。')
+print('  (別ノート lpg/main の bounds)。S~80% は速度論で決まる経済最適。')
 """)
 
 md(r"""## §4. Catofin 設計レバー — 転化率は何で決まるか
@@ -233,10 +233,10 @@ md(r"""## §4. Catofin 設計レバー — 転化率は何で決まるか
 """)
 
 code(r"""print('L_bed 掃引 (転化率レバー):')
-for lb in (0.3, 0.5, 0.65, 0.8, 1.0):
+for lb in (0.5, 1.0, 1.577, 2.5, 3.0):
     x = run_cat(L_bed=lb); print(f'  L_bed={lb:.2f}m: X={x["X"]:4.1f}%  S={x["S"]:4.1f}%  dP/P={x["dP"]:.1f}%  {x["pen"]}')
 print('N_online 掃引 (転化率+圧損レバー):')
-for n in (8, 10, 14, 18, 24):
+for n in (6, 7, 8, 12, 18):
     x = run_cat(N_online=n); print(f'  N_online={n:>2}: X={x["X"]:4.1f}%  S={x["S"]:4.1f}%  dP/P={x["dP"]:4.1f}%  {x["pen"]}')
 print('d_p 掃引 (純圧損レバー, X 不変):')
 for dp in (2, 3, 4, 6):
@@ -245,11 +245,11 @@ print('\n→ 転化率は L_bed と N_online (=床体積/滞留時間) で決ま
 print('  選択率はどのレバーでもほぼ一定 (速度論/温度で決まる)。')
 """)
 
-md(r"""## §5. シミュレータ実走検証 (#227 再現 + 炭素収支)
+md(r"""## §5. シミュレータ実走検証 (#201 再現 + 炭素収支)
 """)
 
 code(r"""x = run_cat()
-print(f'(1) #227 再現: X={x["X"]:.1f}%  S={x["S"]:.1f}%  T_out={x["Tout"]:.0f}C  '
+print(f'(1) #201 再現: X={x["X"]:.1f}%  S={x["S"]:.1f}%  T_out={x["Tout"]:.0f}C  '
       f'(HGM floor {T_IN-273.15-DT_MAX:.0f}C)  N_total={x["Ntot"]}基  触媒={x["Wcat"]:.0f}t')
 # 炭素収支
 with warnings.catch_warnings():
@@ -267,19 +267,19 @@ print(f'    T_out={r.effluent.T_out_avg-273.15:.0f}C ≈ HGM floor {T_IN-273.15-
 
 md(r"""## §6. 結論
 
-Catofin 反応器の単通転化率 ~38% と選択率 ~82% は、所与の熱力学・速度論 + HGM 等価熱補償から導かれる
+Catofin 反応器の単通転化率 ~41% と選択率 ~80% は、所与の熱力学・速度論 + HGM 等価熱補償から導かれる
 挙動であり、シミュレータの不具合ではない。
 
-1. **単通転化率(~38%)= HGM 補償 + 床体積で決まる**。純断熱なら強吸熱の自己冷却で平衡頭打ち(radial の問題)
-   だが、Catofin の HGM が床温を $T_{in}-\Delta T_{max}$(=608°C)以上に維持するため、転化率は**床体積
+1. **単通転化率(~41%)= HGM 補償 + 床体積で決まる**。純断熱なら強吸熱の自己冷却で平衡頭打ち(radial の問題)
+   だが、Catofin の HGM が床温を $T_{in}-\Delta T_{max}$(=612°C)以上に維持するため、転化率は**床体積
    ($L_{bed},N_{online}$)でスケール**する(§2,§4)。代償は HGM 補償熱(燃料)+触媒・反応器数。
-2. **選択率(~82%)= 速度比 + 失活で決まる経済最適**(物理上限でない)。降温/短サイクルで↑可だが
-   生産量↓・反応器数↑ の代償。BO はそれらと釣り合う ~82% を選んだ。
+2. **選択率(~80%)= 速度比 + 失活で決まる経済最適**(物理上限でない)。降温/短サイクルで↑可だが
+   生産量↓・反応器数↑ の代償。BO はそれらと釣り合う ~80% を選んだ。
 3. **radial 時代との違い**: radial 断熱床は「平衡頭打ち・体積無効」。Catofin は HGM で「体積で転化率が伸びる」。
    律速は平衡でなく「HGM がどれだけ床温を保てるか($\Delta T_{max}$)」と「選択率トレードオフ」。
 
 > HGM 補償は等価モデル(`PDH_CATOFIN_DTMAX` で床温降下上限を表現)。再生動特性の詳細は未計上=スコープ外。
-> 数値は #227 設計点。$\Delta T_{max}$ 感度は env で確認可。
+> 数値は #201 設計点。$\Delta T_{max}$ 感度は env で確認可。
 """)
 
 nb['cells'] = cells

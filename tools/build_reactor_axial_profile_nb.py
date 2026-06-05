@@ -35,7 +35,7 @@ def code(s): cells.append(new_code_cell(s))
 # ===========================================================================
 md(r"""# 反応器の軸方向プロファイルとサイクル経時 — Catofin 内部の可視化
 
-**目的**: BO best (trial #227, **Catofin型 浅床・多基並列スイング**) の反応器について、
+**目的**: BO best (trial #201, **Catofin型 浅床・多基並列スイング**) の反応器について、
 これまで数値 (出口の時間平均 X/S) でしか見ていなかった**床内部 z 方向**と**サイクル t 方向**の
 生プロファイルを実コード (`units/reactors/swing.py` の ODE) から再構成する。報告書 §4.5 /
 スライド7 の主役図。
@@ -43,7 +43,7 @@ md(r"""# 反応器の軸方向プロファイルとサイクル経時 — Catofi
 | 図 | 何を見せるか | 報告書での役割 |
 |---|---|---|
 | **Fig1 ★** | $T(z),X(z)$ — **HGM補償 vs 無補償断熱** | 「断熱だと天井→HGMで床温維持→転化率が伸びる」§4.4.3→4.4.4 の核心 |
-| **Fig2 ★** | 微分/累積選択率 $S_{diff}(z),S_{int}(z)$ | 床後半で平衡接近+クラッキングにより微分選択率が崩落→積分83%に落ち着く |
+| **Fig2 ★** | 微分/累積選択率 $S_{diff}(z),S_{int}(z)$ | 床後半で平衡接近+クラッキングにより微分選択率が崩落→積分80%に落ち着く |
 | Fig4 | 反応速度 $r_1,r_2,r_3(z)$ | 主反応 $r_1$ は平衡で停止、不可逆 $r_2$ は床後半でも進行 = 選択率劣化機構 |
 | **Fig5 ★** | サイクル経時 $a(t),X(t),S(t)$ | 反応中に活性・転化率が落ち時間平均を採用 = t_cyc選定・スイング必要性 |
 | Fig3 | 分圧 $p_i(z)$ + 全圧 $P(z)$ | 組成発展と Ergun 圧損 (0.5bar 低圧での圧損度) |
@@ -89,7 +89,7 @@ FIGDIR = '.'   # priority 図の保存先 (= monitor/)
 # ---------------------------------------------------------------------------
 md(r"""## §1. 設計点・固定パラメータと軸方向積分ヘルパ
 
-**設計点**: BO best #227 (Catofin)。反応器入口 `reactor_inlet` はリサイクル収束後の値
+**設計点**: BO best #201 (Catofin)。反応器入口 `reactor_inlet` はリサイクル収束後の値
 (H2 は PSA, C2 は Dist2 で除去済 → C3H8 + C3H6リサイクルの C3 主体)。
 他の反応器ノート (`reactor_conversion_ceiling`) と同一の値を用いて整合させる。
 
@@ -98,13 +98,13 @@ md(r"""## §1. 設計点・固定パラメータと軸方向積分ヘルパ
 HGM が床体積の一部を占めるため有効触媒分率 $\varphi_{cat}<1$。粒内拡散は有効係数 $\eta$ (Thiele)。
 """)
 
-code(r"""# ---- BO best #227 (Catofin) 設計点・反応器入口 (reactor_conversion_ceiling と同値) ----
-A0, B0 = 3811.6, 1635.7                 # reactor_inlet C3H8 / C3H6(recycle) [kmol/h] (系全体)
+code(r"""# ---- BO best #201 (Catofin) 設計点・反応器入口 (reactor_conversion_ceiling と同値) ----
+A0, B0 = 3612.5, 2128.8                 # reactor_inlet C3H8 / C3H6(recycle) [kmol/h] (系全体)
 F_IN_SYS = {'A': A0, 'B': B0, 'C': 0., 'D': 0., 'E': 0., 'F': 0.}
-T_IN   = 931.13                          # K (= 658 degC, 予熱炉出口)
+T_IN   = 935.15                          # K (= 662 degC, 予熱炉出口)
 P      = 50000.0                         # Pa (0.5 bar, contest §3-3 規定)
-T_FEED = 305.03                          # K (予熱前)
-CAT = dict(T_in=T_IN, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156)
+T_FEED = 307.0                           # K (予熱前)
+CAT = dict(T_in=T_IN, t_cyc=14.005, D=10.763, L_bed=1.577, N_online=7, d_p=0.005843)
 
 # HGM / 触媒モデル定数 (catofin.py の既定。ΔT_max は env で上書き可)
 DT_MAX  = float(os.environ.get('PDH_CATOFIN_DTMAX',  '50'))    # 床温降下上限 [K]
@@ -169,7 +169,7 @@ with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     _ref = simulate_catofin_reactor_system(CatofinDesignVars(**CAT), FeedStream(F_in=F_IN_SYS, T_feed=T_FEED, P_in=P))
 X_REF, S_REF = _ref.performance.Conversion, _ref.performance.Selectivity
-print(f'設計点 #227: T_in={T_IN-273.15:.0f}C  P={P/1e5:.2f}bar  L_bed={CAT["L_bed"]:.3f}m  '
+print(f'設計点 #201: T_in={T_IN-273.15:.0f}C  P={P/1e5:.2f}bar  L_bed={CAT["L_bed"]:.3f}m  '
       f'N_online={N_ON}  d_p={CAT["d_p"]*1e3:.2f}mm  t_cyc={CAT["t_cyc"]:.2f}min')
 print(f'反応器入口(系全体): C3H8={A0:.0f} + C3H6(recycle)={B0:.0f} kmol/h  '
       f'(per-vessel: C3H8={F_IN_PV["A"]:.1f} + C3H6={F_IN_PV["B"]:.1f})')
@@ -182,9 +182,9 @@ md(r"""## §2. Fig1 ★ — 温度・転化率の軸方向プロファイル $T(
 
 PDH は強吸熱 ($\Delta H_{r1}\approx+124$ kJ/mol)。**無補償断熱**ではガスが流れ方向に自己冷却し、
 $K_{eq}$ が下がって $r_1$ がその場の平衡で停止 → 転化率が頭打ち。**Catofin の HGM** は床温を
-$T_{in}-\Delta T_{max}$ (=608°C) に維持するため、$K_{eq}$ が保たれ転化率が床末端まで伸びる。
+$T_{in}-\Delta T_{max}$ (=612°C) に維持するため、$K_{eq}$ が保たれ転化率が床末端まで伸びる。
 
-> 同一の入口・幾何 (#227 の per-vessel) で、`_ode_axial` を **HGM 有** (catofin: 床温クランプ・
+> 同一の入口・幾何 (#201 の per-vessel) で、`_ode_axial` を **HGM 有** (catofin: 床温クランプ・
 > $\varphi_{cat}=0.85$・粒内拡散$\eta$) と **無補償断熱** (pure swing) の 2 条件で積分して重ねる。
 > 新鮮触媒時刻 $t=0$ ($a=1$) の床内部プロファイル。
 """)
@@ -227,7 +227,7 @@ print(f'床末端 z={CAT["L_bed"]:.2f}m:  HGM  X={Xh[i_bed]:5.1f}% T={Th[i_bed]:
       f'無補償 X={Xa[i_bed]:5.1f}% T={Ta[i_bed]:.0f}C')
 print(f'z={Z_SHOW:.1f}m まで延長:    HGM  X={Xh[-1]:5.1f}% T={Th[-1]:.0f}C   '
       f'無補償 X={Xa[-1]:5.1f}% T={Ta[-1]:.0f}C (断熱は冷えて頭打ち)')
-print('→ 無補償断熱は床が冷えて(赤破線が右下がり)転化率が伸び悩む。HGM は床温を 608°C に維持し X が伸び続ける。')
+print('→ 無補償断熱は床が冷えて(赤破線が右下がり)転化率が伸び悩む。HGM は床温を 612°C に維持し X が伸び続ける。')
 """)
 
 # ===========================================================================
@@ -240,9 +240,9 @@ $$S_{diff}(z)=\frac{r_1}{r_1+r_2}\quad(\text{その場の C3H8 消費のうち�
 (ii) C3H6 吸着 $1+P_B/K_B$ 増、(iii) 不可逆クラッキング $r_2$ の相対増 により微分選択率が崩れ、
 累積選択率がその時刻の出口値に収束する。$\eta$ は $r_1,r_2$ に共通に掛かるため $S_{diff}$ には影響しない。
 
-> **本図は $t=0$ (新鮮触媒 $a=1$) 断面**。この時刻の出口 $S_{int}$ は ~93%。採用値の**サイクル時間平均
-> $S\approx83\%$ は失活で下がった値** (a↓ で r1 のみ↓ → S↓) で、Fig5 で経時を示す。Fig1 の X も同様
-> (t=0 で ~57%、サイクル平均 ~38%)。**Fig1/2 は「床内の機構」、Fig5 が「採用値への橋渡し」**。
+> **本図は $t=0$ (新鮮触媒 $a=1$) 断面**。この時刻の出口 $S_{int}$ は高め (t=0 は a=1 のため)。採用値の**サイクル時間平均
+> $S\approx80\%$ は失活で下がった値** (a↓ で r1 のみ↓ → S↓) で、Fig5 で経時を示す。Fig1 の X も同様
+> (t=0 で高め、サイクル平均 ~41%)。**Fig1/2 は「床内の機構」、Fig5 が「採用値への橋渡し」**。
 """)
 
 code(r"""z, Y, a = integrate_axial(CAT, hgm=True, t_min=0.0)   # 実床長で
@@ -313,7 +313,7 @@ md(r"""## §4. Fig5 ★ — 1サイクル内の経時変化 $a(t),X(t),S(t)$
 これが $t_{cyc}$ 選定とスイング (再生) 必要性の定量的根拠。
 
 > スライド4 の生データ $a(t,T)$ (触媒固有) とは別物 — こちらは**運転中の反応器性能の経時**。
-> 各時刻で per-vessel ODE を床末端まで積分し $X,S$ を算出する (HGM 有, #227 幾何)。
+> 各時刻で per-vessel ODE を床末端まで積分し $X,S$ を算出する (HGM 有, #201 幾何)。
 """)
 
 code(r"""t_grid = np.linspace(0.0, CAT['t_cyc'], 20)
@@ -445,8 +445,8 @@ md(r"""## §7. まとめ
 
 | 図 | 観測 | 報告書での主張 |
 |---|---|---|
-| **Fig1** $T(z),X(z)$ | 無補償断熱は床が冷え X 頭打ち、HGM は床温 608°C 維持で X が伸びる | §4.4.3→4.4.4 の核心 (断熱天井→HGMで克服) |
-| **Fig2** $S_{diff/int}(z)$ | 床後半で微分選択率崩落 → 累積が ~83% に収束 | 選択率の運転値が速度論/平衡で必然 |
+| **Fig1** $T(z),X(z)$ | 無補償断熱は床が冷え X 頭打ち、HGM は床温 612°C 維持で X が伸びる | §4.4.3→4.4.4 の核心 (断熱天井→HGMで克服) |
+| **Fig2** $S_{diff/int}(z)$ | 床後半で微分選択率崩落 → 累積が ~80% に収束 | 選択率の運転値が速度論/平衡で必然 |
 | Fig4 $r_i(z)$ | $r_1$ 平衡で急減・$r_2$ 不可逆で残存 | 選択率劣化の機構 (Fig2 と対) |
 | **Fig5** $a/X/S(t)$ | 反応中に失活で性能低下 → 時間平均を採用 | $t_{cyc}$ 選定・スイング (再生) 必要性 |
 | Fig3 $p_i(z),P(z)$ | 組成発展 + 0.5bar 床の Ergun 圧損 | 低圧床の圧損が許容内 |
@@ -456,7 +456,7 @@ md(r"""## §7. まとめ
 `reactor_axial_TX.{png,pdf}` (Fig1) / `reactor_axial_selectivity.{png,pdf}` (Fig2) /
 `reactor_cycle_time.{png,pdf}` (Fig5)。
 
-> 数値は #227 設計点・新鮮触媒 $t=0$ のプロファイル (サイクル時間方向は Fig5)。HGM 補償は等価モデル
+> 数値は #201 設計点・新鮮触媒 $t=0$ のプロファイル (サイクル時間方向は Fig5)。HGM 補償は等価モデル
 > (`PDH_CATOFIN_DTMAX` で床温降下上限を表現)、再生動特性の詳細は未計上 = スコープ外。
 """)
 

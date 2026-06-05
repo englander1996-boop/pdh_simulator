@@ -122,8 +122,20 @@ h2_min_molfrac          = 0.999    # PSA 製品の H2 モル分率 (販売想定
 #   target ぴったりが最良であることは変わらない (= 純粋な探索余白拡大)。
 # 副作用: 最終 best が ±3-5 pp の生産量逸脱を含む可能性。top-k 再評価で実用判定必要。
 # 「赤字 OK、TAC 最小化」方針 (2026-05-21) と整合。
-production_min_relative = 0.05     # 生産量 5% 不足まで許容 (旧 0.01)
-production_max_relative = 0.05     # 生産量 5% 超過まで許容 (旧 0.02)
+#
+# 設計判断 (2026-06-05, main_20260604_215740 の forensic):
+#   production_min_relative=0.05 (下限 5% 不足許容) を 0.0 へ厳格化 (= target 未達は infeasible)。
+#   理由: SM Dist3 は塔頂を 1194.24 kmol/h で頭打ち (overshoot 不可) のため、生産量制約が
+#   非対称になっていた。下限側 1128.8〜1188.2 の帯では production_under_pp=0 (罰則勾配ゼロ)
+#   なので、BO は罰なしで F_fresh (TAC 最大ドライバ=原料費65%) を最小化し、生産量を下限まで
+#   削る方向にしか動けない。実害: 215740 run の best #125 は生産量 1131.57 kmol/h (≒381 kt/年)
+#   で target 1188.21 (=400 kt/年) 未達なのに feasible 判定され、target 達成設計 (1194.24 @ 1068.63)
+#   より ~26 億円安く best になっていた。コンテスト要件は「400 kt/年 以上」(片側) なので
+#   target 未達を feasible とするのは要件違反。0.0 化で「target 未満は infeasible + 連続罰則」
+#   となり BO の過少生産バイアスを除去する。SM は 1194.24 で target を満たすため feasible 解は存在。
+#   overshoot 側 (production_max_relative) は SM 頭打ちで実質発火しないため 0.05 のまま据置。
+production_min_relative = 0.0      # 生産量 target 未達は infeasible (旧 0.05、2026-06-05 厳格化)
+production_max_relative = 0.05     # 生産量 5% 超過まで許容 (SM 頭打ちで実質無害、据置)
 
 
 # ===========================================================================

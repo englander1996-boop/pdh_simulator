@@ -56,11 +56,13 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 # ===========================================================================
 
 # main.py (HYSYS+SM 全23変数 BO, 反応器=catofin) の BO best の最適化済み 23 変数をそのまま投入。
-#   出典 outputs/main_20260604_215740/trials.csv (trial #125)
-#   = 反応器制約版(N_online≤8, balanced N_total=2×N_online, L_bed≤3, d_p≥4, D≥9, 200m³上限)の
-#     再最適化で「生産=目標1194.2 kmol/h を出す中で最小TAC」の採用設計。
-#   (BO 記録 effective_TAC=1068.63 億円/年 (=HI後TAC)、feasible=True、
-#    純度 99.497wt% / 生産量 1194.24 kmol/h / 収率 ≈82.0% / N_total=16基)。
+#   出典 outputs/main_20260605_170938/best.json (trial #201)
+#   = production_min_relative=0.0 厳格化版 (target 未達を infeasible 化) の再最適化。
+#     旧版 (215740/0.05緩和) は best が過少生産 (1131 kmol/h, target 未達) で TAC を不当に
+#     下げていた抜け道を塞ぎ、target 達成下での最小 TAC を採用した設計。
+#   (BO 記録 effective_TAC=1055.00 億円/年 (=HI後TAC)、feasible=True、
+#    純度 99.497wt% / 生産量 1194.24 kmol/h (target 1188.21 達成) / 収率 ≈81.2% /
+#    N_total=14基 (=balanced 2×N_online=2×7))。
 #   exp3 でフル詳細出力を見て手動検証するため。
 # 注意1: main は反応器=Catofin型 浅床・多基並列スイング (catofin)。exp3 も CatofinDesignVars を使い、
 #   反応器変数を (T_in, t_cyc, D, L_bed, N_online, d_p) とする。d_p は mm→m に変換して渡す
@@ -71,47 +73,47 @@ from simulation import display_full_results, hdr, show_input_snapshot, run_exp
 #   (手動変換による丸めずれを避ける)。col1 のみフィード段が直接の最適化変数。
 
 # === 反応器 (Catofin 浅床・多基並列スイング) =====================================
-# 値は best.json (trial #227) のフル精度をそのまま転記する。
+# 値は best.json (trial #201) のフル精度をそのまま転記する。
 # リサイクル収束は TOL_rel=1% で打ち切るため入力を丸めると着地点がずれ TAC が ~0.2%
-# 変わる。main と同一の TAC (1092.70 億円/年) を再現するにはフル精度で揃える必要がある。
-T_in_K          = 931.1396067022338
-t_cyc_min       = 14.646484386062184
-D_reactor_m     = 10.323475386828628
-L_bed_m         = 1.1037728620421936
-N_online        = 8
-d_p_mm          = 5.098875608192616
+# 変わる。main と同一の TAC (1055.00 億円/年) を再現するにはフル精度で揃える必要がある。
+T_in_K          = 935.1547623411832
+t_cyc_min       = 14.004729913207157
+D_reactor_m     = 10.762975573082075
+L_bed_m         = 1.5774708671200912
+N_online        = 7
+d_p_mm          = 5.8428613525854365
 
 # === PSA =====================================================================
-D_psa_col_m       = 4.8918896871258895
-L_psa_bed_m       = 26.011712204997245
-desorption_target = 0.32110122921906026
+D_psa_col_m       = 4.488136113874189
+L_psa_bed_m       = 24.752751824975242
+desorption_target = 0.2537096066008174
 
 # === 膜分離 ===================================================================
-P_H_Pa     = 849444.5811765966
+P_H_Pa     = 843657.6171376609
 P_L_Pa     = 1.0e5
-A_mem_m2   = 231947.92797432584
+A_mem_m2   = 127838.27553657915
 
 # === Dist1 (脱ブタン塔) SM ===================================================
-P_dist1_kPa            = 1826.683392889994
-N_dist1                = 38
-FEED_STAGE_dist1       = 25       # col1_feed_stage: 最適化変数 (フィード段を直接探索)
-COMP_FRAC_2_dist1      = 0.9401130406436439
+P_dist1_kPa            = 1952.1341890282515
+N_dist1                = 36
+FEED_STAGE_dist1       = 28       # col1_feed_stage: 最適化変数 (フィード段を直接探索)
+COMP_FRAC_2_dist1      = 0.9952068630724175
 
 # === Dist2 (脱エタン塔) HYSYS ===============================================
-# P_dist2=805.6 kPa < P_H=849.4 kPa (Mem の ph_le_pfeed 回避を満たす)。
-P_dist2_kPa            = 805.5746202501241
-N_dist2                = 76
-FEED_RATIO_dist2       = 0.5380000571489029  # col2_feed_ratio: 最適化変数。下で絶対段へ変換
-REFLUX_RATIO_dist2     = 10.124163286577364
+# P_dist2=788.1 kPa < P_H=843.7 kPa (Mem の ph_le_pfeed 回避を満たす)。
+P_dist2_kPa            = 788.1112783915734
+N_dist2                = 61
+FEED_RATIO_dist2       = 0.5069007093513171  # col2_feed_ratio: 最適化変数。下で絶対段へ変換
+REFLUX_RATIO_dist2     = 11.800664770401722
 
 # === Dist3 (C3 スプリッタ) SM ===============================================
-P_dist3_kPa            = 1669.217330080737
-N_dist3                = 150
-FEED_RATIO_dist3       = 0.8458566591548666  # col3_feed_ratio: 最適化変数。絶対段は組み立て側で導出
+P_dist3_kPa            = 1674.9231485407379
+N_dist3                = 117
+FEED_RATIO_dist3       = 0.8194105169730515  # col3_feed_ratio: 最適化変数。絶対段は組み立て側で導出
 DRAW_RATE_dist3_kmolh  = 0.99     # SM では未使用 (Dist3 は spec なし)
 
 # === Fresh LPG ==============================================================
-F_C3H8_fresh_kmol_h = 1456.694207233684
+F_C3H8_fresh_kmol_h = 1471.5647602599581
 
 
 # ===========================================================================
