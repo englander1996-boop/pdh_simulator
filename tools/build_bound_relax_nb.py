@@ -1,6 +1,6 @@
 r"""monitor/bound_relax_gain.ipynb を生成。
 
-BO 最適 (#227) が探索箱の端に張り付く変数を、端の「外」へ 1 点だけ動かして effective_TAC の
+BO 最適 (#201) が探索箱の端に張り付く変数を、端の「外」へ 1 点だけ動かして effective_TAC の
 変化(下げ代)を局所見積りする。どの bound を次の再最適化で広げるべきかの指針。HYSYS 必須。
 
 注: 単点摂動なので「局所の下げ代」の見積り。真の利得は各 bound を広げて再最適化すれば出る。
@@ -15,8 +15,9 @@ co = lambda s: cells.append(new_code_cell(s))
 
 md(r"""# bound 張り付き → 次の「下げ代」見積り
 
-**狙い**: BO 分析で、feasible 最適は探索箱の**端**に張り付く変数が複数あった
-($t_{cyc}\downarrow$12, $R_2\downarrow$10, $L_{bed}\uparrow$1.0, col3_N$\uparrow$160…)。
+**狙い**: BO 分析で、feasible 最適 #201 は探索箱の**端**に張り付く変数が複数あった
+(col1_feed_stage$\uparrow$28(上限), col2_N$\downarrow$60(下限), col3_N$\downarrow$115(下限),
+$d_p\uparrow$6 近傍, F_fresh$\downarrow$1450 近傍…)。
 端に張る = **箱を広げればまだ TAC が下がる余地**がある。各変数を端の外へ 1 点動かして
 effective_TAC の変化(下げ代)を見積もり、**次の再最適化でどの bound を広げるべきか**を指針化する。
 
@@ -32,7 +33,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import main
 from flowsheet import evaluate
-best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260604_014318', 'best.json'), encoding='utf-8'))
+best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260605_170938', 'best.json'), encoding='utf-8'))
 P0 = dict(best['params']); main.REACTOR_KIND = 'catofin'
 
 def eval_params(pp):
@@ -43,25 +44,25 @@ def eval_params(pp):
     return r.effective_TAC, r.is_feasible, r.failure_unit
 
 base_tac, base_feas, _ = eval_params(P0)
-print(f'基準 #227 effective_TAC = {base_tac:.1f} 億円/年 (feasible={base_feas})')""")
+print(f'基準 #201 effective_TAC = {base_tac:.1f} 億円/年 (feasible={base_feas})')""")
 
 md(r"""## 各 bound を端の外へ 1 点動かして ΔTAC を見る
 
-| 変数 | #227 (箱の端) | 端の外へ | 期待 |
+| 変数 | #201 (箱の端) | 端の外へ | 期待 |
 |---|---|---|---|
-| t_cyc_min | 12 (下限) | 10 | 短サイクル=触媒新鮮→S↑? |
-| col2_reflux_ratio | 10.0 (下限) | 9.0 | 還流↓=凝縮 OPEX↓ |
-| col3_n_stages | 160 付近 (上限) | 175 | 段↑=還流↓ |
-| L_bed_m | 1.0 (上限) | 1.1 | 床体積↑=転化率↑ |
+| col2_n_stages | 60 (下限) | 55 | Dist2段↓=塔CAPEX↓ (cold-topリスク) |
+| col3_n_stages | 115 (下限) | 110 | Dist3段↓=塔CAPEX↓ (還流↑/SM域) |
+| d_p_mm | 6 付近 (上限) | 6.5 | 粒径↑=床ΔP↓ (圧損余裕) |
+| F_C3H8_fresh_kmol_h | 1450 近傍 (下限) | 1430 | 原料↓=TAC↓ (生産量厳格化テスト) |
 """)
 
 co(r"""perturb = [
-    ('t_cyc_min',         10.0,  '下限12→10 (短サイクル)'),
-    ('col2_reflux_ratio',  9.0,  '下限10→9 (還流↓)'),
-    ('col3_n_stages',      175,  '上限~160→175 (段↑)'),
-    ('L_bed_m',            1.1,  '上限1.0→1.1 (床↑)'),
+    ('col2_n_stages',         55,   '下限60→55 (Dist2段↓)'),
+    ('col3_n_stages',         110,  '下限115→110 (Dist3段↓)'),
+    ('d_p_mm',                6.5,  '上限6→6.5 (粒径↑=床ΔP↓)'),
+    ('F_C3H8_fresh_kmol_h',   1430, '下限1450近傍→1430 (原料↓, 生産量厳格化テスト)'),
 ]
-rows = [dict(変数='(基準 #227)', 値='-', eff_TAC=round(base_tac,1), dTAC=0.0, feas=base_feas, unit='success')]
+rows = [dict(変数='(基準 #201)', 値='-', eff_TAC=round(base_tac,1), dTAC=0.0, feas=base_feas, unit='success')]
 for key, val, note in perturb:
     pp = dict(P0); pp[key] = val
     tac, feas, unit = eval_params(pp)
@@ -70,7 +71,7 @@ for key, val, note in perturb:
 df = pd.DataFrame(rows)
 print(df.to_string(index=False))""")
 
-co(r"""sub = df[df['変数'] != '(基準 #227)'].copy()
+co(r"""sub = df[df['変数'] != '(基準 #201)'].copy()
 fig, ax = plt.subplots(figsize=(8.5, 4.4))
 colors = ['green' if (d is not None and d < 0) else ('crimson' if not f else '0.6')
           for d, f in zip(sub.dTAC, sub.feas)]

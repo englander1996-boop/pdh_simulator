@@ -3,7 +3,7 @@ r"""_run_lpg_breakeven_catofin.py — lpg_price_breakeven.ipynb の catofin 版�
 損益分岐数値を再計算し、レポート用の図 (PNG/PDF) を再生成する。
 
 ノート本体 (lpg_price_breakeven.ipynb) のセル1-5/11/13 と同一ロジックを catofin best
-(trial #227, outputs/main_20260604_014318/best.json) で実行する。図は monitor/ に保存。
+(trial #201, outputs/main_20260605_170938/best.json) で実行する。図は monitor/ に保存。
 """
 import os, sys, json, dataclasses as dc
 import numpy as np
@@ -72,7 +72,7 @@ def build_design(p):
                              solver_method='sm', hysys_spec_value=0.99, hysys_feed_stage=fs3),
     )
 
-BEST = os.path.join(ROOT, 'outputs', 'main_20260604_014318', 'best.json')
+BEST = os.path.join(ROOT, 'outputs', 'main_20260605_170938', 'best.json')
 best = json.load(open(BEST, encoding='utf-8'))
 params = best['params']; design = build_design(params)
 F_fresh = float(params['F_C3H8_fresh_kmol_h'])

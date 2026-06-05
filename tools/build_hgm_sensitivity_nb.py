@@ -14,10 +14,10 @@ co = lambda s: cells.append(new_code_cell(s))
 
 md(r"""# HGM 等価熱補償 ΔT_max の感度 — catofin の転化率・生産量・TAC への効き
 
-**狙い**: Catofin の単通転化率(~38%)は、HGM 等価熱補償が床温を $T_{in}-\Delta T_{max}$ 以上に維持することで
+**狙い**: Catofin の単通転化率(~41%)は、HGM 等価熱補償が床温を $T_{in}-\Delta T_{max}$ 以上に維持することで
 決まる(`reactor_conversion_ceiling.ipynb`)。この **$\Delta T_{max}$=50K は !仮置き**(再生蓄熱の許容温度降下)。
 本ノートは $\Delta T_{max}$=30/50/80K を実走で振り、**単通転化率・生産量・TAC・feasibility** がどう動くかを示す。
-catofin 設計点と原料 F_fresh は #227 で固定する(= HGM 仮定だけを動かす純感度)。
+catofin 設計点と原料 F_fresh は #201 で固定する(= HGM 仮定だけを動かす純感度)。
 
 > $\Delta T_{max}$ が大きい(=HGM が弱い/床がより冷える)ほど転化率↓ → 生産量↓・リサイクル↑。
 > $\Delta T_{max}$=50K(標準)が結果の前提。**この1つの !仮置きが TAC をどれだけ動かすか**を定量化する。
@@ -36,10 +36,10 @@ import main
 import units.reactors.catofin as cat       # _DT_MAX_K を patch する
 from flowsheet import evaluate
 import json
-best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260604_014318', 'best.json'), encoding='utf-8'))
+best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260605_170938', 'best.json'), encoding='utf-8'))
 p = best['params']; main.REACTOR_KIND = 'catofin'
 F_fresh = float(p['F_C3H8_fresh_kmol_h'])
-print(f'設計点 #227 固定, F_fresh={F_fresh:.0f} kmol/h.  標準 ΔT_max = {cat._DT_MAX_K:.0f} K')""")
+print(f'設計点 #201 固定, F_fresh={F_fresh:.0f} kmol/h.  標準 ΔT_max = {cat._DT_MAX_K:.0f} K')""")
 
 md(r"""## ΔT_max を 30/50/80K で実走""")
 

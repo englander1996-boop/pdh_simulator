@@ -16,7 +16,7 @@ md(r"""# 膜性能劣化の感度 — Q_A / alpha → 回収率・生産量・TA
 
 **狙い**: 膜の C3H6 permeance $Q_A$=40 GPU と 選択率 $\alpha$=90 は **!仮置き(Hua et al. 2024 文献値)**。
 実機では可塑化・混合効果で劣化しうる。本ノートは劣化係数 $f_{Q_A},f_\alpha$ を振り、
-**C3H6 回収率↓ → リサイクル↑/生産量↓ → TAC/feasibility** がどう動くかを実走で示す(設計点 #227 固定)。
+**C3H6 回収率↓ → リサイクル↑/生産量↓ → TAC/feasibility** がどう動くかを実走で示す(設計点 #201 固定)。
 
 `run_one_pass` は `PDH_MEM_QA_FACTOR` / `PDH_MEM_ALPHA_FACTOR`(既定 1.0)を per-call で読むので、
 os.environ を差し替えてから evaluate するだけで劣化を注入できる。⚠️ Dist2=HYSYS, VPN 必須・数分。
@@ -30,10 +30,10 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 import main
 from flowsheet import evaluate
-best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260604_014318', 'best.json'), encoding='utf-8'))
+best = json.load(open(os.path.join(ROOT, 'outputs', 'main_20260605_170938', 'best.json'), encoding='utf-8'))
 p = best['params']; main.REACTOR_KIND = 'catofin'
 F_fresh = float(p['F_C3H8_fresh_kmol_h'])
-print('設計点 #227 固定. 既定 Q_A=40 GPU, alpha=90 (factor=1.0 が文献値)')
+print('設計点 #201 固定. 既定 Q_A=40 GPU, alpha=90 (factor=1.0 が文献値)')
 
 def eval_mem(qa=1.0, al=1.0):
     o_qa = os.environ.get('PDH_MEM_QA_FACTOR'); o_al = os.environ.get('PDH_MEM_ALPHA_FACTOR')

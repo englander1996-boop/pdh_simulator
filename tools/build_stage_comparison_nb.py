@@ -37,7 +37,7 @@ md(r"""# 反応器形式の選択 — なぜ Catofin 浅床・多基並列か
 > 鍵: **総収率 ≈ 単通選択率**(リサイクルが未反応プロパンを消尽)。だから「単通転化率を上げて選択率を
 > 犠牲にする」より「**選択率を保ち、不足分はリサイクル**」が総収率で有利。Catofin はこれに合致する。
 >
-> 反応器は純 Python (scipy ODE)。HYSYS 不要。数値は BO best (trial #227) の反応器入口。
+> 反応器は純 Python (scipy ODE)。HYSYS 不要。数値は BO best (trial #201) の反応器入口。
 """)
 
 co(r"""import os, sys, math, warnings
@@ -52,15 +52,15 @@ from units.reactors.swing import (DesignVars as AxialDesign, FeedStream, FixedPa
 from units.reactors.radial_flow import RadialDesignVars, simulate_radial_multibed_reactor_system
 from units.reactors.catofin import CatofinDesignVars, simulate_catofin_reactor_system
 
-# BO best #227 (catofin) の反応器入口: C3H8 70% + C3H6 リサイクル 30% (H2/C2 は除去済)
-FEED = FeedStream(F_in={'A': 3811.6, 'B': 1635.7, 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
-                  T_feed=305.03, P_in=50000.)
+# BO best #201 (catofin) の反応器入口: C3H8 63% + C3H6 リサイクル 37% (H2/C2 は除去済)
+FEED = FeedStream(F_in={'A': 3612.5, 'B': 2128.8, 'C': 0., 'D': 0., 'E': 0., 'F': 0.},
+                  T_feed=307.0, P_in=50000.)
 def metrics(r):
     e, p = r.equipment, r.performance
     return dict(X=p.Conversion, S=p.Selectivity, dP=min(e.dP_over_P_actual*100, 999),
                 Ntot=e.N_reactors_total, cat=e.Catalyst_Weight_Total/1000,
                 pen=e.penalty_reason or 'OK')
-print('reactor inlet:', sum(FEED.F_in.values()), 'kmol/h  (C3H6 分率 30%)  P=0.5bar')""")
+print('reactor inlet:', sum(FEED.F_in.values()), 'kmol/h  (C3H6 分率 37%)  P=0.5bar')""")
 
 md(r"""## §1+§2. 出発点 — 単段の軸流深床は 0.5 bar で圧損破綻
 
@@ -70,7 +70,7 @@ Ergun 圧損が入口圧の数十%〜全損に達し**成立しない**(詳細�
 
 co(r"""with warnings.catch_warnings():
     warnings.simplefilter('ignore')
-    r_ax = simulate_swing_reactor_system(AxialDesign(T_in=931.13, z_cat=20., t_cyc=14., D=10.),
+    r_ax = simulate_swing_reactor_system(AxialDesign(T_in=935.15, z_cat=20., t_cyc=14., D=10.),
                                          FEED, FixedParams(d_p_m=0.003))
 m = metrics(r_ax)
 print(f'軸流深床 z=20m d_p=3mm: dP/P={m["dP"]:.0f}%  penalty={m["pen"]}  → 成立しない')
@@ -91,20 +91,20 @@ with warnings.catch_warnings():
             FEED, FixedParams(), n_beds=nbed)
         m = metrics(r); rows.append(dict(form=f'radial {nbed}段', **m))
     rc = simulate_catofin_reactor_system(
-        CatofinDesignVars(T_in=931.13, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156), FEED)
-    rows.append(dict(form='Catofin #227', **metrics(rc)))
+        CatofinDesignVars(T_in=935.15, t_cyc=14.005, D=10.763, L_bed=1.577, N_online=7, d_p=0.005843), FEED)
+    rows.append(dict(form='Catofin #201', **metrics(rc)))
 df = pd.DataFrame(rows)
 print(df[['form','X','S','dP','Ntot','cat','pen']].round(1).to_string(index=False))
 print()
-print('観察: radial は段数↑で X↑ だが S↓ (高転化→クラッキング)。Catofin は X=38% で S=82.6% と高い。')
+print('観察: radial は段数↑で X↑ だが S↓ (高転化→クラッキング)。Catofin は X=41% で S=80.1% と高い。')
 
 fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
 rad = df[df.form.str.startswith('radial')]
 ax[0].plot(rad.X, rad.S, 'o-', color='C0', label='radial 多段 (1->4)')
 for _, rw in rad.iterrows():
     ax[0].annotate(rw.form.replace('radial ',''), (rw.X, rw.S), fontsize=8, xytext=(3,3), textcoords='offset points')
-cat = df[df.form=='Catofin #227'].iloc[0]
-ax[0].plot(cat.X, cat.S, 'r*', ms=18, label='Catofin #227')
+cat = df[df.form=='Catofin #201'].iloc[0]
+ax[0].plot(cat.X, cat.S, 'r*', ms=18, label='Catofin #201')
 ax[0].set_xlabel('single-pass conversion X [%]'); ax[0].set_ylabel('selectivity S = overall yield [%]')
 ax[0].set_title('Catofin keeps higher S (=yield) at moderate X'); ax[0].legend(fontsize=9); ax[0].grid(alpha=0.3)
 
@@ -122,12 +122,12 @@ md(r"""## §4. なぜ Catofin か
 | 観点 | radial 多段 | **Catofin 浅床多基(採用)** |
 |---|---|---|
 | 圧損 (0.5bar) | 解ける(薄い環状床) | 解ける(浅床+多基) |
-| 単通転化率 | 段数で高くできる(3段 ~55%) | HGM+床体積で ~38% |
-| **選択率(=総収率)** | 高転化で**低下(3段 ~70%)** | **高く保てる(~82.6%)** ← 総収率で有利 |
+| 単通転化率 | 段数で高くできる(3段 ~55%) | HGM+床体積で ~41% |
+| **選択率(=総収率)** | 高転化で**低下(3段 ~70%)** | **高く保てる(~80.1%)** ← 総収率で有利 |
 | 床温維持 | 段間**再加熱炉**(直列に必要) | **HGM 等価熱補償**(再加熱炉不要) |
 | 機構の不確かさ | 直列の内部品/分配板/再生温度分布が複雑 | 並列スイング、相対的に単純 |
 
-- **Catofin は低per-pass転化(~38%)でも高選択率(~82.6%)を保つ** → 総収率で radial 多段(高転化・低選択率)に勝る。
+- **Catofin は低per-pass転化(~41%)でも高選択率(~80.1%)を保つ** → 総収率で radial 多段(高転化・低選択率)に勝る。
   不足分の転化はリサイクルが担う。
 - 段間再加熱の直列トレインが不要(HGM が床温維持)。
 - **radial は撤去**: 内部品/分配板/再生時の温度分布の不確かさが大きく、本設計のモデル精度では正当化しにくい。
@@ -141,13 +141,13 @@ Catofin に直列段は無い。主レバーは **$N_{online}$(並列基数)** �
 """)
 
 co(r"""def run_cat(**kw):
-    d = dict(T_in=931.13, t_cyc=13.99, D=6.771, L_bed=0.956, N_online=24, d_p=0.003156); d.update(kw)
+    d = dict(T_in=935.15, t_cyc=14.005, D=10.763, L_bed=1.577, N_online=7, d_p=0.005843); d.update(kw)
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         return metrics(simulate_catofin_reactor_system(CatofinDesignVars(**d), FEED))
 
 print('N_online 掃引 (浅床多基の「基数」= 直列段数の代替):')
-Ns = [6, 8, 10, 14, 18, 24]; Xn, dPn = [], []
+Ns = [6, 7, 8, 10, 14, 18]; Xn, dPn = [], []
 for n in Ns:
     m = run_cat(N_online=n); Xn.append(m['X']); dPn.append(m['dP'])
     print(f'  N_online={n:>2}: X={m["X"]:4.1f}%  S={m["S"]:4.1f}%  dP/P={m["dP"]:4.1f}%  N_total={m["Ntot"]:>3}  {m["pen"]}')
@@ -155,14 +155,14 @@ for n in Ns:
 fig, ax = plt.subplots(figsize=(7.5, 4.4))
 ax.plot(Ns, Xn, 'o-', color='blue', label='conversion X [%]')
 ax2 = ax.twinx(); ax2.plot(Ns, dPn, 's--', color='crimson', label='dP/P [%]')
-ax2.axhline(10, ls=':', color='crimson', alpha=0.6); ax.axvline(24, ls=':', color='gray')
-ax.text(24.2, min(Xn)+2, '#227 N=24', fontsize=8)
+ax2.axhline(10, ls=':', color='crimson', alpha=0.6); ax.axvline(7, ls=':', color='gray')
+ax.text(7.2, min(Xn)+2, '#201 N=7', fontsize=8)
 ax.set_xlabel('N_online (parallel vessels)'); ax.set_ylabel('conversion X [%]', color='blue')
 ax2.set_ylabel('dP/P [%]', color='crimson')
 ax.set_title('Catofin lever: N_online sets both dP (down) and conversion (up)')
 ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
 print('\n→ N_online が小さいと圧損超過(N=6 で失敗)。基数を増やすと圧損が下がり転化率も上がる。')
-print('  #227 は N_online=24 で ΔP 余裕(3.5%)と必要転化率(38%, S=82.6%)を両立。')""")
+print('  #201 は N_online=7 で ΔP 余裕と必要転化率(41%, S=80.1%)を両立。')""")
 
 md(r"""## §6. 結論
 
@@ -170,15 +170,15 @@ md(r"""## §6. 結論
 |---|---|---|---|---|---|
 | 軸流深床 | **破綻** | — | — | 単純 | 不成立 |
 | radial 多段(3段) | OK | 高(~55%) | **低(~70%)** | 直列+段間再加熱+内部品(不確か) | 撤去 |
-| **Catofin 浅床多基** | **OK** | 中(~38%) | **高(~82.6%)** | 並列スイング+HGM(再加熱炉不要) | **採用** |
+| **Catofin 浅床多基** | **OK** | 中(~41%) | **高(~80.1%)** | 並列スイング+HGM(再加熱炉不要) | **採用** |
 
 - **総収率 ≈ 選択率**なので、Catofin の「低per-pass転化・高選択率」は radial 多段の「高転化・低選択率」より
   総収率で有利。不足転化はリサイクルが担う。
 - Catofin は段間再加熱の直列トレインが不要(HGM が床温維持)で、内部品/分配の不確かさも radial より小さい。
 - 設計レバーは直列「段数」でなく **$N_{online}$(並列基数, 圧損+転化の主レバー)** と $L_{bed}$(転化)。
-  #227 は $N_{online}=24$ で圧損余裕と必要転化率を両立。 **→ Catofin 浅床・多基並列を採用**。
+  #201 は $N_{online}=7$ で圧損余裕と必要転化率を両立。 **→ Catofin 浅床・多基並列を採用**。
 
-> 数値は #227 設計点。radial の段数比較は撤去理由の定量化として残す(履歴)。HGM 再生動特性はスコープ外。
+> 数値は #201 設計点。radial の段数比較は撤去理由の定量化として残す(履歴)。HGM 再生動特性はスコープ外。
 """)
 
 nb['cells'] = cells
