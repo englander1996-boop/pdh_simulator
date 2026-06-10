@@ -78,10 +78,15 @@ def show_input_snapshot(design, config=None, eval_kwargs: dict = None) -> None:
                        ('Dist2 (脱エタン塔, partial cond)', design.dist2),
                        ('Dist3 (C3 スプリッタ)', design.dist3)]:
         print(f"[{label}]")
-        # N_feed は探索対象外で core 側 Kirkbride 推奨を自動採用。
-        # 入力値表示は誤解を招くため省略 (実値は results.equipment.N_feed_kirkbride)。
+        # フィード段の出どころは backend で異なる:
+        #   sm / hysys     : 最適化されたフィード段 (col.hysys_feed_stage) を実際に使用。
+        #   fug / rigorous : core 側で Kirkbride 推奨を自動採用 (入力 N_feed は無視)。
+        if col.solver_method in ('sm', 'hysys') and col.hysys_feed_stage is not None:
+            _feed_note = f"feed段 = {col.hysys_feed_stage} (最適化値)"
+        else:
+            _feed_note = "feed段 = Kirkbride 自動採用 (理論式)"
         print(f"  P = {col.P_col/1e5:.1f} bar, N = {col.N_stages}, "
-              f"R = {col.reflux_ratio}  (N_feed: Kirkbride 自動採用)")
+              f"R = {col.reflux_ratio}  ({_feed_note})")
         print(f"  solver = {col.solver_method}")
         print()
 
@@ -197,9 +202,26 @@ def show_streams_overview(R: dict, F_C3H8_feed: float,
           f"→ {sum(psa_o.values()):.1f} kmol/h")
 
 
-def show_unit_details(R: dict) -> None:
-    """各ユニットの装置設計値を 1 行ずつ表示 (分析用)。"""
+def show_unit_details(R: dict, design=None) -> None:
+    """各ユニットの装置設計値を 1 行ずつ表示 (分析用)。
+
+    design を渡すと各塔の solver_method に応じてフィード段ラベルを正しく出す。
+    DistEquipment.N_feed_kirkbride フィールドの中身は backend で意味が異なる:
+      - sm / hysys     : 入力した最適化フィード段 (provider/SM がそのまま格納)。
+      - fug / rigorous : core が _kirkbride_feed_stage で計算した推奨段。
+    フィールド名が "kirkbride" 固定で誤解を招くため、表示ラベルを backend で分岐する。
+    """
     hdr("ユニット詳細 (装置設計)")
+
+    def _feed_label(solver, n_feed):
+        if solver in ('sm', 'hysys'):
+            return f"feed段={n_feed} (最適化値)"
+        if solver in ('fug', 'rigorous'):
+            return f"feed段={n_feed} (Kirkbride推奨)"
+        return f"feed段={n_feed}"
+    _sm1 = design.dist1.solver_method if design is not None else None
+    _sm2 = design.dist2.solver_method if design is not None else None
+    _sm3 = design.dist3.solver_method if design is not None else None
 
     # ---- Pump1 ----
     eq = R['pump1'].equipment
@@ -216,7 +238,7 @@ def show_unit_details(R: dict) -> None:
           f"CAPEX={eq.CAPEX_cond:.3f}億円")
     print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
           f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
-          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  ({_feed_label(_sm1, eq.N_feed_kirkbride)})")
 
     # ---- Reactor ----
     eq   = R['r_rx'].equipment
@@ -275,7 +297,7 @@ def show_unit_details(R: dict) -> None:
           f"CAPEX={eq.CAPEX_cond:.3f}億円")
     print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
           f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
-          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  ({_feed_label(_sm2, eq.N_feed_kirkbride)})")
 
     # ---- PSA ----
     eq = R['r_psa'].equipment
@@ -291,8 +313,8 @@ def show_unit_details(R: dict) -> None:
 
     # ---- MemPrecool ----
     eq = R['mem_precool'].equipment
-    print(f"  [MemPrecool] Q={eq.Q_duty_kW:+7.0f}kW (顕熱 {eq.Q_sensible_kW:+.0f} + "
-          f"潜熱 {eq.Q_latent_kW:+.0f})  A={eq.A_est_m2:.0f}m²  "
+    print(f"  [MemPrecool] Q={eq.Q_duty_kW:+7.0f}kW (顕熱 {eq.Q_sensible_kW:+.0f}kW + "
+          f"潜熱 {eq.Q_latent_kW:+.0f}kW)  A={eq.A_est_m2:.0f}m²  "
           f"utility={eq.utility_name} ({eq.utility_jpy_per_GJ:.0f}円/GJ)")
 
     # ---- Membrane ----
@@ -315,7 +337,7 @@ def show_unit_details(R: dict) -> None:
           f"CAPEX={eq.CAPEX_cond:.3f}億円")
     print(f"               Reb : Q={eq.Q_reb:6.0f}kW  A={eq.A_reb_m2:6.0f}m²  "
           f"util={eq.reb_utility_name} ({eq.reb_utility_jpy_per_GJ:.0f}円/GJ)  "
-          f"CAPEX={eq.CAPEX_reb:.3f}億円  (N_feed_kirkbride={eq.N_feed_kirkbride})")
+          f"CAPEX={eq.CAPEX_reb:.3f}億円  ({_feed_label(_sm3, eq.N_feed_kirkbride)})")
 
 
 def show_production(R: dict, F_C3H8_feed: float,
@@ -507,6 +529,465 @@ def show_stage2_synthesis(result) -> None:
         print("  (process-process マッチなし: 全ストリームを utility で処理)")
 
 
+def show_heat_balance(result, design) -> None:
+    """プロセス各ストリームの詳細熱収支 + HI ユーティリティ tier 別配分を表示。
+
+    HI (pinch targeting) の入力となる全 hot/cold ストリームを、顕熱・潜熱・相・
+    温度域つきで一覧化し、内部熱回収量とユーティリティ tier 別の熱量・費用を集計する。
+    show_hi_summary (ピンチ点・GCC 指標のみ) を補完する「細かい熱収支」の詳細版。
+
+    extract_streams は run_one_pass の戻り値 (各装置の equipment) から直接 Q を読み取る
+    ため、apply_hi=False でも per-stream の熱収支は表示できる (tier 配分は hi_result が
+    あるときのみ)。
+    """
+    if result.solver is None or result.solver.one_pass is None:
+        return
+    from flowsheet.heat_integration import (
+        extract_streams, get_default_utility_tiers, calc_hi_opex_okuyen,
+    )
+
+    streams = extract_streams(result.solver.one_pass, design.swing.T_in)
+    if not streams:
+        return
+
+    hdr("熱収支 詳細 (プロセスストリーム別 + ユーティリティ tier 配分) [MW]")
+
+    hot  = [s for s in streams if s.is_hot]
+    cold = [s for s in streams if not s.is_hot]
+
+    def _stream_row(s) -> None:
+        # 潜熱区間 (T_in≈T_out の相変化) は温度域を 1 点表記にする
+        if abs(s.T_in_K - s.T_out_K) < 0.05:
+            t_range = f"{s.T_in_K-273.15:>6.1f}(相変化)"
+        else:
+            t_range = f"{s.T_in_K-273.15:>6.1f}→{s.T_out_K-273.15:<6.1f}"
+        fcp = f"{s.F_Cp_kW_per_K:>7.2f}" if s.F_Cp_kW_per_K > 1e-6 else f"{'-':>7}"
+        print(f"    {s.name:<24} {t_range:<14} "
+              f"{s.Q_sensible_kW/1000:>8.3f} {s.Q_latent_kW/1000:>8.3f} "
+              f"{s.Q_total_kW/1000:>8.3f}  {fcp}  {s.phase}")
+
+    hdr_cols = (f"    {'stream':<24} {'T_in→T_out[°C]':<14} "
+                f"{'Q_顕熱[MW]':>8} {'Q_潜熱[MW]':>8} {'Q_合計[MW]':>8}  {'F·Cp':>7}  相")
+    sep_cols = f"    {'-'*24} {'-'*14} {'-'*8} {'-'*8} {'-'*8}  {'-'*7}"
+
+    # ---- 与熱流体 (Hot) ----
+    print(f"  ▼ 与熱流体 Hot (冷却が必要、{len(hot)} 本)  ※F·Cp は kW/K")
+    print(hdr_cols)
+    print(sep_cols)
+    hot_sens = hot_lat = 0.0
+    for s in sorted(hot, key=lambda s: -s.Q_total_kW):
+        _stream_row(s)
+        hot_sens += s.Q_sensible_kW
+        hot_lat  += s.Q_latent_kW
+    hot_total = hot_sens + hot_lat
+    print(sep_cols)
+    print(f"    {'(Hot 小計 = 総冷却要求)':<24} {'':<14} "
+          f"{hot_sens/1000:>8.3f} {hot_lat/1000:>8.3f} {hot_total/1000:>8.3f}")
+
+    # ---- 受熱流体 (Cold) ----
+    print()
+    print(f"  ▼ 受熱流体 Cold (加熱が必要、{len(cold)} 本)")
+    print(hdr_cols)
+    print(sep_cols)
+    cold_sens = cold_lat = 0.0
+    for s in sorted(cold, key=lambda s: -s.Q_total_kW):
+        _stream_row(s)
+        cold_sens += s.Q_sensible_kW
+        cold_lat  += s.Q_latent_kW
+    cold_total = cold_sens + cold_lat
+    print(sep_cols)
+    print(f"    {'(Cold 小計 = 総加熱要求)':<24} {'':<14} "
+          f"{cold_sens/1000:>8.3f} {cold_lat/1000:>8.3f} {cold_total/1000:>8.3f}")
+
+    # ---- HI 内部熱回収 + ユーティリティ tier 別配分 ----
+    hr = result.hi_result
+    if hr is None:
+        print()
+        print(f"  (HI 未適用: 総加熱要求 {cold_total/1000:.3f} MW / 総冷却要求 "
+              f"{hot_total/1000:.3f} MW、内部熱回収なしの生 OPEX で計上)")
+        return
+
+    # 内部熱回収量 (pinch targeting): 回収 = 総要求 − 残ユーティリティ
+    Q_rec_hot  = cold_total - hr.Q_H_min_kW   # cold 側で内部回収された分
+    Q_rec_cold = hot_total  - hr.Q_C_min_kW   # hot  側で内部回収された分 (理論上 Q_rec_hot と一致)
+    heating_tiers, cooling_tiers = get_default_utility_tiers()
+    opex_calc = calc_hi_opex_okuyen(
+        hr, heating_tiers, cooling_tiers, OPERATING_HOURS_PER_YEAR,
+    )
+
+    print()
+    print(f"  ▼ ヒートインテグレーション (pinch targeting, ΔT_min="
+          f"{hr.T_pinch_hot_K - hr.T_pinch_cold_K:.0f}K)")
+    print(f"    総加熱要求       : {cold_total/1000:>8.3f} MW")
+    print(f"    総冷却要求       : {hot_total/1000:>8.3f} MW")
+    print(f"    内部熱回収 (pinch): {Q_rec_hot/1000:>8.3f} MW "
+          f"(冷却側回収 {Q_rec_cold/1000:.3f} MW)")
+    print(f"    残 加熱 Q_H_min  : {hr.Q_H_min_kW/1000:>8.3f} MW (外部熱媒で供給)")
+    print(f"    残 冷却 Q_C_min  : {hr.Q_C_min_kW/1000:>8.3f} MW (外部冷媒で除去)")
+    if not hr.feasible:
+        print(f"    ⚠ HI infeasible: {hr.message}")
+
+    # tier 別配分 (Q [MW] と費用 [億円/年])
+    bd_Q    = hr.utility_breakdown
+    bd_cost = opex_calc.get('breakdown', {})
+    if bd_Q:
+        print()
+        print(f"    {'utility tier':<24} {'Q [MW]':>9} {'費用 [億円/年]':>15}")
+        print(f"    {'-'*24} {'-'*9} {'-'*15}")
+        # 加熱 tier (is_heating) を先、冷却 tier を後で、各々 Q 降順
+        heat_names = {t.name for t in heating_tiers}
+        heat_rows = [(n, q) for n, q in bd_Q.items() if n in heat_names]
+        cool_rows = [(n, q) for n, q in bd_Q.items() if n not in heat_names]
+        for group_label, rows in (('加熱', heat_rows), ('冷却', cool_rows)):
+            for name, q_kW in sorted(rows, key=lambda kv: -kv[1]):
+                cost = bd_cost.get(name, 0.0)
+                print(f"    {('['+group_label+'] '+name):<24} "
+                      f"{q_kW/1000:>9.3f} {cost:>15.4f}")
+        print(f"    {'-'*24} {'-'*9} {'-'*15}")
+        print(f"    {'(熱系 OPEX 合計, HI後)':<24} {'':>9} {opex_calc.get('total', 0.0):>15.4f}")
+        unmatched = opex_calc.get('unmatched', {})
+        if unmatched:
+            print(f"    ⚠ tier 未マッチ (費用未計上): "
+                  f"{', '.join(f'{k}={v/1000:.3f}MW' for k, v in unmatched.items())}")
+
+
+# 完全酸化物基準エンタルピー計算の共有ヘルパ (show_oxide_enthalpy_flows /
+# show_compression_detail / show_recycle_mixing で再利用)。datum = CO2+液H2O @298.15K。
+_OXIDE_TREF_K = 298.15
+_ox_thermo = None
+
+
+def _oxide_enthalpy_parts(F_in: dict, T_K: float):
+    """組成 F_in [kmol/h]・温度 T_K の完全酸化物基準エンタルピー流量。
+
+    Returns (化学[GJ/h], 顕熱[GJ/h], 合計[GJ/h])。
+      化学 = Σ n_i × HHV_i              (datum = CO2 + 液H2O @ 298.15K)
+      顕熱 = Σ n_i × ∫_{298.15K}^{T} Cp_i dT
+    """
+    global _ox_thermo
+    from src.cost_parameters import HHV_MJ_PER_KMOL
+    if _ox_thermo is None:
+        from src.thermo import PDHThermo
+        _ox_thermo = PDHThermo()
+    chem = sens = 0.0
+    for k, n_kmolh in F_in.items():
+        n = float(n_kmolh or 0.0)
+        if n <= 0:
+            continue
+        chem += n * HHV_MJ_PER_KMOL.get(k, 0.0) / 1000.0                              # GJ/h
+        try:
+            sens += n * _ox_thermo.calc_enthalpy_change(k, _OXIDE_TREF_K, T_K) / 1.0e6  # GJ/h
+        except KeyError:
+            pass
+    return chem, sens, chem + sens
+
+
+def show_oxide_enthalpy_flows(result, design=None, config=None) -> None:
+    """完全酸化物基準のエンタルピー流量を詳細表示 [GJ/h]。
+
+    基準状態 (datum): 各元素の完全酸化物 (CO2 ガス + H2O 液) を 298.15 K で 0 とする
+    「完全酸化物基準」。各成分のモルエンタルピーは
+
+        h_i(T) = HHV_i + ∫_{298.15K}^{T} Cp_i dT   [J/mol]
+
+    HHV_i (高位発熱量) = 完全燃焼で放出される熱 = 「酸化物を datum にしたときの化学
+    エンタルピー」。これにストリーム温度までの顕熱を足したものが酸化物基準エンタルピー。
+    ストリーム流量 H = Σ_i n_i × h_i を「化学 (HHV)」「顕熱」「合計」に分けて表示する。
+
+    この基準では反応熱が HHV 差として自動的に含まれる (例: PDH 脱水素
+    C3H8→C3H6+H2 は HHV 2220→2058+286=2344 kJ/mol で +124 kJ/mol = ΔH_rxn と一致、
+    吸熱)。よって反応器・加熱炉を跨いだ系全体のエネルギー収支を Q = ΔH として一貫して
+    追える。プラント境界 (Fresh 入 / 製品・オフガス・燃料 出) の収支も併記する。
+
+    出典: HHV は cost_parameters.HHV_MJ_PER_KMOL (!仮置き 出典確認中、KNOWN_PLACEHOLDERS
+    §A.3 参照)、Cp は THERMO_DATA の多項式 (化工便覧 改訂六版)。
+    """
+    if result.solver is None or result.solver.one_pass is None:
+        return
+    R = result.solver.one_pass
+    _parts = _oxide_enthalpy_parts
+
+    rmem = R['r_mem']
+    rpsa = R['r_psa']
+    # (グループ, ラベル, F_in[kmol/h], T_K)。
+    # 非 ProcessStream の出口は組成 dict と代表温度を組み立てる。
+    #   PSA 製品/オフガス: PSA 操作温度 T_abs=25°C (=298.15K) で出るため顕熱≈0 で近似。
+    rows = [
+        ('入口',    'Fresh LPG (Pump1出口)',        R['pump1'].outlet.F_in,   R['pump1'].outlet.T_in),
+        ('内部',    'Reactor 入口 (Fresh+Recycle)', R['reactor_inlet'].F_in,  R['reactor_inlet'].T_in),
+        ('内部',    'Reactor 出口',                 R['rx_out'].F_in,         R['rx_out'].T_in),
+        ('内部',    'Dist2 塔頂 (→PSA)',            R['r2'].top.F_in,         R['r2'].top.T_in),
+        ('内部',    'Dist2 塔底 (→Mem)',            R['r2'].bottom.F_in,      R['r2'].bottom.T_in),
+        ('内部',    'Mem 透過 (→Dist3)',
+            {'A': rmem.product.F_C3H8, 'B': rmem.product.F_C3H6},            rmem.product.T_out),
+        ('出口',    'C3H6 製品 (Dist3塔頂)',        R['r3'].top.F_in,         R['r3'].top.T_in),
+        ('出口',    'H2 製品 (PSA, ~25°C近似)',     rpsa.product,             298.15),
+        ('出口',    'PSA オフガス (→燃料, ~25°C近似)', rpsa.offgas,           298.15),
+        ('出口',    'Dist1 塔底 (→燃料)',           R['r1'].bottom.F_in,      R['r1'].bottom.T_in),
+        ('Recycle', 'Dist3 塔底 → 反応器',          R['tear_dist3_new'],      R.get('T_d3_new', 298.15)),
+        ('Recycle', 'Mem 保留 → 反応器',            R['tear_mem_new'],        R.get('T_mem_new', 298.15)),
+    ]
+
+    hdr("完全酸化物基準 エンタルピー流量 [GJ/h]  (datum: CO2 + 液H2O @ 298.15K = 0)")
+    print("  h_i(T) = HHV_i + ∫Cp dT(298.15K→T)、H_flow = Σ n_i × h_i  (反応熱は HHV 差に内包)")
+    print()
+    print(f"    {'ストリーム':<26} {'T[°C]':>7} {'F[kmol/h]':>10} "
+          f"{'H_化学[GJ/h]':>10} {'H_顕熱[GJ/h]':>10} {'H_合計[GJ/h]':>11}")
+    print(f"    {'-'*26} {'-'*7} {'-'*10} {'-'*10} {'-'*10} {'-'*11}")
+
+    last_group = None
+    for group, label, F_in, T_K in rows:
+        if group != last_group:
+            print(f"  ▼ {group}")
+            last_group = group
+        chem, sens, tot = _parts(F_in, T_K)
+        F_tot = sum(float(v or 0.0) for v in F_in.values())
+        print(f"    {label:<26} {T_K-273.15:>7.1f} {F_tot:>10.1f} "
+              f"{chem:>10.2f} {sens:>+10.2f} {tot:>11.2f}")
+
+    # ---- プラント境界収支 (Recycle は内部ループなので除外) ----
+    H_in = _parts(R['pump1'].outlet.F_in, R['pump1'].outlet.T_in)
+    out_streams = [
+        ('C3H6 製品', R['r3'].top.F_in,  R['r3'].top.T_in),
+        ('H2 製品',   rpsa.product,      298.15),
+        ('オフガス',  rpsa.offgas,       298.15),
+        ('Dist1塔底', R['r1'].bottom.F_in, R['r1'].bottom.T_in),
+    ]
+    out_chem = out_sens = out_tot = 0.0
+    for _, F_in, T_K in out_streams:
+        c, s, t = _parts(F_in, T_K)
+        out_chem += c; out_sens += s; out_tot += t
+
+    print()
+    print(f"  ─ プラント境界 エンタルピー収支 (完全酸化物基準、Recycle 除く) ─")
+    print(f"    {'':<22} {'H_化学':>10} {'H_顕熱':>9} {'H_合計':>11}  [GJ/h]")
+    print(f"    {'入  (Fresh LPG)':<22} {H_in[0]:>10.2f} {H_in[1]:>+9.2f} {H_in[2]:>11.2f}")
+    print(f"    {'出  (製品+H2+OG+塔底)':<22} {out_chem:>10.2f} {out_sens:>+9.2f} {out_tot:>11.2f}")
+    print(f"    {'ΔH (出 − 入)':<22} {out_chem-H_in[0]:>+10.2f} "
+          f"{out_sens-H_in[1]:>+9.2f} {out_tot-H_in[2]:>+11.2f}")
+    print(f"      ・ΔH_化学 > 0 = 反応で化学エンタルピー増 (PDH 脱水素は吸熱、加熱炉が供給)")
+    print(f"      ・ΔH_合計 = 系へ正味で投入される熱+仕事に相当 (Q_利用・圧縮仕事と対応)")
+    print(f"      ・HHV は !仮置き 値のため絶対量は暫定 (相対比較・収支検算に使用)")
+
+
+def show_process_stream_table(result, design, config=None) -> None:
+    """全ノード材料ストリーム表: 状態が変わる全ての点を T・P・組成・相・エンタルピー流量で記録。
+
+    フローシートを工程順に辿り、状態変化が起きる**すべてのノード**を 1 行ずつ出す
+    (HYSYS の material stream table 相当)。特に Dist2 塔底→膜 の区間は JT 減圧・気化・
+    フィード圧縮機・膜・製品圧縮機・製品冷却器と状態変化が連続するため、その中間状態も
+    すべて展開する。膜内部の圧縮機段の中間状態は equipment が保持する温度から復元する。
+
+    列: ノード / 相 / T[°C] / P[bar] / F合計 / 各成分流量[kmol/h] / H_合計[GJ/h] (完全酸化物基準)。
+    相は工程位置から既知のものをラベル付け (* = 膨張弁の気相モデル前提。液/二相の可能性あり)。
+    """
+    if result.solver is None or result.solver.one_pass is None:
+        return
+    R = result.solver.one_pass
+    ORDER = ['A', 'B', 'C', 'D', 'E', 'F', 'Z']
+    SHORT = {'A': 'C3H8', 'B': 'C3H6', 'C': 'H2', 'D': 'C2H4',
+             'E': 'CH4', 'F': 'C2H6', 'Z': 'C4H10'}
+
+    rmem = R['r_mem']
+    meq  = rmem.equipment
+    mem  = design.mem
+    P_psa = R['r2'].top.P_in   # PSA は Dist2 塔頂圧で運転 (製品/オフガスの代表圧)
+
+    # 膜内部ノードの復元 (membrane_system は中間ストリームを返さないので equipment から再構成)
+    #   フィード圧縮機 出口  : 組成=retentate+product(C3), T=retentate.T_out, P=P_H
+    #   膜 非透過(retentate) : 組成=retentate,            T=retentate.T_out, P=P_H
+    #   膜 透過(permeate)    : 組成=product,              T=retentate.T_out(等温), P=P_L
+    #   製品圧縮機 出口      : 組成=product,              T=T_cond_in_K,     P=P_dist
+    #   製品冷却器 出口(=製品): 組成=product,             T=product.T_out,   P=P_dist
+    mem_feedcomp_F = {'A': rmem.retentate.F_C3H8 + rmem.product.F_C3H8,
+                      'B': rmem.retentate.F_C3H6 + rmem.product.F_C3H6}
+    mem_ret_F      = {'A': rmem.retentate.F_C3H8, 'B': rmem.retentate.F_C3H6}
+    mem_perm_F     = {'A': rmem.product.F_C3H8,   'B': rmem.product.F_C3H6}
+
+    # Fresh LPG (Pump1 入口) は config から復元。config 無ければ Pump1 出口で代用。
+    if config is not None:
+        fresh_node = ('原料', 'Fresh LPG (Pump1入口)', '液',
+                      R['pump1'].outlet.F_in, config.feed.T_K, config.feed.P_Pa)
+    else:
+        fresh_node = ('原料', 'Fresh LPG (≈Pump1入口)', '液',
+                      R['pump1'].outlet.F_in, R['pump1'].outlet.T_in, R['pump1'].outlet.P_in)
+
+    # (セクション, ラベル, 相, F_in, T_K, P_Pa)
+    nodes = [
+        fresh_node,
+        ('原料',    'Pump1 出口 (→Dist1)',      '液',   R['pump1'].outlet.F_in,   R['pump1'].outlet.T_in,  R['pump1'].outlet.P_in),
+        ('Dist1',   'Dist1 塔頂 (C3)',          '液',   R['r1'].top.F_in,         R['r1'].top.T_in,        R['r1'].top.P_in),
+        ('Dist1',   'Dist1 塔頂 膨張後 (→Rx)',  '気*',  R['dist1_top_rx'].F_in,   R['dist1_top_rx'].T_in,  R['dist1_top_rx'].P_in),
+        ('Dist1',   'Dist1 塔底 (→燃料)',       '液',   R['r1'].bottom.F_in,      R['r1'].bottom.T_in,     R['r1'].bottom.P_in),
+        ('Recycle', 'Dist3 塔底 recycle 膨張後','気*',  R['recycle_dist3'].F_in,  R['recycle_dist3'].T_in, R['recycle_dist3'].P_in),
+        ('Recycle', 'Mem 保留 recycle 膨張後',  '気',   R['recycle_mem'].F_in,    R['recycle_mem'].T_in,   R['recycle_mem'].P_in),
+        ('Reactor', 'Reactor 入口 (合流後)',    '気',   R['reactor_inlet'].F_in,  R['reactor_inlet'].T_in, R['reactor_inlet'].P_in),
+        ('Reactor', 'Reactor 出口',             '気',   R['rx_out'].F_in,         R['rx_out'].T_in,        R['rx_out'].P_in),
+        ('Comp2',   'Cooler 出口',              '気',   R['cooled'].outlet.F_in,    R['cooled'].outlet.T_in,    R['cooled'].outlet.P_in),
+        ('Comp2',   'Comp2a 出口',              '気',   R['comp2a'].outlet.F_in,    R['comp2a'].outlet.T_in,    R['comp2a'].outlet.P_in),
+        ('Comp2',   'Intercool 出口',           '気',   R['intercool'].outlet.F_in, R['intercool'].outlet.T_in, R['intercool'].outlet.P_in),
+        ('Comp2',   'Comp2b 出口',              '気',   R['comp2b'].outlet.F_in,    R['comp2b'].outlet.T_in,    R['comp2b'].outlet.P_in),
+        ('Comp2',   'Desuper 出口 (→Dist2)',    '気',   R['desuper'].outlet.F_in,   R['desuper'].outlet.T_in,   R['desuper'].outlet.P_in),
+        ('Dist2',   'Dist2 塔頂 (→PSA)',        '気',   R['r2'].top.F_in,         R['r2'].top.T_in,        R['r2'].top.P_in),
+        ('PSA',     'PSA 製品 H2 (~25°C近似)',  '気',   R['r_psa'].product,       298.15,                  P_psa),
+        ('PSA',     'PSA オフガス (~25°C近似)', '気',   R['r_psa'].offgas,        298.15,                  P_psa),
+        ('Dist2→Mem', 'Dist2 塔底',             '液',   R['r2'].bottom.F_in,      R['r2'].bottom.T_in,     R['r2'].bottom.P_in),
+        ('Dist2→Mem', '塔底 JT減圧 (→P_H)',     '液',   R['mem_feed_letdown'].F_in, R['mem_feed_letdown'].T_in, R['mem_feed_letdown'].P_in),
+        ('Dist2→Mem', 'MemPrecool 出口 (気化)', '気',   R['mem_precool'].outlet.F_in, R['mem_precool'].outlet.T_in, R['mem_precool'].outlet.P_in),
+        ('Dist2→Mem', 'Mem フィード圧縮機 出口','気',   mem_feedcomp_F,           rmem.retentate.T_out,    mem.P_H),
+        ('Dist2→Mem', 'Mem 非透過 (→Recycle)',  '気',   mem_ret_F,                rmem.retentate.T_out,    mem.P_H),
+        ('Dist2→Mem', 'Mem 透過 (P_L)',         '気',   mem_perm_F,               rmem.retentate.T_out,    mem.P_L),
+        ('Dist2→Mem', 'Mem 製品圧縮機 出口',    '気',   mem_perm_F,               meq.T_cond_in_K,         mem.P_dist),
+        ('Dist2→Mem', 'Mem 製品冷却器 出口(→D3)','液',  mem_perm_F,               rmem.product.T_out,      mem.P_dist),
+        ('Dist3',   'Dist3 塔頂 (C3H6 製品)',   '液',   R['r3'].top.F_in,         R['r3'].top.T_in,        R['r3'].top.P_in),
+        ('Dist3',   'Dist3 塔底 (→Recycle)',    '液',   R['r3'].bottom.F_in,      R['r3'].bottom.T_in,     R['r3'].bottom.P_in),
+    ]
+
+    hdr("全ノード 材料ストリーム表 (状態変化を全て記録)  成分流量 [kmol/h]、H=完全酸化物基準 [GJ/h]")
+    comp_hdr = ' '.join(f"{SHORT[k]:>7}" for k in ORDER)
+    print(f"  {'ノード':<26} {'相':>3} {'T[°C]':>7} {'P[bar]':>7} {'F計':>8}  {comp_hdr}  {'H[GJ/h]':>9}")
+    print(f"  {'-'*26} {'-'*3} {'-'*7} {'-'*7} {'-'*8}  {'-'*(8*len(ORDER))}  {'-'*9}")
+
+    last_sec = None
+    for sec, label, phase, F_in, T_K, P_Pa in nodes:
+        if sec != last_sec:
+            print(f"  ── {sec} " + "─" * max(0, 60 - len(sec)))
+            last_sec = sec
+        F_tot = sum(float(F_in.get(k, 0.0) or 0.0) for k in ORDER)
+        comps = ' '.join(f"{float(F_in.get(k, 0.0) or 0.0):>7.1f}" for k in ORDER)
+        _, _, h = _oxide_enthalpy_parts(F_in, T_K)
+        print(f"  {label:<26} {phase:>3} {T_K-273.15:>7.1f} {P_Pa/1e5:>7.3f} {F_tot:>8.1f}  "
+              f"{comps}  {h:>9.1f}")
+
+    print(f"  {'-'*26}")
+    print("  注) 相: * = 膨張弁を気相モデルで通過 (実際は液/二相で出る可能性、別途協議中)。")
+    print("      PSA 製品/オフガスは出口温度を持たないため T_abs=25°C で近似。")
+    print("      Mem 内部 (フィード/製品圧縮機・膜) は equipment 保持温度から復元 (中間段の per-stage 状態は非保持)。")
+
+
+def show_compression_detail(result, design) -> None:
+    """多段圧縮系の詳細: 各段前後の温度・圧力・エンタルピー流量と、段間/前後の熱・仕事。
+
+    対象:
+      ▼ Comp2 系列 (反応器出口 0.5bar → Dist2 供給): Cooler→Comp2a→Intercool→Comp2b→
+        Desuper の各ノードの T/P/H_合計 と、各ユニットの Q(冷却) / W(圧縮)。
+        段間冷却 (Intercool) を挟む 2 段圧縮なので「圧縮機の間及び前後」が一望できる。
+      ▼ 膜 圧縮機: フィード圧縮機 (feed.P→P_H) と 製品圧縮機 (P_L→P_dist)。各々 in/out の
+        T/P/H・W・段数、段間冷却 (多段時) の Q/A/温度域。膜内部の多段は集約値で表示
+        (per-stage の中間状態はモデルが保持しないため n_stages と合計で記述)。
+
+    エンタルピー流量は完全酸化物基準 [GJ/h]。組成一定区間では H_合計差 = 顕熱差 で、
+    圧縮機は ΔH ≈ +W、冷却器は ΔH ≈ −Q の検算ができる (1 kW = 3.6e-3 GJ/h)。
+    """
+    if result.solver is None or result.solver.one_pass is None:
+        return
+    R = result.solver.one_pass
+
+    hdr("多段圧縮系 詳細 (T・P・エンタルピー流量・熱/仕事)")
+
+    # ---- Comp2 系列 (反応器出口 → Dist2) ----
+    print("  ▼ Comp2 系列 (反応器出口 → Dist2 供給、段間冷却付き 2 段圧縮)")
+    print(f"    {'ノード(出口)':<22} {'T[°C]':>7} {'P[bar]':>7} {'H_合計[GJ/h]':>13}   "
+          f"{'直前ユニット':<13} {'Q/W[kW]':>10}")
+    print(f"    {'-'*22} {'-'*7} {'-'*7} {'-'*13}   {'-'*13} {'-'*10}")
+
+    def _comp_node(label, stream, unit, duty_kW):
+        _, _, h = _oxide_enthalpy_parts(stream.F_in, stream.T_in)
+        duty_s = '' if unit is None else f"{duty_kW:>+10.0f}"
+        unit_s = '' if unit is None else unit
+        print(f"    {label:<22} {stream.T_in-273.15:>7.1f} {stream.P_in/1e5:>7.3f} "
+              f"{h:>13.2f}   {unit_s:<13} {duty_s}")
+
+    _comp_node('Reactor 出口',         R['rx_out'],           None,          0.0)
+    _comp_node('Cooler 出口',          R['cooled'].outlet,    'Cooler (冷)',   R['cooled'].equipment.Q_duty_kW)
+    _comp_node('Comp2a 出口',          R['comp2a'].outlet,    'Comp2a (圧)',   R['comp2a'].equipment.W_kW)
+    _comp_node('Intercool 出口',       R['intercool'].outlet, 'Intercool (冷)', R['intercool'].equipment.Q_duty_kW)
+    _comp_node('Comp2b 出口',          R['comp2b'].outlet,    'Comp2b (圧)',   R['comp2b'].equipment.W_kW)
+    _comp_node('Desuper 出口(→Dist2)', R['desuper'].outlet,   'Desuper (冷)',  R['desuper'].equipment.Q_duty_kW)
+    W_comp2 = R['comp2a'].equipment.W_kW + R['comp2b'].equipment.W_kW
+    P_in  = R['rx_out'].P_in
+    P_mid = R['comp2a'].outlet.P_in
+    P_out = R['desuper'].outlet.P_in
+    print(f"    → Comp2 合計圧縮仕事 W = {W_comp2:,.0f} kW、総圧縮比 {P_out/P_in:.1f}:1 "
+          f"(段間 {P_in/1e5:.2f}→{P_mid/1e5:.2f}→{P_out/1e5:.2f} bar)")
+
+    # ---- 膜 圧縮機 ----
+    rmem = R['r_mem']
+    meq  = rmem.equipment
+    mem  = design.mem
+    mp_out = R['mem_precool'].outlet
+    print()
+    print("  ▼ 膜 圧縮機 (フィード圧縮機 + 製品圧縮機、多段時は段間冷却)")
+
+    # フィード圧縮機: mem_precool 出口 (≈P_H へ JT 減圧済の C3 ガス) → P_H
+    feed_F = {'A': rmem.retentate.F_C3H8 + rmem.product.F_C3H8,
+              'B': rmem.retentate.F_C3H6 + rmem.product.F_C3H6}
+    _, _, h_fin  = _oxide_enthalpy_parts(feed_F, mp_out.T_in)
+    _, _, h_fout = _oxide_enthalpy_parts(feed_F, rmem.retentate.T_out)
+    print(f"    [フィード圧縮機] {meq.n_stages_feed} 段  W={meq.W_feed_kW:,.0f} kW")
+    print(f"      in : T={mp_out.T_in-273.15:>7.1f}°C  P={mp_out.P_in/1e5:>7.3f} bar  H={h_fin:>10.2f} GJ/h")
+    print(f"      out: T={rmem.retentate.T_out-273.15:>7.1f}°C  P={mem.P_H/1e5:>7.3f} bar  H={h_fout:>10.2f} GJ/h")
+
+    # 製品圧縮機: 透過ガス P_L (1atm) → P_dist (Dist3 圧)。膜は等温 → in T = フィード圧縮機 out T。
+    prod_F = {'A': rmem.product.F_C3H8, 'B': rmem.product.F_C3H6}
+    _, _, h_pin  = _oxide_enthalpy_parts(prod_F, rmem.retentate.T_out)
+    _, _, h_pout = _oxide_enthalpy_parts(prod_F, meq.T_cond_in_K)
+    print(f"    [製品圧縮機]   {meq.n_stages_prod} 段  W={meq.W_prod_kW:,.0f} kW")
+    print(f"      in : T={rmem.retentate.T_out-273.15:>7.1f}°C  P={mem.P_L/1e5:>7.3f} bar  H={h_pin:>10.2f} GJ/h")
+    print(f"      out: T={meq.T_cond_in_K-273.15:>7.1f}°C  P={mem.P_dist/1e5:>7.3f} bar  H={h_pout:>10.2f} GJ/h")
+
+    if meq.Q_intercool_kW > 1e-6:
+        print(f"    [段間冷却] Q={meq.Q_intercool_kW:,.0f} kW  A={meq.A_intercool_m2:.0f} m²  "
+              f"T {meq.T_intercool_in_K-273.15:.1f}→{meq.T_intercool_out_K-273.15:.1f}°C (feed+prod 合計)")
+    else:
+        print(f"    [段間冷却] なし (単段)")
+
+
+def show_recycle_mixing(result, design=None) -> None:
+    """リサイクル合流前後の圧力・温度・エンタルピー流量。
+
+    反応器入口 mixer の「前」(Dist1 塔頂 C3 + Dist3 塔底 recycle + Mem 保留 recycle、
+    いずれも膨張弁で反応器圧 0.5bar に減圧済) と「後」(reactor_inlet) を
+    T/P/F/H_合計 で対比する。エンタルピー流量は完全酸化物基準 [GJ/h]。mixer は断熱合流
+    (ΔH≈0、温度は成分別 Cp 加重平均) なので ΔH≈0 が収支検算になる。
+    """
+    if result.solver is None or result.solver.one_pass is None:
+        return
+    R = result.solver.one_pass
+    # recycle_dist3/recycle_mem は run_one_pass 成功時のみ result に格納される。
+    rd3  = R.get('recycle_dist3')
+    rmem = R.get('recycle_mem')
+    if rd3 is None or rmem is None:
+        return
+
+    hdr("リサイクル合流 詳細 (反応器入口 mixer 前後: T・P・エンタルピー流量)")
+    print(f"    {'ストリーム':<26} {'T[°C]':>7} {'P[bar]':>7} {'F[kmol/h]':>10} {'H_合計[GJ/h]':>13}")
+    print(f"    {'-'*26} {'-'*7} {'-'*7} {'-'*10} {'-'*13}")
+
+    def _row(label, s):
+        _, _, h = _oxide_enthalpy_parts(s.F_in, s.T_in)
+        F = sum(float(v or 0.0) for v in s.F_in.values())
+        print(f"    {label:<26} {s.T_in-273.15:>7.1f} {s.P_in/1e5:>7.3f} {F:>10.1f} {h:>13.2f}")
+
+    print("  ▼ 合流前 (各々 膨張弁で反応器圧 0.5bar に減圧済)")
+    before = [
+        ('Dist1 塔頂 C3 (Fresh 分)', R['dist1_top_rx']),
+        ('Dist3 塔底 recycle',       rd3),
+        ('Mem 保留 recycle',         rmem),
+    ]
+    for label, s in before:
+        _row(label, s)
+    h_before = sum(_oxide_enthalpy_parts(s.F_in, s.T_in)[2] for _, s in before)
+    F_before = sum(sum(float(v or 0.0) for v in s.F_in.values()) for _, s in before)
+    print(f"    {'(合流前 合計)':<26} {'':>7} {'':>7} {F_before:>10.1f} {h_before:>13.2f}")
+
+    print("  ▼ 合流後")
+    _row('Reactor 入口 (mixed)', R['reactor_inlet'])
+    _, _, h_after = _oxide_enthalpy_parts(R['reactor_inlet'].F_in, R['reactor_inlet'].T_in)
+    print(f"    ΔH (後 − 前) = {h_after - h_before:+.3f} GJ/h  "
+          f"(mixer 断熱合流のため理論上 ≈ 0、組成も保存)")
+
+
 def show_tac_summary(result, C3H6_product: float) -> None:
     """raw / HI 後 / Stage 2 後の TAC・Profit を 1 つの表に統合して表示。
 
@@ -644,7 +1125,9 @@ def display_full_results(result, design, config) -> None:
     C3H6_product = R['r3'].top.F_in.get('B', 0.0)
 
     show_streams_overview(R, F_C3H8_feed, F_C4H10_feed, config)
-    show_unit_details(R)
+    # 全ノード材料ストリーム表 (状態変化を全て記録: T/P/組成/相/エンタルピー流量)
+    show_process_stream_table(result, design, config)
+    show_unit_details(R, design)
     show_production(R, F_C3H8_feed, F_C4H10_feed, config)
     show_capex(result.economics)
     show_opex(result.economics)
@@ -652,6 +1135,14 @@ def display_full_results(result, design, config) -> None:
     show_specs(result.specs, result.failure_reason, config)
     # HI と Stage 2 の物理メタデータ (pinch / HEN 構成) を先に表示
     show_hi_summary(result)
+    # 細かい熱収支 (プロセスストリーム別の顕熱/潜熱 + ユーティリティ tier 別配分)
+    show_heat_balance(result, design)
+    # 完全酸化物基準のエンタルピー流量 (化学(HHV)+顕熱、反応熱込みの系全体収支)
+    show_oxide_enthalpy_flows(result, design, config)
+    # 多段圧縮系 (Comp2 系列・膜圧縮機) の段前後・段間の T/P/H/熱/仕事
+    show_compression_detail(result, design)
+    # リサイクル合流前後の T/P/エンタルピー流量
+    show_recycle_mixing(result, design)
     show_stage2_synthesis(result)
     # raw/HI/Stage 2 を 1 表で比較 (中間サマリ)
     show_tac_summary(result, C3H6_product)

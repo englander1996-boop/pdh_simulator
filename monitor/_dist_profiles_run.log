@@ -1,0 +1,66 @@
+HsysRegistry root=Z:\pdh_simulator\hysys_cases
+  column1: 31件, 30〜60
+  column2: 66件, 15〜80
+  column3: 132件, 69〜200
+
+######## dist1  HSC=Z:\pdh_simulator\hysys_cases\column1\36.hsc  ########
+   success=False  msg=Column1 COM エラー: com_error: (-2147352567, '例外が発生しました。', (0, None, None, None, 0, -2147024891), None)
+Traceback (most recent call last):
+  File "Z:\pdh_simulator\units\vle\hysys\adapters\column1.py", line 86, in run
+    write_feed_temperature(feed, spec.feed_temperature_c)
+    ~~~~~~~~~~~~~~~~~~~~~~^
+   top: T=0.00C F=0.0 x={}
+   bot: T=0.00C F=0.0 x={}
+   !! 未収束 — プロファイル抽出スキップ
+
+######## dist2  HSC=Z:\pdh_simulator\hysys_cases\column2\61.hsc  ########
+   success=True  msg=
+   top: T=-82.20C F=1480.6 x={'A': 1.6062767982583365e-15, 'B': 5.891673774654107e-14, 'C': 0.6059030456021585, 'D': 0.008374982636641303, 'E': 0.19701473263104652, 'F': 0.18870723913009313, 'Z': 0.0}
+   bot: T=12.72C F=5449.5 x={'A': 0.3934856406860619, 'B': 0.6065143588096549, 'C': 1.2390257009395247e-30, 'D': 2.0782167294567342e-17, 'E': 1.037476799918824e-30, 'F': 5.042831232376347e-10, 'Z': 0.0}
+
+===== PROBE dist2 (N=61) =====
+[Operations] count=3
+   [0] Name='Main Tower' Class=traysection NumberOfStages=61 NumberOfTrays=61
+   [1] Name='Condenser' Class=partialcondenser 
+   [2] Name='Reboiler' Class=bpreboiler 
+[MaterialStreams] count=8: ['Reflux', 'To Condenser', 'Boilup', 'To Reboiler', 'bottom', 'Feed', 'topv', 'topl']
+[FeedStreams] count=3: ['Qc', 'Feed', 'Qr']
+[ProductStreams] 取得不可: <unknown>.ProductStreams
+--- accessor scan on Operations.Item(0) ---
+   NumberOfStages: scalar=61
+   NumberOfTrays: scalar=61
+--- accessor scan on col ---
+--- accessor scan on ColumnFlowsheet ---
+   Temperatures: scalar=(-82.2023298268187, -45.45687318231103, -42.15807975569862, -41.751919714997484, -41.66922831299797, -41.6378775720371, -41.621374210191846, -41.61184836310798, -41.606238161528495, -41.60292059202138, -41.60095693598322, -41.599793412754394, -41.59910092562609, -41.598680636727096, -41.59840408238199, -41.59816664598242, -41.597830559983265, -41.59711286853826, -41.59531077360819, -41.59058418380485, -41.578051973450215, -41.544722613886506, -41.456002950022054, -41.219958231723496, -40.594427389830884, -38.96204125225623, -34.92842494350103, -26.49178066085426, -14.195407301870773, -2.9561639483735576, 7.767283066620962, 8.968927170989275, 10.360770435176448, 11.210873700860077, 11.70608861702408, 11.990591529675726, 12.152719573727325, 12.244650978969275, 12.296628318916646, 12.325971863815482, 12.342530365639846, 12.351881874127969, 12.357179971654887, 12.360207866069516, 12.36197705048022, 12.36306675047274, 12.363816875022678, 12.364438801625624, 12.365080719415516, 12.365868702096236, 12.366936079252525, 12.368449109061032, 12.370634811656203, 12.373816253163795, 12.378461200843503, 12.385251851399971, 12.395186498399141, 12.409729103213238, 12.431030866324932, 12.462263048321404, 12.508176691379333, 12.577304808252904, 12.715760226579732)
+   Pressures: scalar=(788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113, 788.1113)
+===== /PROBE =====
+
+   [extract] T_src=None (len=0), P_src=None (len=0)
+   [csv] Z:\pdh_simulator\monitor\prof_dist2.csv  (61 段)
+
+######## dist3  HSC=Z:\pdh_simulator\hysys_cases\column3\117.hsc  ########
+
+!!!! dist3 で例外: HysysConnectionError: HSC オープン失敗: Z:\pdh_simulator\hysys_cases\column3\117.hsc: (-2147417851, 'サーバーによって例外が返されました。', None, None)
+Traceback (most recent call last):
+  File "Z:\pdh_simulator\units\vle\hysys\session.py", line 590, in __enter__
+    self._case = self._app.SimulationCases.Open(str(self.hsc_path))
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "<COMObject <unknown>>", line 2, in Open
+pywintypes.com_error: (-2147417851, 'サーバーによって例外が返されました。', None, None)
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "Z:\pdh_simulator\tools\_run_dist_profiles.py", line 273, in <module>
+    run_one_column(nm, do_probe=True)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "Z:\pdh_simulator\tools\_run_dist_profiles.py", line 237, in run_one_column
+    with HysysSession(hsc, visible=False) as sess:
+         ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "Z:\pdh_simulator\units\vle\hysys\session.py", line 593, in __enter__
+    raise HysysConnectionError(
+        f"HSC オープン失敗: {self.hsc_path}: {e}"
+    ) from e
+units.vle.hysys.session.HysysConnectionError: HSC オープン失敗: Z:\pdh_simulator\hysys_cases\column3\117.hsc: (-2147417851, 'サーバーによって例外が返されました。', None, None)
+
+==== DONE ====

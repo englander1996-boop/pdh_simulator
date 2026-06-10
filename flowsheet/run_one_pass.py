@@ -1065,8 +1065,15 @@ def run_one_pass(
     )
     result = dict(
         pump1=pump1, r1=r1, dist1_top_rx=dist1_top_rx,
+        # リサイクル合流前の膨張弁出口ストリーム (反応器圧 0.5bar に減圧済)。
+        # 表示 (simulation.display.show_recycle_mixing) で mixer 前後の T/P/エンタルピー
+        # 流量を出すために成功時 result に格納する (BO 評価では参照されない)。
+        recycle_dist3=recycle_dist3, recycle_mem=recycle_mem,
         reactor_inlet=reactor_inlet,
         r_rx=r_rx, rx_out=rx_out,
+        # Dist2 塔底 → 膜 の中間ノード (P>P_H のとき JT で P_H へ減圧した塔底液)。
+        # 表示 (show_process_stream_table) で Mem 前の状態変化を追えるよう成功時 result に格納。
+        mem_feed_letdown=r2_bottom_for_mem,
         cooled=cooled,
         comp2a=comp2a, intercool=intercool, comp2b=comp2b,
         desuper=desuper,

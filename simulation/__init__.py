@@ -14,7 +14,9 @@ simulation モジュール — exp 用の定型処理 (結果表示など) を�
 from simulation.display import (
     display_full_results, hdr, show_stream,
     show_input_snapshot,
-    show_hi_summary, show_stage2_synthesis,
+    show_hi_summary, show_heat_balance, show_oxide_enthalpy_flows,
+    show_process_stream_table, show_compression_detail, show_recycle_mixing,
+    show_stage2_synthesis,
     show_final_summary_box,
 )
 from simulation.exp_runner import (
@@ -27,6 +29,11 @@ __all__ = [
     'show_stream',
     'show_input_snapshot',
     'show_hi_summary',
+    'show_heat_balance',
+    'show_oxide_enthalpy_flows',
+    'show_process_stream_table',
+    'show_compression_detail',
+    'show_recycle_mixing',
     'show_stage2_synthesis',
     'show_final_summary_box',
     # exp_runner
